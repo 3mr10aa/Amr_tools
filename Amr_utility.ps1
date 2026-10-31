@@ -5,8 +5,12 @@ Windows 10/11 | Windows PowerShell 5.1 | WPF | Administrator
 Developer: عمرو أحمد عبد الفتاح | Phone: 01014716301 | Email: 3mr10aa@gmail.com
 #>
 
-# --- AUTO-ELEVATION TO ADMINISTRATOR ---
-if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+# --- 0. AUTO-ELEVATION TO ADMINISTRATOR ---
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = New-Object Security.Principal.WindowsPrincipal($identity)
+$isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+if (-not $isAdmin) {
     try {
         Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"irm https://raw.githubusercontent.com/3mr10aa/Amr_tools/main/Amr_utility.ps1 | iex`"" -Verb RunAs
     } catch {
@@ -19,7 +23,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 [CmdletBinding()]
 param()
 
-# --- 0. Force STA Mode for WPF Stability & Prevent Freeze ---
+# --- 1. Force STA Mode for WPF Stability & Prevent Freeze ---
 if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') {
     powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -Command "& '$PSCommandPath'"
     exit
@@ -27,19 +31,6 @@ if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') {
 
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
-
-# --- 1. Admin Privilege Check ---
-function Test-AMRAdmin {
-    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
-    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-}
-
-if (-not (Test-AMRAdmin)) {
-    Write-Warning "Administrator privileges required. Please run PowerShell as Administrator."
-    Start-Sleep -Seconds 3
-    exit
-}
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml
 Add-Type -AssemblyName System.Windows.Forms
@@ -1640,7 +1631,7 @@ foreach ($app in $Apps) {
         $installerAttempted = $true
     }
 
-    # Tier 2: Chocolatey (Only if Tier 1 did not complete, installer was not attempted/failed in Tier 1, and Action is NOT Repair)
+    # Tier 2: Chocolatey
     if (-not $done -and -not $installerAttempted -and $ActionCommand -ne "repair") {
         $chocoAction = if ($ActionCommand -eq "upgrade") { "upgrade" } else { "install" }
         $chocoResult = Install-ViaChocolatey -ChocoId $chocoId -Action $chocoAction -Interactive:$Interactive -BasePercent $appBasePercent
@@ -1658,7 +1649,7 @@ foreach ($app in $Apps) {
         }
     }
 
-    # Tier 3: Direct Download (Only for 'install' command, and ONLY if no installer was attempted/failed in previous tiers)
+    # Tier 3: Direct Download
     if (-not $done -and -not $installerAttempted -and $ActionCommand -eq "install") {
         $directResult = Install-ViaDirectDownload -AppName $name -Url ([string]$app.DirectUrl) `
             -InstallerArgs ([string]$app.DirectArgs) -ExpectedPublisher ([string]$app.Publisher) `
@@ -1862,7 +1853,6 @@ function Execute-SmartMultiTierInstallAsync {
         [void]$script:InstallPowerShell.AddArgument($script:DownloadDir)
         [void]$script:InstallPowerShell.AddArgument($script:InstallLogQueue)
 
-        # Native PowerShell 5.1 BeginInvoke call (No parameter overload conflict)
         $script:InstallAsyncResult = $script:InstallPowerShell.BeginInvoke()
 
         $script:InstallTimer = New-Object System.Windows.Threading.DispatcherTimer
