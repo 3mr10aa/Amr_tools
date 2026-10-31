@@ -4,6 +4,18 @@ Amr | windows_utility - V0.1
 Windows 10/11 | Windows PowerShell 5.1 | WPF | Administrator
 Developer: عمرو أحمد عبد الفتاح | Phone: 01014716301 | Email: 3mr10aa@gmail.com
 #>
+
+# --- AUTO-ELEVATION TO ADMINISTRATOR ---
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    try {
+        Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"irm https://raw.githubusercontent.com/3mr10aa/Amr_tools/main/Amr_utility.ps1 | iex`"" -Verb RunAs
+    } catch {
+        Write-Host "Elevated permissions required to run this script." -ForegroundColor Red
+        Read-Host "Press Enter to exit..."
+    }
+    exit
+}
+
 [CmdletBinding()]
 param()
 
@@ -2151,7 +2163,12 @@ function Execute-SmartMultiTierInstallAsync {
 (C 'UtilSysInfoBtn').Add_Click({ Start-Process "msinfo32.exe" })
 
 # --- 9. Launch Suite ---
-Write-AMRLog 'Amr | windows_utility V0.1 initialized.' INFO System
-Refresh-AMROverview
-Write-AMRLog 'Utility Ready.' SUCCESS System
-[void]$script:Window.ShowDialog()
+try {
+    Write-AMRLog 'Amr | windows_utility V0.1 initialized.' INFO System
+    Refresh-AMROverview
+    Write-AMRLog 'Utility Ready.' SUCCESS System
+    [void]$script:Window.ShowDialog()
+} catch {
+    Write-Host "An error occurred while launching the GUI: $_" -ForegroundColor Red
+    Read-Host "Press Enter to exit..."
+}
