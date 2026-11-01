@@ -24,7 +24,6 @@ function Test-AMRAdmin {
 }
 
 if (-not (Test-AMRAdmin)) {
-    # طلب صلاحيات المسؤول وإعادة تشغيل السكربت
     Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -STA -File `"$PSCommandPath`"" -Verb RunAs
     exit
 }
@@ -878,4 +877,1276 @@ $RawApps | ForEach-Object {
      <StackPanel>
       <TextBlock Text="System Restore &amp; Registry Backup" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,0,0,20"/>
       <Button Name="BackupCreateRestorePointBtn" Content="💾 Create System Restore Point Now" Width="350" HorizontalAlignment="Left" Margin="0,0,0,15"/>
-      <Button Name="BackupRegistryBtn" Content="💾 Export Safety Registry Backup" Width="350"
+      <Button Name="BackupRegistryBtn" Content="💾 Export Safety Registry Backup" Width="350" HorizontalAlignment="Left" Margin="0,0,0,15"/>
+     </StackPanel>
+    </Border>
+   </TabItem>
+
+   <!-- 10. UTILITIES -->
+   <TabItem Header="Utilities">
+    <Border Padding="20">
+     <StackPanel>
+      <TextBlock Text="Quick Administration Utilities" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,0,0,20"/>
+      <WrapPanel Orientation="Horizontal">
+       <Button Name="UtilControlPanelBtn" Content="🛠 Open Classic Control Panel" Width="260" Margin="0,0,15,15"/>
+       <Button Name="UtilRegeditBtn" Content="🛠 Open Registry Editor" Width="260" Margin="0,0,15,15"/>
+       <Button Name="UtilDevMgmtBtn" Content="🛠 Open Device Manager" Width="260" Margin="0,0,15,15"/>
+       <Button Name="UtilSysInfoBtn" Content="🛠 Open System Information" Width="260" Margin="0,0,15,15"/>
+      </WrapPanel>
+     </StackPanel>
+    </Border>
+   </TabItem>
+
+   <!-- 11. LOGS -->
+   <TabItem Header="Logs">
+    <Border Padding="15">
+     <Grid>
+      <Grid.RowDefinitions>
+       <RowDefinition Height="Auto"/>
+       <RowDefinition Height="*"/>
+      </Grid.RowDefinitions>
+      
+      <Grid Grid.Row="0" Margin="0,0,0,10">
+       <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="Auto"/>
+       </Grid.ColumnDefinitions>
+       <StackPanel Grid.Column="0">
+        <TextBlock Text="Detailed System &amp; Component Log Suite" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF"/>
+        <TextBlock Text="Real-time categorized execution trace and diagnostic console." Foreground="#A1A1AA" FontSize="13" Margin="0,2,0,0"/>
+       </StackPanel>
+       <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+        <Button Name="ExportLogsBtn" Content="💾 Export Log File" Background="#2563EB" Foreground="#FFFFFF" BorderThickness="0" Margin="0,0,10,0"/>
+        <Button Name="ClearAllLogsBtn" Content="🗑 Clear All Consoles" Background="#3F3F46" Foreground="#FFFFFF" BorderThickness="0"/>
+       </StackPanel>
+      </Grid>
+      
+      <TabControl Grid.Row="1" Background="#18181B">
+       <TabItem Header="🌐 All Logs">
+        <TextBox Name="LogConsoleAll" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#09090B" Foreground="#10B981" FontFamily="Consolas" FontSize="13" Padding="15" AcceptsReturn="True"/>
+       </TabItem>
+       <TabItem Header="⚙️ System &amp; Utility">
+        <TextBox Name="LogConsoleSystem" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#09090B" Foreground="#3B82F6" FontFamily="Consolas" FontSize="13" Padding="15" AcceptsReturn="True"/>
+       </TabItem>
+       <TabItem Header="📊 Overview">
+        <TextBox Name="LogConsoleOverview" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#09090B" Foreground="#F59E0B" FontFamily="Consolas" FontSize="13" Padding="15" AcceptsReturn="True"/>
+       </TabItem>
+       <TabItem Header="📦 Software Engine">
+        <TextBox Name="LogConsoleSoftware" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#09090B" Foreground="#EC4899" FontFamily="Consolas" FontSize="13" Padding="15" AcceptsReturn="True"/>
+       </TabItem>
+       <TabItem Header="⚡ Customize Engine">
+        <TextBox Name="LogConsoleCustomize" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#09090B" Foreground="#8B5CF6" FontFamily="Consolas" FontSize="13" Padding="15" AcceptsReturn="True"/>
+       </TabItem>
+      </TabControl>
+     </Grid>
+    </Border>
+   </TabItem>
+
+   <!-- 12. ABOUT -->
+   <TabItem Header="About">
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="20">
+     <StackPanel HorizontalAlignment="Center" Width="800">
+      <Border Background="#27272A" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="12" Padding="25" Margin="0,0,0,20">
+       <StackPanel HorizontalAlignment="Center">
+        <TextBlock Text="Amr | windows_utility" FontSize="28" FontWeight="Bold" Foreground="#3B82F6" HorizontalAlignment="Center"/>
+        <TextBlock Text="V0.1" FontSize="14" Foreground="#10B981" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,5,0,10"/>
+        <TextBlock Text="A comprehensive Windows management, telemetry and optimization suite designed for smooth execution and quiet app deployment." Foreground="#A1A1AA" FontSize="14" HorizontalAlignment="Center" TextWrapping="Wrap" TextAlignment="Center"/>
+       </StackPanel>
+      </Border>
+
+      <WrapPanel Orientation="Horizontal" HorizontalAlignment="Center">
+       <Border Background="#27272A" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="12" Padding="20" Margin="10" Width="360">
+        <StackPanel>
+         <TextBlock Text="Developer Details" FontSize="18" FontWeight="Bold" Foreground="#3B82F6" Margin="0,0,0,15"/>
+         <StackPanel Margin="0,4">
+          <TextBlock Text="Developer Name:" Foreground="#71717A" FontSize="13"/>
+          <TextBlock Text="عمرو أحمد عبد الفتاح" Foreground="#FFFFFF" FontSize="15" FontWeight="SemiBold" Margin="0,2,0,0"/>
+         </StackPanel>
+         <StackPanel Margin="0,8,0,4">
+          <TextBlock Text="Phone &amp; WhatsApp:" Foreground="#71717A" FontSize="13"/>
+          <TextBlock Text="01014716301" Foreground="#10B981" FontSize="15" FontWeight="Bold" Margin="0,2,0,0"/>
+         </StackPanel>
+         <StackPanel Margin="0,8,0,0">
+          <TextBlock Text="Email Address:" Foreground="#71717A" FontSize="13"/>
+          <TextBlock Text="3mr10aa@gmail.com" Foreground="#3B82F6" FontSize="14" FontWeight="SemiBold" Margin="0,2,0,0"/>
+         </StackPanel>
+        </StackPanel>
+       </Border>
+
+       <Border Background="#27272A" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="12" Padding="20" Margin="10" Width="360">
+        <StackPanel>
+         <TextBlock Text="System &amp; Build Info" FontSize="18" FontWeight="Bold" Foreground="#3B82F6" Margin="0,0,0,15"/>
+         <StackPanel Margin="0,4">
+          <TextBlock Text="Environment:" Foreground="#71717A" FontSize="13"/>
+          <TextBlock Text="PowerShell 5.1 &amp; WPF (XAML)" Foreground="#FFFFFF" FontSize="14" FontWeight="SemiBold" Margin="0,2,0,0"/>
+         </StackPanel>
+         <StackPanel Margin="0,8,0,4">
+          <TextBlock Text="Last Updated:" Foreground="#71717A" FontSize="13"/>
+          <TextBlock Text="06 / 11 / 2026" Foreground="#EAB308" FontSize="14" FontWeight="Bold" Margin="0,2,0,0"/>
+         </StackPanel>
+         <StackPanel Margin="0,8,0,0">
+          <TextBlock Text="License &amp; Edition:" Foreground="#71717A" FontSize="13"/>
+          <TextBlock Text="Personal Utility (All Rights Reserved)" Foreground="#A1A1AA" FontSize="13" Margin="0,2,0,0"/>
+         </StackPanel>
+        </StackPanel>
+       </Border>
+      </WrapPanel>
+
+      <TextBlock Text="Built with precision for clean Windows administration." Foreground="#52525B" FontSize="13" HorizontalAlignment="Center" Margin="0,20,0,0"/>
+     </StackPanel>
+    </ScrollViewer>
+   </TabItem>
+
+  </TabControl>
+  
+  <Border Grid.Row="2" Background="#18181B" BorderBrush="#27272A" BorderThickness="0,1,0,0" Padding="15">
+   <TextBlock Name="StatusText" Text="Ready" Foreground="#A1A1AA" FontSize="13"/>
+  </Border>
+ </Grid>
+</Window>
+'@
+
+# --- 5. Window & Controls Mapping ---
+$reader = New-Object System.Xml.XmlNodeReader $xaml
+$script:Window = [Windows.Markup.XamlReader]::Load($reader)
+
+function C { param([string]$Name) return $script:Window.FindName($Name) }
+
+$script:Status        = C 'StatusText'
+$script:ProgressBar   = C 'InstallProgressBar'
+$script:ProgressText  = C 'ProgressText'
+$script:LogControls['All']       = C 'LogConsoleAll'
+$script:LogControls['System']    = C 'LogConsoleSystem'
+$script:LogControls['Overview']  = C 'LogConsoleOverview'
+$script:LogControls['Software']  = C 'LogConsoleSoftware'
+$script:LogControls['Customize'] = C 'LogConsoleCustomize'
+
+# Logs Tab Actions
+(C 'ClearAllLogsBtn').Add_Click({
+    foreach ($ctl in $script:LogControls.Values) {
+        if ($ctl) { $ctl.Text = "" }
+    }
+    Write-AMRLog "All log consoles cleared." INFO System
+})
+
+(C 'ExportLogsBtn').Add_Click({
+    try {
+        $exportPath = Join-Path $script:ExportDir ("AMR_Log_Export_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+        Copy-Item -Path $script:LogFile -Destination $exportPath -Force
+        Show-AMRMessage "Log exported successfully to:`n$exportPath" "Export Complete" OK Information | Out-Null
+        Write-AMRLog "Exported log file to: $exportPath" SUCCESS System
+    } catch {
+        Show-AMRMessage "Failed to export logs: $_" "Export Error" OK Error | Out-Null
+    }
+})
+
+# --- 6. OVERVIEW TELEMETRY ENGINE ---
+function Update-AMROverviewData {
+    Write-AMRLog "Updating system telemetry..." DEBUG Overview
+
+    # OS Info
+    try {
+        $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+        if ($os) {
+            (C 'ovOS').Text   = "OS: " + $os.Caption
+            (C 'ovArch').Text = "Architecture: " + $os.OSArchitecture
+        } else {
+            (C 'ovOS').Text   = "OS: Microsoft Windows"
+            (C 'ovArch').Text = "Architecture: 64-bit"
+        }
+    } catch {
+        (C 'ovOS').Text   = "OS: Microsoft Windows"
+        (C 'ovArch').Text = "Architecture: Unknown"
+    }
+    (C 'ovPCName').Text = "PC Name: " + $env:COMPUTERNAME
+
+    # Device Type
+    try {
+        $chassis = (Get-CimInstance Win32_SystemEnclosure -ErrorAction SilentlyContinue).ChassisTypes
+        $isLaptop = $chassis -match "8|9|10|11|12|14|18|21"
+        (C 'ovDeviceType').Text = "Device Type: " + $(if($isLaptop) {"Laptop"} else {"Desktop"})
+    } catch {
+        (C 'ovDeviceType').Text = "Device Type: Desktop"
+    }
+
+    # CPU Info
+    try {
+        $cpu = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($cpu) {
+            (C 'ovCPU').Text     = "CPU: " + $cpu.Name.Trim()
+            (C 'ovCPULoad').Text = "CPU Usage: " + $cpu.LoadPercentage + "%"
+        } else {
+            (C 'ovCPU').Text     = "CPU: Processor Info Unavailable"
+            (C 'ovCPULoad').Text = "CPU Usage: N/A"
+        }
+    } catch {
+        (C 'ovCPU').Text     = "CPU: Processor Info Unavailable"
+        (C 'ovCPULoad').Text = "CPU Usage: N/A"
+    }
+
+    # GPU Info
+    try {
+        $gpu = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue
+        if ($gpu) {
+            (C 'ovGPU').Text = "GPU: " + ($gpu.Name -join " / ")
+        } else {
+            (C 'ovGPU').Text = "GPU: Display Adapter Unavailable"
+        }
+    } catch {
+        (C 'ovGPU').Text = "GPU: Display Adapter Unavailable"
+    }
+
+    # RAM Info
+    try {
+        $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+        if ($os) {
+            $totalRamGB = [math]::Round($os.TotalVisibleMemorySize / 1MB, 2)
+            $freeRamGB  = [math]::Round($os.FreePhysicalMemory / 1MB, 2)
+            $usedRamGB  = $totalRamGB - $freeRamGB
+            $ramPercent = [math]::Round(($usedRamGB / $totalRamGB) * 100, 0)
+            (C 'ovRAMTotal').Text = "Total RAM: $totalRamGB GB"
+            (C 'ovRAMUsage').Text = "RAM Usage: $usedRamGB GB ($ramPercent%)"
+        } else {
+            (C 'ovRAMTotal').Text = "Total RAM: N/A"
+            (C 'ovRAMUsage').Text = "RAM Usage: N/A"
+        }
+    } catch {
+        (C 'ovRAMTotal').Text = "Total RAM: N/A"
+        (C 'ovRAMUsage').Text = "RAM Usage: N/A"
+    }
+
+    # Motherboard & BIOS
+    try {
+        $mobo = Get-CimInstance Win32_BaseBoard -ErrorAction SilentlyContinue
+        if ($mobo) {
+            (C 'ovMobo').Text = "Board: " + $mobo.Manufacturer + " " + $mobo.Product
+        } else {
+            (C 'ovMobo').Text = "Board: Motherboard Info Unavailable"
+        }
+        $bios = Get-CimInstance Win32_BIOS -ErrorAction SilentlyContinue
+        if ($bios) {
+            (C 'ovBIOS').Text = "BIOS Version: " + $bios.SMBIOSBIOSVersion
+        } else {
+            (C 'ovBIOS').Text = "BIOS Version: N/A"
+        }
+    } catch {
+        (C 'ovMobo').Text = "Board: Motherboard Info Unavailable"
+        (C 'ovBIOS').Text = "BIOS Version: N/A"
+    }
+
+    # Disks
+    try {
+        $disks = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction SilentlyContinue | ForEach-Object {
+            $total = [math]::Round($_.Size / 1GB, 1)
+            $free  = [math]::Round($_.FreeSpace / 1GB, 1)
+            [PSCustomObject]@{ DisplayText = "Drive $($_.DeviceID) - $free GB free of $total GB" }
+        }
+        (C 'ovDisks').ItemsSource = $disks
+    } catch {
+        (C 'ovDisks').ItemsSource = @([PSCustomObject]@{ DisplayText = "Drive Space Info Unavailable" })
+    }
+
+    # Network IP
+    try {
+        $ip = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | 
+               Where-Object { $_.InterfaceAlias -notmatch "Loopback" -and $_.IPAddress -notlike "169.254.*" }).IPAddress -join ", "
+        if (-not $ip) { $ip = "Not Connected" }
+        (C 'ovIP').Text = "IPv4 Address: " + $ip
+    } catch {
+        (C 'ovIP').Text = "IPv4 Address: Not Connected"
+    }
+
+    Write-AMRLog "Telemetry data refreshed successfully." SUCCESS Overview
+}
+
+function Refresh-AMROverview {
+    $wg = Get-Command winget.exe -ErrorAction SilentlyContinue
+    if ($wg) {
+        (C 'WingetHeader').Text = 'WINGET ENGINE READY'
+    } else {
+        (C 'WingetHeader').Text = 'WINGET NOT FOUND'
+    }
+    Update-AMROverviewData
+}
+
+(C 'RefreshOverviewBtn').Add_Click({ Update-AMROverviewData })
+
+# ==========================================================
+# 7. HIGH-PERFORMANCE MULTI-TIER ENGINE (SAFE POWERSHELL 5.1 RUNSPACE)
+# ==========================================================
+
+$script:AppsView = [System.Windows.Data.CollectionViewSource]::GetDefaultView($script:SoftwareCatalog)
+$script:AppsView.GroupDescriptions.Add((New-Object System.Windows.Data.PropertyGroupDescription("Category")))
+
+$script:AppsView.Filter = [System.Predicate[object]]{
+    param($item)
+    $searchText = (C 'SearchBox').Text
+    if ([string]::IsNullOrWhiteSpace($searchText)) { return $true }
+    $escaped = [regex]::Escape($searchText)
+    return ($item.Name -match "(?i)$escaped") -or ($item.Id -match "(?i)$escaped")
+}
+
+(C 'SearchBox').Add_TextChanged({ $script:AppsView.Refresh() })
+(C 'SoftwareGrid').ItemsSource = $script:AppsView
+
+(C 'DeselectAllBtn').Add_Click({
+    if ($script:InstallRunning) {
+        Write-AMRLog "Cannot clear selection while an installation queue is running." WARNING Software
+        return
+    }
+    foreach ($app in $script:SoftwareCatalog) { $app.IsSelected = $false }
+    $script:AppsView.Refresh()
+    Write-AMRLog "Cleared app selections." INFO Software
+})
+
+# Shared engine state
+$script:InstallRunning = $false
+$script:InstallPowerShell = $null
+$script:InstallRunspace = $null
+$script:InstallAsyncResult = $null
+$script:InstallLogQueue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'
+$script:InstallTimer = $null
+$script:InstallActionName = ''
+$script:InstallSelectedSnapshot = @()
+
+# Worker code runs in dedicated Runspace & reports progress
+$script:InstallWorkerCode = @'
+param(
+    [object[]]$Apps,
+    [string]$ActionCommand,
+    [string]$ActionName,
+    [bool]$Interactive,
+    [string]$DownloadDir,
+    [System.Collections.Concurrent.ConcurrentQueue[string]]$LogQueue
+)
+
+$ErrorActionPreference = "Stop"
+$script:ChocoCheckedPath = $null
+
+function Write-WorkerLog {
+    param([string]$Message, [string]$Level = "INFO", [int]$Percent = -1)
+    $stamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
+    $pctPrefix = if ($Percent -ge 0) { "PROG:$Percent|" } else { "" }
+    [void]$LogQueue.Enqueue("${pctPrefix}[$stamp] [$Level] [Software] $Message")
+}
+
+function Test-WorkerInstalled {
+    param(
+        [string]$AppName,
+        [string]$AppId = '',
+        [string]$ChocoId = ''
+    )
+
+    if ([string]::IsNullOrWhiteSpace($AppName)) { return $false }
+
+    $paths = @(
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+
+    try {
+        $cleanTarget = ($AppName -replace "[^a-zA-Z0-9]", "").ToLowerInvariant()
+        $cleanId     = ($AppId -replace "[^a-zA-Z0-9]", "").ToLowerInvariant()
+        $cleanChoco  = ($ChocoId -replace "[^a-zA-Z0-9]", "").ToLowerInvariant()
+        $genericWords = @('microsoft', 'google', 'adobe', 'opera', 'mozilla', 'the', 'openjs', 'python', 'valve', 'epic', 'codec', 'gimp')
+
+        foreach ($item in @(Get-ItemProperty -Path $paths -ErrorAction SilentlyContinue)) {
+            $displayName = [string]$item.DisplayName
+            if ([string]::IsNullOrWhiteSpace($displayName)) { continue }
+
+            $candidate = ($displayName -replace "[^a-zA-Z0-9]", "").ToLowerInvariant()
+
+            if ($candidate -eq $cleanTarget) { return $true }
+            if ($cleanId -and $candidate -eq $cleanId) { return $true }
+            if ($cleanChoco -and $candidate -eq $cleanChoco) { return $true }
+
+            if ($cleanTarget.Length -ge 5 -and $candidate.Contains($cleanTarget)) { return $true }
+            if ($candidate.Length -ge 5 -and $cleanTarget.Contains($candidate)) {
+                if ($candidate -notin $genericWords) { return $true }
+            }
+
+            $uninstallStr = ([string]$item.UninstallString -replace "[^a-zA-Z0-9]", "").ToLowerInvariant()
+            if ($cleanId -and $cleanId.Length -ge 5 -and $uninstallStr.Contains($cleanId)) { return $true }
+            if ($cleanChoco -and $cleanChoco.Length -ge 4 -and $uninstallStr.Contains($cleanChoco)) { return $true }
+        }
+    } catch {}
+    return $false
+}
+
+function Get-ChocoPath {
+    if ($script:ChocoCheckedPath -and (Test-Path -LiteralPath $script:ChocoCheckedPath)) {
+        return $script:ChocoCheckedPath
+    }
+
+    $command = Get-Command choco.exe -ErrorAction SilentlyContinue
+    if ($command) {
+        $script:ChocoCheckedPath = $command.Source
+        return $script:ChocoCheckedPath
+    }
+
+    $defaultPath = Join-Path $env:ProgramData "chocolatey\bin\choco.exe"
+    if (Test-Path -LiteralPath $defaultPath) {
+        $script:ChocoCheckedPath = $defaultPath
+        return $script:ChocoCheckedPath
+    }
+    return $null
+}
+
+function Ensure-Chocolatey {
+    $existing = Get-ChocoPath
+    if ($existing) { return $existing }
+
+    Write-WorkerLog "Chocolatey is missing; attempting one-time initialization." "WARNING"
+    $setupFile = Join-Path $DownloadDir ("choco_setup_{0}.ps1" -f [guid]::NewGuid().ToString("N"))
+
+    try {
+        [Net.ServicePointManager]::SecurityProtocol =
+            [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
+        Invoke-WebRequest -Uri "https://community.chocolatey.org/install.ps1" `
+            -OutFile $setupFile -UseBasicParsing -ErrorAction Stop
+
+        if (!(Test-Path -LiteralPath $setupFile) -or (Get-Item -LiteralPath $setupFile).Length -lt 1000) {
+            throw "Chocolatey bootstrap script is missing or incomplete."
+        }
+
+        $process = Start-Process -FilePath "powershell.exe" `
+            -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$setupFile`"") `
+            -Wait -PassThru -NoNewWindow
+
+        $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+        $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+        $env:Path = "$machinePath;$userPath"
+
+        $found = Get-ChocoPath
+        if ($process.ExitCode -eq 0 -and $found) {
+            Write-WorkerLog "Chocolatey initialized successfully." "SUCCESS"
+            return $found
+        }
+
+        throw "Chocolatey setup failed (exit code $($process.ExitCode)); choco.exe was not verified."
+    }
+    catch {
+        Write-WorkerLog "Chocolatey initialization error: $_" "ERROR"
+        return $null
+    }
+    finally {
+        if (Test-Path -LiteralPath $setupFile) {
+            Remove-Item -LiteralPath $setupFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Invoke-ProcessResult {
+    param(
+        [string]$FilePath,
+        [string[]]$ArgumentList,
+        [bool]$ShowWindow
+    )
+
+    $startParams = @{
+        FilePath = $FilePath
+        ArgumentList = $ArgumentList
+        Wait = $true
+        PassThru = $true
+        ErrorAction = "Stop"
+    }
+    if (-not $ShowWindow) { $startParams["WindowStyle"] = "Hidden" }
+
+    return (Start-Process @startParams)
+}
+
+function Test-ExitSuccess {
+    param([int]$ExitCode)
+    return ($ExitCode -in @(0, 1641, 3010))
+}
+
+function Install-ViaWinget {
+    param(
+        [string]$TargetId,
+        [string]$ActionCommand,
+        [string]$ExtraFlags = "",
+        [bool]$Interactive = $false,
+        [int]$BasePercent = 0
+    )
+
+    $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+    if (-not $winget) {
+        Write-WorkerLog "Winget is unavailable." "WARNING" -Percent $BasePercent
+        return [pscustomobject]@{ Success = $false; ExitCode = -1; Started = $false; Reboot = $false }
+    }
+
+    $cmd = if ($ActionCommand -eq "repair") { "install" } else { $ActionCommand }
+    $argumentList = @($cmd, "--id", $TargetId, "--exact",
+                      "--source", "winget", "--accept-source-agreements",
+                      "--accept-package-agreements")
+
+    if ($ActionCommand -eq "repair") { $argumentList += "--force" }
+
+    if ($Interactive) {
+        $argumentList += "--interactive"
+    } else {
+        $argumentList += @("--silent", "--disable-interactivity")
+    }
+
+    if ($ExtraFlags) {
+        $argumentList += ($ExtraFlags -split "\s+" | Where-Object { $_ })
+    }
+
+    try {
+        Write-WorkerLog "[Winget] Executing $cmd $TargetId" "INFO" -Percent ($BasePercent + 5)
+        $proc = Invoke-ProcessResult -FilePath $winget.Source -ArgumentList $argumentList -ShowWindow:$Interactive
+        $ok = Test-ExitSuccess -ExitCode $proc.ExitCode
+        $reboot = ($proc.ExitCode -in @(1641, 3010))
+        if ($ok) {
+            Write-WorkerLog "[Winget] Completed $TargetId (exit $($proc.ExitCode))." "SUCCESS" -Percent ($BasePercent + 20)
+        } else {
+            Write-WorkerLog "[Winget] Returned code $($proc.ExitCode) for $TargetId." "WARNING" -Percent $BasePercent
+        }
+        return [pscustomobject]@{ Success = $ok; ExitCode = $proc.ExitCode; Started = $true; Reboot = $reboot }
+    }
+    catch {
+        Write-WorkerLog "[Winget] Error for $TargetId : $_" "WARNING" -Percent $BasePercent
+        return [pscustomobject]@{ Success = $false; ExitCode = -1; Started = $false; Reboot = $false }
+    }
+}
+
+function Install-ViaChocolatey {
+    param(
+        [string]$ChocoId,
+        [ValidateSet("install", "upgrade")][string]$Action = "install",
+        [bool]$Interactive = $false,
+        [int]$BasePercent = 0
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ChocoId)) {
+        return [pscustomobject]@{ Success = $false; ExitCode = -1; Reboot = $false }
+    }
+
+    $choco = Ensure-Chocolatey
+    if (-not $choco) {
+        return [pscustomobject]@{ Success = $false; ExitCode = -1; Reboot = $false }
+    }
+
+    $argumentList = @($Action, $ChocoId, "-y", "--no-progress")
+    if (-not $Interactive) { $argumentList += "--no-color" }
+
+    try {
+        Write-WorkerLog "[Chocolatey] Executing $Action $ChocoId" "INFO" -Percent ($BasePercent + 10)
+        $proc = Invoke-ProcessResult -FilePath $choco -ArgumentList $argumentList -ShowWindow:$Interactive
+        $ok = Test-ExitSuccess -ExitCode $proc.ExitCode
+        $reboot = ($proc.ExitCode -in @(1641, 3010))
+        if ($ok) {
+            Write-WorkerLog "[Chocolatey] Completed $ChocoId (exit $($proc.ExitCode))." "SUCCESS" -Percent ($BasePercent + 20)
+        } else {
+            Write-WorkerLog "[Chocolatey] Returned code $($proc.ExitCode) for $ChocoId." "WARNING" -Percent $BasePercent
+        }
+        return [pscustomobject]@{ Success = $ok; ExitCode = $proc.ExitCode; Reboot = $reboot }
+    }
+    catch {
+        Write-WorkerLog "[Chocolatey] Error for $ChocoId : $_" "WARNING" -Percent $BasePercent
+        return [pscustomobject]@{ Success = $false; ExitCode = -1; Reboot = $false }
+    }
+}
+
+function Test-InstallerSignature {
+    param([string]$Path, [string]$ExpectedPublisher)
+
+    try {
+        $signature = Get-AuthenticodeSignature -FilePath $Path
+        if ($signature.Status -ne "Valid") { return $false }
+        if ([string]::IsNullOrWhiteSpace($ExpectedPublisher)) { return $true }
+        return ($signature.SignerCertificate.Subject -like "*$ExpectedPublisher*")
+    } catch {
+        return $false
+    }
+}
+
+function Install-ViaDirectDownload {
+    param(
+        [string]$AppName,
+        [string]$Url,
+        [string]$InstallerArgs,
+        [string]$ExpectedPublisher,
+        [bool]$Interactive = $false,
+        [int]$AppBasePercent = 0,
+        [int]$AppStepWeight = 33
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Url)) {
+        Write-WorkerLog "[Direct] No direct URL configured for $AppName; tier skipped." "WARNING" -Percent $AppBasePercent
+        return [pscustomobject]@{ Success = $false; ExitCode = -1; Reboot = $false }
+    }
+
+    $downloadPath = $null
+    try {
+        $uri = [uri]$Url
+        if ($uri.Scheme -ne "https") { throw "HTTPS is required for direct downloads." }
+
+        [Net.ServicePointManager]::SecurityProtocol =
+            [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
+        $downloadPath = Join-Path $DownloadDir ("{0}_{1}.bin" -f
+            ($AppName -replace "[^\w-]", "_"), [guid]::NewGuid().ToString("N"))
+
+        Write-WorkerLog "[Direct] Downloading $AppName..." "INFO" -Percent ($AppBasePercent + 5)
+        
+        $client = New-Object System.Net.WebClient
+        $client.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+        
+        $script:LastReportedPct = -1
+        $client.add_DownloadProgressChanged({
+            param($sender, $e)
+            $downloadPct = $e.ProgressPercentage
+            if ($downloadPct -ne $script:LastReportedPct -and ($downloadPct % 5 -eq 0)) {
+                $script:LastReportedPct = $downloadPct
+                $calculatedGlobalPct = $AppBasePercent + [math]::Round(($downloadPct / 100) * ($AppStepWeight * 0.6))
+                $bytesMB = [math]::Round($e.BytesReceived / 1MB, 1)
+                $totalMB = [math]::Round($e.TotalBytesToReceive / 1MB, 1)
+                Write-WorkerLog "[Direct] $AppName Downloading ($downloadPct% - $bytesMB MB / $totalMB MB)..." "INFO" -Percent $calculatedGlobalPct
+            }
+        })
+        
+        $downloadTask = $client.DownloadFileTaskAsync($Url, $downloadPath)
+        while (-not $downloadTask.IsCompleted) {
+            Start-Sleep -Milliseconds 100
+        }
+        if ($downloadTask.IsFaulted) { throw $downloadTask.Exception.InnerException }
+        $client.Dispose()
+
+        if (!(Test-Path -LiteralPath $downloadPath) -or (Get-Item -LiteralPath $downloadPath).Length -lt 10240) {
+            throw "Downloaded payload is empty or too small."
+        }
+
+        $stream = [IO.File]::OpenRead($downloadPath)
+        try {
+            $header = New-Object byte[] 8
+            $read = $stream.Read($header, 0, 8)
+        } finally {
+            $stream.Dispose()
+        }
+
+        $kind = $null
+        if ($read -ge 2 -and $header[0] -eq 0x4D -and $header[1] -eq 0x5A) {
+            $kind = "exe"
+        } elseif ($read -ge 4 -and $header[0] -eq 0xD0 -and $header[1] -eq 0xCF -and
+                  $header[2] -eq 0x11 -and $header[3] -eq 0xE0) {
+            $kind = "msi"
+        } elseif ($read -ge 8 -and $header[0] -eq 0xD0 -and $header[1] -eq 0xCF) {
+            $kind = "msi"
+        }
+
+        if (-not $kind) { throw "Downloaded file is not recognized as an EXE or MSI installer." }
+
+        $finalPath = [IO.Path]::ChangeExtension($downloadPath, ".$kind")
+        Move-Item -LiteralPath $downloadPath -Destination $finalPath -Force
+        $downloadPath = $finalPath
+
+        if (-not (Test-InstallerSignature -Path $downloadPath -ExpectedPublisher $ExpectedPublisher)) {
+            throw "Installer signature or publisher verification failed."
+        }
+
+        Write-WorkerLog "[Direct] Executing installer for $AppName..." "INFO" -Percent ($AppBasePercent + [math]::Round($AppStepWeight * 0.8))
+
+        if ($kind -eq "msi") {
+            $msiArgs = @("/i", "`"$downloadPath`"")
+            if (-not $Interactive) { $msiArgs += @("/qn", "/norestart") }
+            if ($InstallerArgs) { $msiArgs += ($InstallerArgs -split "\s+" | Where-Object { $_ }) }
+            $proc = Invoke-ProcessResult -FilePath "msiexec.exe" -ArgumentList $msiArgs -ShowWindow:$Interactive
+        } else {
+            $exeArgs = @()
+            if ($InstallerArgs) { $exeArgs = @($InstallerArgs) }
+            $proc = Invoke-ProcessResult -FilePath $downloadPath -ArgumentList $exeArgs -ShowWindow:$Interactive
+        }
+
+        $ok = Test-ExitSuccess -ExitCode $proc.ExitCode
+        $reboot = ($proc.ExitCode -in @(1641, 3010))
+        if ($ok) {
+            Write-WorkerLog "[Direct] Installer finished for $AppName (exit $($proc.ExitCode))." "SUCCESS" -Percent ($AppBasePercent + $AppStepWeight)
+        } else {
+            Write-WorkerLog "[Direct] Installer failed for $AppName (exit $($proc.ExitCode))." "ERROR" -Percent $AppBasePercent
+        }
+        return [pscustomobject]@{ Success = $ok; ExitCode = $proc.ExitCode; Reboot = $reboot }
+    }
+    catch {
+        Write-WorkerLog "[Direct] $AppName failed: $_" "ERROR" -Percent $AppBasePercent
+        return [pscustomobject]@{ Success = $false; ExitCode = -1; Reboot = $false }
+    }
+    finally {
+        if ($downloadPath -and (Test-Path -LiteralPath $downloadPath)) {
+            Remove-Item -LiteralPath $downloadPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+$successCount = 0
+$failedCount  = 0
+$skippedCount = 0
+$rebootNeeded = $false
+$results = New-Object System.Collections.Generic.List[object]
+
+$totalApps = $Apps.Count
+$appIndex = 0
+
+foreach ($app in $Apps) {
+    $appIndex++
+    $appBasePercent = [math]::Round((($appIndex - 1) / $totalApps) * 100)
+    $appStepWeight  = [math]::Round((1 / $totalApps) * 100)
+    
+    $name = [string]$app.Name
+    $id = [string]$app.Id
+    $chocoId = [string]$app.ChocoId
+    $wasInstalled = Test-WorkerInstalled -AppName $name -AppId $id -ChocoId $chocoId
+
+    if ($ActionCommand -eq "install" -and $wasInstalled) {
+        Write-WorkerLog "[$name] already detected in system registry; skipped." "SUCCESS" -Percent ($appBasePercent + $appStepWeight)
+        $skippedCount++
+        [void]$results.Add([pscustomobject]@{ Name=$name; Status="Skipped"; ExitCode=0 })
+        continue
+    }
+
+    Write-WorkerLog "Processing $name ($appIndex of $totalApps)..." "INFO" -Percent $appBasePercent
+    $done = $false
+    $appReboot = $false
+    $lastExitCode = -1
+    $installerAttempted = $false
+
+    # Tier 1: Winget
+    $wingetResult = Install-ViaWinget -TargetId $id -ActionCommand $ActionCommand -ExtraFlags "" -Interactive:$Interactive -BasePercent $appBasePercent
+    $lastExitCode = $wingetResult.ExitCode
+    if ($wingetResult.Reboot) { $appReboot = $true }
+
+    if ($wingetResult.Success) {
+        $done = $true
+    } elseif (Test-WorkerInstalled -AppName $name -AppId $id -ChocoId $chocoId) {
+        Write-WorkerLog "[$name] detected in registry after Winget execution; fallback suppressed." "SUCCESS" -Percent ($appBasePercent + $appStepWeight)
+        $done = $true
+    } elseif ($wingetResult.Started -and $wingetResult.ExitCode -ne -1 -and $wingetResult.ExitCode -ne 0x80190194 -and $wingetResult.ExitCode -ne 2316632064) {
+        Write-WorkerLog "[$name] Winget installer executed but failed (exit $($wingetResult.ExitCode)); secondary installer execution blocked to prevent conflicts." "WARNING" -Percent $appBasePercent
+        $installerAttempted = $true
+    }
+
+    # Tier 2: Chocolatey
+    if (-not $done -and -not $installerAttempted -and $ActionCommand -ne "repair") {
+        $chocoAction = if ($ActionCommand -eq "upgrade") { "upgrade" } else { "install" }
+        $chocoResult = Install-ViaChocolatey -ChocoId $chocoId -Action $chocoAction -Interactive:$Interactive -BasePercent $appBasePercent
+        $lastExitCode = $chocoResult.ExitCode
+        if ($chocoResult.Reboot) { $appReboot = $true }
+
+        if ($chocoResult.Success) {
+            $done = $true
+        } elseif (Test-WorkerInstalled -AppName $name -AppId $id -ChocoId $chocoId) {
+            Write-WorkerLog "[$name] detected in registry after Chocolatey execution; direct fallback suppressed." "SUCCESS" -Percent ($appBasePercent + $appStepWeight)
+            $done = $true
+        } elseif ($chocoResult.ExitCode -ne -1) {
+            Write-WorkerLog "[$name] Chocolatey installer executed but failed (exit $($chocoResult.ExitCode)); direct download blocked." "WARNING" -Percent $appBasePercent
+            $installerAttempted = $true
+        }
+    }
+
+    # Tier 3: Direct Download
+    if (-not $done -and -not $installerAttempted -and $ActionCommand -eq "install") {
+        $directResult = Install-ViaDirectDownload -AppName $name -Url ([string]$app.DirectUrl) `
+            -InstallerArgs ([string]$app.DirectArgs) -ExpectedPublisher ([string]$app.Publisher) `
+            -Interactive:$Interactive -AppBasePercent $appBasePercent -AppStepWeight $appStepWeight
+        $lastExitCode = $directResult.ExitCode
+        if ($directResult.Reboot) { $appReboot = $true }
+
+        if ($directResult.Success) {
+            $done = $true
+        } elseif (Test-WorkerInstalled -AppName $name -AppId $id -ChocoId $chocoId) {
+            Write-WorkerLog "[$name] detected in registry after Direct Download execution." "SUCCESS" -Percent ($appBasePercent + $appStepWeight)
+            $done = $true
+        }
+    }
+
+    if ($appReboot) { $rebootNeeded = $true }
+
+    if ($done) {
+        if ($ActionCommand -eq "install" -and -not (Test-WorkerInstalled -AppName $name -AppId $id -ChocoId $chocoId)) {
+            Write-WorkerLog "[$name] installer finished, but registry key was not found. Verification check recommended." "WARNING" -Percent ($appBasePercent + $appStepWeight)
+        }
+        $successCount++
+        Write-WorkerLog "[$name] completed successfully." "SUCCESS" -Percent ($appBasePercent + $appStepWeight)
+        [void]$results.Add([pscustomobject]@{ Name=$name; Status="Success"; ExitCode=$lastExitCode })
+    } else {
+        $failedCount++
+        Write-WorkerLog "[$name] failed in all applicable tiers; continuing queue." "ERROR" -Percent ($appBasePercent + $appStepWeight)
+        [void]$results.Add([pscustomobject]@{ Name=$name; Status="Failed"; ExitCode=$lastExitCode })
+    }
+}
+
+Write-WorkerLog "Queue completed." "SUCCESS" -Percent 100
+
+return [pscustomobject]@{
+    ActionName   = $ActionName
+    SuccessCount = $successCount
+    FailedCount  = $failedCount
+    SkippedCount = $skippedCount
+    RebootNeeded = $rebootNeeded
+    Results      = @($results)
+}
+'@
+
+function Set-AMRInstallButtonsEnabled {
+    param([bool]$Enabled)
+
+    foreach ($name in @('InstallSelectedBtn','InstallInteractiveBtn','UpdateSelectedBtn','RepairSelectedBtn','DeselectAllBtn')) {
+        $button = C $name
+        if ($button) { $button.IsEnabled = $Enabled }
+    }
+}
+
+function Complete-AMRInstallQueue {
+    param($Result, [string]$ErrorText = '')
+
+    if ($script:InstallTimer) {
+        $script:InstallTimer.Stop()
+        $script:InstallTimer = $null
+    }
+
+    $line = $null
+    while ($script:InstallLogQueue.TryDequeue([ref]$line)) {
+        if ($line) {
+            if ($line -match "^PROG:(\d+)\|(.*)$") {
+                $script:ProgressBar.Value = [int]$matches[1]
+                $line = $matches[2]
+            }
+            Add-Content -LiteralPath $script:LogFile -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue
+            foreach ($key in @('All','Software')) {
+                $control = $script:LogControls[$key]
+                if ($control) {
+                    $control.AppendText("$line`r`n")
+                    $control.ScrollToEnd()
+                }
+            }
+            $script:Status.Text = $line
+            $script:ProgressText.Text = $line
+        }
+        $line = $null
+    }
+
+    if ($script:InstallPowerShell) {
+        try { $script:InstallPowerShell.Dispose() } catch {}
+        $script:InstallPowerShell = $null
+    }
+    if ($script:InstallRunspace) {
+        try { $script:InstallRunspace.Close(); $script:InstallRunspace.Dispose() } catch {}
+        $script:InstallRunspace = $null
+    }
+
+    $script:InstallAsyncResult = $null
+    $script:InstallRunning = $false
+
+    foreach ($app in $script:SoftwareCatalog) { $app.IsSelected = $false }
+    $script:AppsView.Refresh()
+    Set-AMRInstallButtonsEnabled -Enabled $true
+
+    if ($ErrorText) {
+        $script:ProgressBar.Value = 0
+        $script:ProgressText.Text = "Installation failed with error."
+        Write-AMRLog "Installation worker failed: $ErrorText" ERROR Software
+        Show-AMRMessage "The installation worker stopped unexpectedly:`n`n$ErrorText" "Engine Error" OK Error | Out-Null
+        return
+    }
+
+    if (-not $Result) {
+        Show-AMRMessage "The operation finished without returning a result." "Engine Warning" OK Warning | Out-Null
+        return
+    }
+
+    $summary = "$($Result.ActionName) Summary:`n`n" +
+               "✔ Successfully processed: $($Result.SuccessCount)`n" +
+               "⏭ Skipped (already installed): $($Result.SkippedCount)`n" +
+               "❌ Failed: $($Result.FailedCount)"
+
+    if ($Result.RebootNeeded) {
+        $summary += "`n`n⚠ One or more installers requested a restart (1641/3010)."
+    }
+
+    $script:ProgressBar.Value = 100
+    $script:ProgressText.Text = "Finished: $($Result.SuccessCount) Succeeded, $($Result.SkippedCount) Skipped, $($Result.FailedCount) Failed."
+    Write-AMRLog "Queue finished. Success: $($Result.SuccessCount), Skipped: $($Result.SkippedCount), Failed: $($Result.FailedCount)." SUCCESS Software
+    Show-AMRMessage $summary "Operation Summary" OK Information | Out-Null
+}
+
+function Execute-SmartMultiTierInstallAsync {
+    param(
+        [string]$ActionCommand,
+        [string]$ActionName,
+        [string]$ExtraFlags = '',
+        [switch]$Interactive
+    )
+
+    if ($script:InstallRunning) {
+        Write-AMRLog "An installation queue is already running." WARNING Software
+        return
+    }
+
+    if ($ActionCommand -notin @('install','upgrade','repair')) {
+        Show-AMRMessage "Unsupported software action: $ActionCommand" "Invalid Action" OK Error | Out-Null
+        return
+    }
+
+    $selectedSnapshot = @(
+        $script:SoftwareCatalog |
+        Where-Object { $_.IsSelected -eq $true } |
+        ForEach-Object {
+            [pscustomobject]@{
+                Name       = [string]$_.Name
+                Category   = [string]$_.Category
+                Id         = [string]$_.Id
+                ChocoId    = [string]$_.ChocoId
+                DirectUrl  = [string]$_.DirectUrl
+                DirectArgs = [string]$_.DirectArgs
+                Publisher  = [string]$_.Publisher
+            }
+        }
+    )
+
+    if ($selectedSnapshot.Count -eq 0) {
+        Show-AMRMessage "Please select at least one application." "Selection Required" OK Warning | Out-Null
+        return
+    }
+
+    if ($ActionCommand -eq 'repair' -and -not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
+        Show-AMRMessage "Repair requires the Winget command to be available." "Engine Missing" OK Warning | Out-Null
+        return
+    }
+
+    $script:InstallRunning = $true
+    $script:InstallActionName = $ActionName
+    $script:InstallSelectedSnapshot = $selectedSnapshot
+    $script:ProgressBar.Value = 0
+    $script:ProgressText.Text = "Initializing $ActionName..."
+    Set-AMRInstallButtonsEnabled -Enabled $false
+
+    Write-AMRLog "Starting $ActionName for $($selectedSnapshot.Count) application(s)." INFO Software
+
+    try {
+        $discardedLine = $null
+        while ($script:InstallLogQueue.TryDequeue([ref]$discardedLine)) {
+            $discardedLine = $null
+        }
+
+        $script:InstallRunspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+        $script:InstallRunspace.ApartmentState = [System.Threading.ApartmentState]::MTA
+        $script:InstallRunspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
+        $script:InstallRunspace.Open()
+
+        $script:InstallPowerShell = [PowerShell]::Create()
+        $script:InstallPowerShell.Runspace = $script:InstallRunspace
+
+        [void]$script:InstallPowerShell.AddScript($script:InstallWorkerCode)
+        [void]$script:InstallPowerShell.AddArgument($selectedSnapshot)
+        [void]$script:InstallPowerShell.AddArgument($ActionCommand)
+        [void]$script:InstallPowerShell.AddArgument($ActionName)
+        [void]$script:InstallPowerShell.AddArgument([bool]$Interactive)
+        [void]$script:InstallPowerShell.AddArgument($script:DownloadDir)
+        [void]$script:InstallPowerShell.AddArgument($script:InstallLogQueue)
+
+        $script:InstallAsyncResult = $script:InstallPowerShell.BeginInvoke()
+
+        $script:InstallTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:InstallTimer.Interval = [TimeSpan]::FromMilliseconds(150)
+        $script:InstallTimer.Add_Tick({
+            $queuedLine = $null
+            while ($script:InstallLogQueue.TryDequeue([ref]$queuedLine)) {
+                if ($queuedLine) {
+                    if ($queuedLine -match "^PROG:(\d+)\|(.*)$") {
+                        $script:ProgressBar.Value = [int]$matches[1]
+                        $queuedLine = $matches[2]
+                    }
+                    Add-Content -LiteralPath $script:LogFile -Value $queuedLine -Encoding UTF8 -ErrorAction SilentlyContinue
+                    foreach ($key in @('All','Software')) {
+                        $control = $script:LogControls[$key]
+                        if ($control) {
+                            $control.AppendText("$queuedLine`r`n")
+                            $control.ScrollToEnd()
+                        }
+                    }
+                    $script:Status.Text = $queuedLine
+                    $script:ProgressText.Text = $queuedLine
+                }
+                $queuedLine = $null
+            }
+
+            if ($script:InstallAsyncResult -and $script:InstallAsyncResult.IsCompleted) {
+                $resultObject = $null
+                $errorMessage = ''
+                try {
+                    $outputCollection = $script:InstallPowerShell.EndInvoke($script:InstallAsyncResult)
+                    if ($outputCollection -and $outputCollection.Count -gt 0) {
+                        $resultObject = $outputCollection[$outputCollection.Count - 1]
+                    }
+                    if ($script:InstallPowerShell.Streams.Error.Count -gt 0) {
+                        $errorMessage = ($script:InstallPowerShell.Streams.Error | ForEach-Object { $_.ToString() }) -join "`n"
+                    }
+                } catch {
+                    $errorMessage = $_.Exception.Message
+                }
+
+                Complete-AMRInstallQueue -Result $resultObject -ErrorText $errorMessage
+            }
+        })
+        $script:InstallTimer.Start()
+    }
+    catch {
+        Complete-AMRInstallQueue -Result $null -ErrorText $_.Exception.Message
+    }
+}
+
+# BUTTON BINDINGS
+(C 'InstallSelectedBtn').Add_Click({
+    Execute-SmartMultiTierInstallAsync -ActionCommand 'install' -ActionName 'Smart Silent Install'
+})
+
+(C 'InstallInteractiveBtn').Add_Click({
+    Execute-SmartMultiTierInstallAsync -ActionCommand 'install' -ActionName 'Interactive Install' -Interactive
+})
+
+(C 'UpdateSelectedBtn').Add_Click({
+    Execute-SmartMultiTierInstallAsync -ActionCommand 'upgrade' -ActionName 'App Update'
+})
+
+(C 'RepairSelectedBtn').Add_Click({
+    Execute-SmartMultiTierInstallAsync -ActionCommand 'repair' -ActionName 'App Repair'
+})
+
+# --- 8. MEGA CUSTOMIZE EXECUTION ENGINE (27 TOOLS & TWEAKS) ---
+(C 'ApplyCustomizeBtn').Add_Click({
+    Write-AMRLog "Applying selected Windows customizations..." INFO Customize
+    $needsExplorerRestart = $false
+    $appliedSuccessCount = 0
+
+    # 1. Appearance & Visuals
+    if ((C 'chkDarkMode').IsChecked -eq $true) {
+        $r1 = Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "AppsUseLightTheme" -Value 0
+        $r2 = Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "SystemUsesLightTheme" -Value 0
+        if ($r1 -and $r2) { $appliedSuccessCount++; $needsExplorerRestart = $true }
+    }
+    if ((C 'chkDisableTransparency').IsChecked -eq $true) {
+        if (Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "EnableTransparency" -Value 0) { $appliedSuccessCount++; $needsExplorerRestart = $true }
+    }
+    if ((C 'chkDisableAccentColor').IsChecked -eq $true) {
+        if (Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\DWM" -Name "ColorPrevalence" -Value 0) { $appliedSuccessCount++; $needsExplorerRestart = $true }
+    }
+    if ((C 'chkClassicVolume').IsChecked -eq $true) {
+        if (Set-AMRRegistryKey -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\MTCUVC" -Name "EnableMtcUvc" -Value 0) { $appliedSuccessCount++ }
+    }
+    if ((C 'chkDisableAnimations').IsChecked -eq $true) {
+        if (Set-AMRRegistryKey -Path "HKCU:\Control Panel\Desktop\WindowMetrics" -Name "MinAnimate" -Value "0" -PropertyType String) { $appliedSuccessCount++ }
+    }
+
+    # 2. Taskbar & Start Menu
+    if ((C 'chkShowSeconds').IsChecked -eq $true) {
+        if (Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ShowSecondsInSystemClock" -Value 1) { $appliedSuccessCount++; $needsExplorerRestart = $true }
+    }
+    if ((C 'chkDisableBingSearch').IsChecked -eq $true) {
+        if (Set-AMRRegistryKey -Path "HKCU:\Software\Policies\Microsoft\Windows\Explorer" -Name "DisableSearchBoxSuggestions" -Value 1) { $appliedSuccessCount++; $needsExplorerRestart = $true }
+    }
+    if ((C 'chkTaskbarLeft').IsChecked -eq $true) {
+        if (Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "TaskbarAl" -Value 0) { $appliedSuccessCount++; $needsExplorerRestart = $true }
+    }
+    if ((C 'chkHideWidgets').IsChecked -eq $true) {
+        if (Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "TaskbarDa" -Value 0) { $appliedSuccessCount++; $needsExplorerRestart = $true }
+    }
+    if ((C 'chkHideTaskView').IsChecked -eq $true) {
+        if (Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ShowTaskViewButton" -Value 0) { $appliedSuccessCount++; $needsExplorerRestart = $true }
+    }
+
+    # 3. File Explorer & View
+    if ((C 'chkHiddenFiles').IsChecked -eq $true) {
+        $r1 = Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Hidden" -Value 1
+        $r2 = Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "HideFileExt" -Value 0
+        if ($r1 -and $r2) { $appliedSuccessCount++; $needsExplorerRestart = $true }
+    }
+    if ((C 'chkOpenThisPC').IsChecked -eq $true) {
+        if (Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "LaunchTo" -Value 1) { $appliedSuccessCount++; $needsExplorerRestart = $true }
+    }
+    if ((C 'chkClassicContextMenu').IsChecked -eq $true) {
+        if (Set-AMRRegistryKey -Path "HKCU:\Software\Classes\CLSID\{86ca3a0d-4a87-4447-a4cd-410b15471612}\InprocServer32" -Name "" -Value "" -PropertyType String) { $appliedSuccessCount++; $needsExplorerRestart = $true }
+    }
+    if ((C 'chkHideRecentFiles').IsChecked -eq $true) {
+        $r1 = Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer" -Name "ShowRecent" -Value 0
+        $r2 = Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer" -Name "ShowFrequent" -Value 0
+        if ($r1 -and $r2) { $appliedSuccessCount++; $needsExplorerRestart = $true }
+    }
+    if ((C 'chkSeparateFolderProcess').IsChecked -eq $true) {
+        if (Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "SeparateProcess" -Value 1) { $appliedSuccessCount++; $needsExplorerRestart = $true }
+    }
+
+    # 4. Behavior & Accessibility
+    if ((C 'chkDisableStickyKeys').IsChecked -eq $true) {
+        if (Set-AMRRegistryKey -Path "HKCU:\Control Panel\Accessibility\StickyKeys" -Name "Flags" -Value "506" -PropertyType String) { $appliedSuccessCount++ }
+    }
+    if ((C 'chkDisableAutoRebootUpdate').IsChecked -eq $true) {
+        if (Set-AMRRegistryKey -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "NoAutoRebootWithLoggedOnUsers" -Value 1) { $appliedSuccessCount++ }
+    }
+    if ((C 'chkShowBSODDetails').IsChecked -eq $true) {
+        if (Set-AMRRegistryKey -Path "HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl" -Name "DisplayParameters" -Value 1) { $appliedSuccessCount++ }
+    }
+    if ((C 'chkDisableShortcutSuffix').IsChecked -eq $true) {
+        if (Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer" -Name "link" -Value ([byte[]]@(0,0,0,0)) -PropertyType Binary) { $appliedSuccessCount++; $needsExplorerRestart = $true }
+    }
+
+    # 5. Privacy & Tracking
+    if ((C 'chkDisableAdvertisingID').IsChecked -eq $true) {
+        if (Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo" -Name "Enabled" -Value 0) { $appliedSuccessCount++ }
+    }
+    if ((C 'chkDisableLocationTracking').IsChecked -eq $true) {
+        if (Set-AMRRegistryKey -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location" -Name "Value" -Value "Deny" -PropertyType String) { $appliedSuccessCount++ }
+    }
+    if ((C 'chkDisableFeedbackPrompts').IsChecked -eq $true) {
+        if (Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Siuf\Rules" -Name "NumberOfSIUFInPeriod" -Value 0) { $appliedSuccessCount++ }
+    }
+    if ((C 'chkDisableTailoredExperiences').IsChecked -eq $true) {
+        if (Set-AMRRegistryKey -Path "HKCU:\Software\Policies\Microsoft\Windows\CloudContent" -Name "DisableTailoredExperiencesWithDiagnosticData" -Value 1) { $appliedSuccessCount++ }
+    }
+
+    # 6. Performance & Gaming Tools
+    if ((C 'chkEnableGameMode').IsChecked -eq $true) {
+        if (Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\GameBar" -Name "AllowAutoGameMode" -Value 1) { $appliedSuccessCount++ }
+    }
+    if ((C 'chkDisableSearchIndexing').IsChecked -eq $true) {
+        Set-Service -Name "WSearch" -StartupType Manual -ErrorAction SilentlyContinue
+        $appliedSuccessCount++
+    }
+    if ((C 'chkAddTakeOwnership').IsChecked -eq $true) {
+        $cmd = 'cmd.exe /c takeown /f "%1" && icacls "%1" /grant administrators:F'
+        if (Set-AMRRegistryKey -Path "HKCR:\*\shell\TakeOwnership\command" -Name "" -Value $cmd -PropertyType String) { $appliedSuccessCount++ }
+    }
+    if ((C 'chkDisableHibernation').IsChecked -eq $true) {
+        powercfg -h off | Out-Null
+        Write-AMRLog "Disabled system hibernation to free disk space." SUCCESS Customize
+        $appliedSuccessCount++
+    }
+
+    if ($appliedSuccessCount -gt 0) {
+        if ($needsExplorerRestart) {
+            Write-AMRLog "Restarting File Explorer to apply desktop & registry changes..." INFO Customize
+            Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+        }
+        Show-AMRMessage "Applied $appliedSuccessCount customization tweak(s) successfully!" "Customization Complete" OK Information | Out-Null
+    } else {
+        Show-AMRMessage "Please select at least one tweak to apply." "Notice" OK Warning | Out-Null
+    }
+})
+
+# OPTIMIZE ENGINE
+(C 'OptDisableTelemetryBtn').Add_Click({
+    Set-Service -Name "DiagTrack" -StartupType Disabled -ErrorAction SilentlyContinue
+    Stop-Service -Name "DiagTrack" -Force -ErrorAction SilentlyContinue
+    Set-AMRRegistryKey -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" -Name "AllowTelemetry" -Value 0 | Out-Null
+    Write-AMRLog "Telemetry services disabled." SUCCESS System
+    Show-AMRMessage "Telemetry & Diagnostics disabled." "Optimize" OK Information | Out-Null
+})
+
+(C 'OptDisableBackgroundAppsBtn').Add_Click({
+    if (Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" -Name "GlobalUserDisabled" -Value 1) {
+        Show-AMRMessage "Global background app access disabled." "Optimize" OK Information | Out-Null
+    }
+})
+
+(C 'OptDisableCortanaBtn').Add_Click({
+    if (Set-AMRRegistryKey -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search" -Name "AllowCortana" -Value 0) {
+        Show-AMRMessage "Cortana disabled." "Optimize" OK Information | Out-Null
+    }
+})
+
+# SECURITY ENGINE
+(C 'SecEnableDefenderBtn').Add_Click({
+    Set-MpPreference -DisableRealtimeMonitoring $false -ErrorAction SilentlyContinue
+    Write-AMRLog "Windows Defender Realtime Protection enabled." SUCCESS System
+    Show-AMRMessage "Windows Defender is enabled." "Security" OK Information | Out-Null
+})
+
+(C 'SecEnableFirewallBtn').Add_Click({
+    Set-NetFirewallProfile -All -Enabled True -ErrorAction SilentlyContinue
+    Write-AMRLog "All Network Firewall profiles enabled." SUCCESS System
+    Show-AMRMessage "Windows Firewall profiles enabled." "Security" OK Information | Out-Null
+})
+
+(C 'SecDisableActivityHistoryBtn').Add_Click({
+    Set-AMRRegistryKey -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "PublishUserActivities" -Value 0 | Out-Null
+    Set-AMRRegistryKey -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "UploadUserActivities" -Value 0 | Out-Null
+    Write-AMRLog "Activity History tracking disabled." SUCCESS System
+    Show-AMRMessage "Activity History disabled." "Security" OK Information | Out-Null
+})
+
+# SYSTEM ENGINE
+(C 'SysUltimatePowerBtn').Add_Click({
+    powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61 | Out-Null
+    Write-AMRLog "Ultimate Performance Power Plan added." SUCCESS System
+    Show-AMRMessage "Ultimate Performance Power Plan activated!" "System" OK Information | Out-Null
+})
+
+(C 'SysDisableFastStartupBtn').Add_Click({
+    if (Set-AMRRegistryKey -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" -Name "HiberbootEnabled" -Value 0) {
+        Show-AMRMessage "Fast Startup disabled." "System" OK Information | Out-Null
+    }
+})
+
+# NETWORK ENGINE
+(C 'NetFlushDnsBtn').Add_Click({
+    Clear-DnsClientCache -ErrorAction SilentlyContinue
+    Write-AMRLog "DNS Client Cache flushed." SUCCESS System
+    Show-AMRMessage "DNS Cache Flushed Successfully!" "Network" OK Information | Out-Null
+})
+
+(C 'NetResetAdaptersBtn').Add_Click({
+    netsh int ip reset | Out-Null
+    netsh winsock reset | Out-Null
+    Write-AMRLog "TCP/IP Stack and Winsock Reset executed." SUCCESS System
+    Show-AMRMessage "Network adapters reset. Please restart your PC." "Network" OK Information | Out-Null
+})
+
+# CLEANUP ENGINE
+(C 'CleanTempFilesBtn').Add_Click({
+    $tempPaths = @($env:TEMP, 'C:\Windows\Temp')
+    foreach ($path in $tempPaths) {
+        Get-ChildItem -Path $path -Recurse -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Write-AMRLog "Temporary files purged." SUCCESS System
+    Show-AMRMessage "System & User Temp files cleaned." "Cleanup" OK Information | Out-Null
+})
+
+(C 'CleanUpdateCacheBtn').Add_Click({
+    Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -Path "C:\Windows\SoftwareDistribution\Download" -Recurse -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    Start-Service -Name wuauserv -ErrorAction SilentlyContinue
+    Write-AMRLog "Windows Update Cache purged." SUCCESS System
+    Show-AMRMessage "Windows Update Cache cleaned successfully." "Cleanup" OK Information | Out-Null
+})
+
+# BACKUP ENGINE
+(C 'BackupCreateRestorePointBtn').Add_Click({
+    try {
+        Enable-ComputerRestore -Drive "C:\" -ErrorAction SilentlyContinue
+        Checkpoint-Computer -Description "AMR-Utility Restore Point" -RestorePointType "MODIFY_SETTINGS"
+        Write-AMRLog "Created System Restore Point." SUCCESS System
+        Show-AMRMessage "Restore Point created successfully!" "Backup" OK Information | Out-Null
+    } catch {
+        Show-AMRMessage "Could not create Restore Point: $_" "Backup Error" OK Error | Out-Null
+    }
+})
+
+(C 'BackupRegistryBtn').Add_Click({
+    $regFile = Join-Path $script:BackupDir ("HKCU_Backup_{0}.reg" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+    reg export "HKCU\Software" $regFile /y | Out-Null
+    Write-AMRLog "Exported HKCU registry to: $regFile" SUCCESS System
+    Show-AMRMessage "HKCU Registry backup saved to:`n$regFile" "Backup" OK Information | Out-Null
+})
+
+# UTILITIES ENGINE
+(C 'UtilControlPanelBtn').Add_Click({ Start-Process "control.exe" })
+(C 'UtilRegeditBtn').Add_Click({ Start-Process "regedit.exe" })
+(C 'UtilDevMgmtBtn').Add_Click({ Start-Process "devmgmt.msc" })
+(C 'UtilSysInfoBtn').Add_Click({ Start-Process "msinfo32.exe" })
+
+# --- 9. Launch Suite ---
+Write-AMRLog 'Amr | windows_utility V0.1 initialized.' INFO System
+Refresh-AMROverview
+Write-AMRLog 'Utility Ready.' SUCCESS System
+[void]$script:Window.ShowDialog()
