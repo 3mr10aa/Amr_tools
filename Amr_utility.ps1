@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 <#
 Amr | windows_utility - V0.1
 Windows 10/11 | Windows PowerShell 5.1 | WPF | Administrator
