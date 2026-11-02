@@ -683,15 +683,45 @@ $RawApps = @(
     [pscustomobject]@{ Name='Lossless Scaling'; Category='27. Gaming & Game Tools'; Id='THS.LosslessScaling'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='' }
 )
 
+# Load icon files as real WPF ImageSource objects before binding them to the UI.
+# This avoids relying on implicit string-to-ImageSource conversion in DataTemplate bindings.
+$script:IconImageCache = @{}
+function Get-AMRIconImageSource {
+    param([Parameter(Mandatory=$true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    if ($script:IconImageCache.ContainsKey($fullPath)) { return $script:IconImageCache[$fullPath] }
+
+    try {
+        $bitmap = New-Object System.Windows.Media.Imaging.BitmapImage
+        $bitmap.BeginInit()
+        $bitmap.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+        $bitmap.CreateOptions = [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache
+        $bitmap.UriSource = New-Object System.Uri($fullPath, [System.UriKind]::Absolute)
+        $bitmap.EndInit()
+        if ($bitmap.CanFreeze) { $bitmap.Freeze() }
+        $script:IconImageCache[$fullPath] = $bitmap
+        return $bitmap
+    } catch {
+        Write-AMRLog "Could not load icon '$fullPath': $($_.Exception.Message)" WARNING Software
+        $script:IconImageCache[$fullPath] = $null
+        return $null
+    }
+}
+
 $script:SoftwareCatalog = New-Object 'System.Collections.ObjectModel.ObservableCollection[object]'
 
 $RawApps | ForEach-Object {
     $initial  = if ($_.Name.Length -gt 0) { $_.Name.Substring(0,1).ToUpper() } else { 'A' }
     $iconPath = Join-Path $script:IconDir "$($_.Id).png"
     $jpgPath  = Join-Path $script:IconDir "$($_.Id).jpg"
-    $iconUrl  = $null
-    if (Test-Path $iconPath) { $iconUrl = $iconPath }
-    elseif (Test-Path $jpgPath) { $iconUrl = $jpgPath }
+    $iconSource = $null
+    if (Test-Path -LiteralPath $iconPath -PathType Leaf) {
+        $iconSource = Get-AMRIconImageSource -Path $iconPath
+    } elseif (Test-Path -LiteralPath $jpgPath -PathType Leaf) {
+        $iconSource = Get-AMRIconImageSource -Path $jpgPath
+    }
 
     $script:SoftwareCatalog.Add([pscustomobject]@{
         IsSelected    = $false
@@ -703,7 +733,7 @@ $RawApps | ForEach-Object {
         DirectArgs    = $_.DirectArgs
         Publisher     = $_.Publisher
         Initials      = $initial
-        Icon          = $iconUrl
+        Icon          = $iconSource
     })
 }
 
@@ -966,8 +996,21 @@ $RawApps | ForEach-Object {
             </CheckBox>
             <Grid Grid.Column="1" Width="48" Height="48" Margin="0,0,15,0">
              <Border Background="#3F3F46" CornerRadius="10"/>
-             <TextBlock Text="{Binding Initials}" Foreground="#A1A1AA" FontSize="20" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-             <Image Source="{Binding Icon}" Width="36" Height="36" Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality"/>
+             <TextBlock Text="{Binding Initials}" Foreground="#A1A1AA" FontSize="20" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center">
+              <TextBlock.Style>
+               <Style TargetType="TextBlock">
+                <Setter Property="Visibility" Value="Collapsed"/>
+                <Style.Triggers>
+                 <DataTrigger Binding="{Binding Icon}" Value="{x:Null}">
+                  <Setter Property="Visibility" Value="Visible"/>
+                 </DataTrigger>
+                </Style.Triggers>
+               </Style>
+              </TextBlock.Style>
+             </TextBlock>
+             <Image Source="{Binding Icon}" Width="36" Height="36" Stretch="Uniform"
+                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                    SnapsToDevicePixels="True" RenderOptions.BitmapScalingMode="HighQuality"/>
             </Grid>
             <StackPanel Grid.Column="2" VerticalAlignment="Center">
              <TextBlock Text="{Binding Name}" FontSize="16" FontWeight="Bold" Foreground="#FFFFFF" TextWrapping="Wrap"/>
