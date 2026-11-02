@@ -683,29 +683,36 @@ $RawApps = @(
     [pscustomobject]@{ Name='Lossless Scaling'; Category='27. Gaming & Game Tools'; Id='THS.LosslessScaling'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='' }
 )
 
-# Load icon files as real WPF ImageSource objects before binding them to the UI.
-# This avoids relying on implicit string-to-ImageSource conversion in DataTemplate bindings.
-$script:IconImageCache = @{}
+# Convert icon files to frozen WPF ImageSource objects.
+# WPF Image.Source expects an ImageSource, not a plain filesystem path string.
 function Get-AMRIconImageSource {
-    param([Parameter(Mandatory=$true)][string]$Path)
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
 
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
-    $fullPath = [System.IO.Path]::GetFullPath($Path)
-    if ($script:IconImageCache.ContainsKey($fullPath)) { return $script:IconImageCache[$fullPath] }
+    if ([string]::IsNullOrWhiteSpace($Path) -or
+        -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $null
+    }
 
     try {
+        $fullPath = [System.IO.Path]::GetFullPath($Path)
         $bitmap = New-Object System.Windows.Media.Imaging.BitmapImage
         $bitmap.BeginInit()
         $bitmap.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
         $bitmap.CreateOptions = [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache
         $bitmap.UriSource = New-Object System.Uri($fullPath, [System.UriKind]::Absolute)
         $bitmap.EndInit()
-        if ($bitmap.CanFreeze) { $bitmap.Freeze() }
-        $script:IconImageCache[$fullPath] = $bitmap
+
+        if ($bitmap.CanFreeze) {
+            $bitmap.Freeze()
+        }
+
         return $bitmap
-    } catch {
-        Write-AMRLog "Could not load icon '$fullPath': $($_.Exception.Message)" WARNING Software
-        $script:IconImageCache[$fullPath] = $null
+    }
+    catch {
+        Write-AMRLog "Could not load app icon '$Path': $($_.Exception.Message)" WARNING Software
         return $null
     }
 }
@@ -717,9 +724,13 @@ $RawApps | ForEach-Object {
     $iconPath = Join-Path $script:IconDir "$($_.Id).png"
     $jpgPath  = Join-Path $script:IconDir "$($_.Id).jpg"
     $iconSource = $null
+
     if (Test-Path -LiteralPath $iconPath -PathType Leaf) {
         $iconSource = Get-AMRIconImageSource -Path $iconPath
-    } elseif (Test-Path -LiteralPath $jpgPath -PathType Leaf) {
+    }
+
+    if ($null -eq $iconSource -and
+        (Test-Path -LiteralPath $jpgPath -PathType Leaf)) {
         $iconSource = Get-AMRIconImageSource -Path $jpgPath
     }
 
@@ -736,6 +747,9 @@ $RawApps | ForEach-Object {
         Icon          = $iconSource
     })
 }
+
+$loadedIconCount = @($script:SoftwareCatalog | Where-Object { $null -ne $_.Icon }).Count
+Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog.Count) catalog entries from '$script:IconDir'." INFO Software
 
 # --- 4. FULL WPF XAML INTERFACE WITH PROGRESS BAR & 27 CUSTOMIZE TOOLS ---
 [xml]$xaml = @'
@@ -1008,9 +1022,7 @@ $RawApps | ForEach-Object {
                </Style>
               </TextBlock.Style>
              </TextBlock>
-             <Image Source="{Binding Icon}" Width="36" Height="36" Stretch="Uniform"
-                    HorizontalAlignment="Center" VerticalAlignment="Center"
-                    SnapsToDevicePixels="True" RenderOptions.BitmapScalingMode="HighQuality"/>
+             <Image Source="{Binding Icon, Mode=OneWay}" Width="36" Height="36" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center" SnapsToDevicePixels="True" RenderOptions.BitmapScalingMode="HighQuality"/>
             </Grid>
             <StackPanel Grid.Column="2" VerticalAlignment="Center">
              <TextBlock Text="{Binding Name}" FontSize="16" FontWeight="Bold" Foreground="#FFFFFF" TextWrapping="Wrap"/>
