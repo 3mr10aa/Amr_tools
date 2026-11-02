@@ -683,6 +683,106 @@ $RawApps = @(
     [pscustomobject]@{ Name='Lossless Scaling'; Category='27. Gaming & Game Tools'; Id='THS.LosslessScaling'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='' }
 )
 
+# --- SOFTWARE ICONS: DOWNLOAD/CACHE THE PUBLISHED ICON PACK ---
+# Only affects the Software catalog's icon files; no installer or other UI logic is changed.
+$script:IconArchiveUrl = 'https://raw.githubusercontent.com/3mr10aa/Amr_tools/91d4c6047478238e8fd9ddd421ea5bd4c54769e0/icons.zip'
+$script:IconArchivePath = Join-Path $script:DownloadDir 'amr-software-icons.zip'
+
+function Initialize-AMRSoftwareIcons {
+    param([Parameter(Mandatory = $true)][object[]]$Apps)
+
+    # Avoid network and extraction work when all catalog icons are already cached.
+    $missingIcons = @($Apps | Where-Object {
+        $id = [string]$_.Id
+        -not (Test-Path -LiteralPath (Join-Path $script:IconDir "$id.png") -PathType Leaf) -and
+        -not (Test-Path -LiteralPath (Join-Path $script:IconDir "$id.jpg") -PathType Leaf) -and
+        -not (Test-Path -LiteralPath (Join-Path $script:IconDir "$id.jpeg") -PathType Leaf)
+    }).Count
+    if ($missingIcons -eq 0) {
+        Write-AMRLog "All $($Apps.Count) software icons are already cached; skipping icon download." INFO Software
+        return
+    }
+
+    $downloadTemp = "$($script:IconArchivePath).download"
+    $stagingDir = Join-Path $script:DownloadDir 'AMR_Icons_Staging'
+    try {
+        if (-not (Test-Path -LiteralPath $script:IconArchivePath -PathType Leaf)) {
+            Write-AMRLog "Downloading the software icon pack ($missingIcons catalog icons missing)..." INFO Software
+            # Windows PowerShell 5.1 may otherwise negotiate an older TLS protocol.
+            try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+            Remove-Item -LiteralPath $downloadTemp -Force -ErrorAction SilentlyContinue
+            Invoke-WebRequest -Uri $script:IconArchiveUrl -OutFile $downloadTemp -UseBasicParsing -TimeoutSec 45 -ErrorAction Stop
+            if (-not (Test-Path -LiteralPath $downloadTemp -PathType Leaf) -or (Get-Item -LiteralPath $downloadTemp).Length -lt 1024) {
+                throw 'The downloaded icon archive is empty or too small.'
+            }
+            # Validate the ZIP before replacing the cached copy.
+            Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+            $zipCheck = [System.IO.Compression.ZipFile]::OpenRead($downloadTemp)
+            try { if ($zipCheck.Entries.Count -lt 1) { throw 'The icon ZIP contains no files.' } }
+            finally { $zipCheck.Dispose() }
+            Move-Item -LiteralPath $downloadTemp -Destination $script:IconArchivePath -Force
+        }
+
+        if (Test-Path -LiteralPath $stagingDir) {
+            Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
+        Expand-Archive -LiteralPath $script:IconArchivePath -DestinationPath $stagingDir -Force -ErrorAction Stop
+
+        $imageFiles = @(Get-ChildItem -LiteralPath $stagingDir -Recurse -File -ErrorAction Stop | Where-Object {
+            $_.Extension -match '^\.(png|jpe?g)$'
+        })
+        if ($imageFiles.Count -eq 0) { throw 'No PNG/JPG icons were found in the downloaded archive.' }
+
+        # Index by exact filename first; the archive was prepared with application IDs as filenames.
+        $byBaseName = @{}
+        foreach ($file in $imageFiles) {
+            $key = [System.IO.Path]::GetFileNameWithoutExtension($file.Name).ToLowerInvariant()
+            if (-not $byBaseName.ContainsKey($key)) { $byBaseName[$key] = $file }
+        }
+
+        $copied = 0
+        foreach ($app in $Apps) {
+            $appId = [string]$app.Id
+            $sourceIcon = $null
+            $exactKey = $appId.ToLowerInvariant()
+            if ($byBaseName.ContainsKey($exactKey)) {
+                $sourceIcon = $byBaseName[$exactKey]
+            } else {
+                # Be tolerant of filenames where punctuation in the ID was normalized.
+                $normalizedId = ($appId -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
+                foreach ($file in $imageFiles) {
+                    $normalizedBase = ([System.IO.Path]::GetFileNameWithoutExtension($file.Name) -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
+                    if ($normalizedBase -eq $normalizedId) { $sourceIcon = $file; break }
+                }
+            }
+
+            if ($null -ne $sourceIcon) {
+                $targetExtension = if ($sourceIcon.Extension -ieq '.jpeg') { '.jpg' } else { $sourceIcon.Extension.ToLowerInvariant() }
+                $targetPath = Join-Path $script:IconDir ($appId + $targetExtension)
+                Copy-Item -LiteralPath $sourceIcon.FullName -Destination $targetPath -Force -ErrorAction Stop
+                $copied++
+            }
+        }
+        Write-AMRLog "Icon pack processed: matched and cached $copied of $($Apps.Count) catalog applications." $(if ($copied -gt 0) { 'SUCCESS' } else { 'WARNING' }) Software
+    }
+    catch {
+        Write-AMRLog "Could not initialize the online software icon pack: $($_.Exception.Message). Existing local icons will still be used." WARNING Software
+        # Do not keep a broken/incomplete download that would block future attempts.
+        if (Test-Path -LiteralPath $downloadTemp) { Remove-Item -LiteralPath $downloadTemp -Force -ErrorAction SilentlyContinue }
+        if ((Test-Path -LiteralPath $script:IconArchivePath) -and (Get-Item -LiteralPath $script:IconArchivePath).Length -lt 1024) {
+            Remove-Item -LiteralPath $script:IconArchivePath -Force -ErrorAction SilentlyContinue
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $stagingDir) {
+            Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Initialize-AMRSoftwareIcons -Apps @($RawApps)
+
 # Convert icon files to frozen WPF ImageSource objects.
 # WPF Image.Source expects an ImageSource, not a plain filesystem path string.
 function Get-AMRIconImageSource {
@@ -723,6 +823,7 @@ $RawApps | ForEach-Object {
     $initial  = if ($_.Name.Length -gt 0) { $_.Name.Substring(0,1).ToUpper() } else { 'A' }
     $iconPath = Join-Path $script:IconDir "$($_.Id).png"
     $jpgPath  = Join-Path $script:IconDir "$($_.Id).jpg"
+    $jpegPath = Join-Path $script:IconDir "$($_.Id).jpeg"
     $iconSource = $null
 
     if (Test-Path -LiteralPath $iconPath -PathType Leaf) {
@@ -732,6 +833,11 @@ $RawApps | ForEach-Object {
     if ($null -eq $iconSource -and
         (Test-Path -LiteralPath $jpgPath -PathType Leaf)) {
         $iconSource = Get-AMRIconImageSource -Path $jpgPath
+    }
+
+    if ($null -eq $iconSource -and
+        (Test-Path -LiteralPath $jpegPath -PathType Leaf)) {
+        $iconSource = Get-AMRIconImageSource -Path $jpegPath
     }
 
     $script:SoftwareCatalog.Add([pscustomobject]@{
@@ -744,7 +850,7 @@ $RawApps | ForEach-Object {
         DirectArgs    = $_.DirectArgs
         Publisher     = $_.Publisher
         Initials      = $initial
-        Icon          = $iconSource
+        Icon          = [System.Windows.Media.ImageSource]$iconSource
     })
 }
 
@@ -1022,7 +1128,7 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
                </Style>
               </TextBlock.Style>
              </TextBlock>
-             <Image Source="{Binding Icon, Mode=OneWay}" Width="36" Height="36" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center" SnapsToDevicePixels="True" RenderOptions.BitmapScalingMode="HighQuality"/>
+             <Image Source="{Binding Icon, Mode=OneWay, TargetNullValue={x:Null}, FallbackValue={x:Null}}" Width="36" Height="36" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center" SnapsToDevicePixels="True" RenderOptions.BitmapScalingMode="HighQuality"/>
             </Grid>
             <StackPanel Grid.Column="2" VerticalAlignment="Center">
              <TextBlock Text="{Binding Name}" FontSize="16" FontWeight="Bold" Foreground="#FFFFFF" TextWrapping="Wrap"/>
