@@ -1,67 +1,97 @@
-# AMR Windows Utility
+AMR Windows Utility
+A Windows utility built with PowerShell and WPF to help users browse, search, and manage supported software installation tasks through a graphical interface.
+Features
 
-A Windows maintenance and utility toolkit built with Windows PowerShell 5.1 and WPF.
+Graphical User Interface: A WPF-based interface for easier navigation.
+Software Search: Search the available software list.
+Software Icons: Displays available application icons in the interface.
+Automatic Icon Setup: Downloads and caches the icon pack when needed.
+Local Icon Cache: Stores icons under %ProgramData%\AMR-Utility\Icons to avoid downloading them again when they are already available.
+Launcher Scripts: Includes convenient scripts for starting the application.
 
-> **Important:** This application requests Administrator privileges and includes actions that can change Windows settings, Registry values, services, networking configuration, temporary files, and Windows Update cache. Review the available actions and understand their effects before running them. Back up important data and create a restore point where appropriate. Use at your own risk.
+Repository Contents
 
-## Requirements
 
-- Windows 10 or Windows 11
-- Windows PowerShell 5.1 (included with supported Windows versions)
-- Administrator account / approval for the UAC prompt
-- WPF desktop environment
-- Internet connection for online software installation features
 
-## Run from the ZIP package
+File or Folder
+Description
 
-1. Extract the entire ZIP file to a normal folder (do not run it from inside the ZIP preview).
-2. Double-click **`Run-AMR-Utility.cmd`**.
-3. Approve the Windows User Account Control (UAC) prompt.
-4. The launcher starts `Amr_utility.ps1` in Windows PowerShell with STA mode, which is required by the WPF interface.
 
-## Run from Windows Terminal / PowerShell
 
-Open PowerShell in the extracted project folder and run:
 
-```powershell
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\Launch-AMR.ps1
-```
+Amr_utility.ps1
+Main PowerShell application and WPF interface.
 
-The launcher requests elevation and starts the application in STA mode.
 
-To run the main script directly from an already elevated PowerShell window:
+icons.zip
+Compressed application icon pack used by the automatic icon setup.
 
-```powershell
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -STA -File .\Amr_utility.ps1
-```
 
-## Files
+Icons/
+Repository copy of the application icons, useful for reference or manual access.
 
-| File | Purpose |
-|---|---|
-| `Amr_utility.ps1` | Original main application and WPF interface, included unchanged |
-| `Launch-AMR.ps1` | Requests elevation and starts the application in STA mode |
-| `Run-AMR-Utility.cmd` | Convenient double-click launcher |
-| `README.md` | Documentation and usage instructions |
-| `LICENSE` | Copyright and usage terms |
-| `.gitignore` | Common local/generated files excluded from Git |
 
-## Important source-integrity note
+Launch-AMR.ps1
+Launches the main application in an elevated PowerShell process.
 
-The supplied `Amr_utility.ps1` is included byte-for-byte as provided by its author. This package preparation does not edit, sanitize, refactor, or otherwise change the main script. Any future source-code changes are the author's decision.
 
-Before publishing this repository publicly, be aware that all content inside the main script—including any contact details embedded in it—will be visible to anyone who can access the repository. Review that yourself if you want to change it; this package intentionally leaves the original untouched.
+Run-AMR-Utility.cmd
+Convenient Windows launcher for starting the utility.
 
-## Data and logs
 
-The application creates its working folders under:
+README.md
+Project documentation and instructions.
 
-```text
-%ProgramData%\AMR-Utility\
-```
 
-This includes folders for backups, logs, exports, icons, and downloads.
+LICENSE
+Project license.
 
-## Version
 
-Source banner: `V0.1`.
+
+Requirements
+
+Windows
+Windows PowerShell
+Administrator permission when required by the application's operations
+Internet access for downloading the icon pack when it is not already cached
+
+How to Run
+
+Download or clone this repository.
+Keep the launcher files and Amr_utility.ps1 together in the same folder.
+Double-click Run-AMR-Utility.cmd.
+Approve the Windows UAC prompt if it appears.
+The application will launch.
+
+Alternatively, run Launch-AMR.ps1 from PowerShell.
+Icon Setup
+The application checks the local icon cache at:
+%ProgramData%\AMR-Utility\Icons
+If the required icons are missing, the application attempts to download the configured icon archive, extract the images, and cache them locally.
+Once the icons have been cached, the application can reuse them on subsequent launches without downloading the archive again, provided the required icons remain available.
+An internet connection is needed for the initial download when the required icons are not already cached.
+Troubleshooting
+The application does not start
+
+Make sure Windows PowerShell is available.
+Confirm that Amr_utility.ps1 is in the same folder as Launch-AMR.ps1.
+Try launching the utility using Run-AMR-Utility.cmd.
+Check whether Windows or your security software is blocking PowerShell scripts.
+
+Icons are missing
+
+Check your internet connection if the icon pack has not been downloaded before.
+Confirm that the application can access %ProgramData%\AMR-Utility\Icons.
+Restart the application after resolving any download or file-access issues.
+
+Administrator permission is requested
+The launcher starts the application with elevated permissions. Approve the UAC prompt only if you trust the source of the script.
+Notes
+
+Keep the launcher files and main script together.
+Do not rename Amr_utility.ps1 unless you also update the launcher.
+The icon archive URL is configured in the main script. If the archive location changes, update that setting accordingly.
+Software installation behavior depends on the implementation and configuration of the main script.
+
+License
+See the LICENSE file for license details.
