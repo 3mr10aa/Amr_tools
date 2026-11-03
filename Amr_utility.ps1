@@ -1,6 +1,6 @@
 #requires -Version 5.1
 <#
-Amr | windows_utility - V0.1
+Amr | windows_utility - Phase 7 Error Handling & Stability
 Windows 10/11 | Windows PowerShell 5.1 | WPF | Administrator
 Developer: عمرو أحمد عبد الفتاح | Phone: 01014716301 | Email: 3mr10aa@gmail.com
 #>
@@ -41,6 +41,8 @@ $script:DownloadDir = Join-Path $script:AppRoot 'Downloads'
 
 New-Item -ItemType Directory -Force -Path $script:BackupDir,$script:LogDir,$script:ExportDir,$script:IconDir,$script:DownloadDir | Out-Null
 $script:LogFile = Join-Path $script:LogDir ("AMR_{0}.log" -f (Get-Date -Format 'yyyyMMdd'))
+$script:DiagnosticFile = Join-Path $script:LogDir ("AMR_Diagnostics_{0}.jsonl" -f (Get-Date -Format 'yyyyMMdd'))
+$script:AMRSessionId = [guid]::NewGuid().ToString()
 
 $script:Window = $null
 # Initialize refresh state before registering WPF handlers (StrictMode is enabled).
@@ -48,6 +50,8 @@ $script:OverviewRefreshing = $false
 $script:Status = $null
 $script:ProgressBar = $null
 $script:ProgressText = $null
+$script:CurrentTweakName = $null
+$script:CurrentTweakSource = $null
 
 # Categorized UI Log Controls Mapping
 $script:LogControls = @{
@@ -56,7 +60,117 @@ $script:LogControls = @{
     'Overview'  = $null
     'Software'  = $null
     'Customize' = $null
+    'Tweaks'    = $null
     'Cleanup'   = $null
+    'Network'   = $null
+    'Security'  = $null
+    'Optimize'  = $null
+    'Backup'    = $null
+}
+
+# --- PHASE 7: CENTRAL DIAGNOSTIC / EXCEPTION CAPTURE ---
+function Write-AMRDiagnostic {
+    [CmdletBinding()]
+    param(
+        [ValidateSet('DEBUG','INFO','WARNING','ERROR','FATAL')][string]$Severity = 'ERROR',
+        [string]$Area = 'General',
+        [string]$Operation = 'Unhandled',
+        [string]$Message = 'An unspecified diagnostic event occurred.',
+        [object]$ErrorRecord = $null,
+        [string]$Target = ''
+    )
+
+    $exceptionType = $null
+    $exceptionMessage = $null
+    $scriptStack = $null
+    $position = $null
+    if ($null -ne $ErrorRecord) {
+        if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) {
+            if ($ErrorRecord.Exception) {
+                $exceptionType = $ErrorRecord.Exception.GetType().FullName
+                $exceptionMessage = $ErrorRecord.Exception.Message
+            }
+            $scriptStack = [string]$ErrorRecord.ScriptStackTrace
+            if ($ErrorRecord.InvocationInfo) { $position = [string]$ErrorRecord.InvocationInfo.PositionMessage }
+        } elseif ($ErrorRecord -is [System.Exception]) {
+            $exceptionType = $ErrorRecord.GetType().FullName
+            $exceptionMessage = $ErrorRecord.Message
+            $scriptStack = [string]$ErrorRecord.StackTrace
+        } else {
+            $exceptionMessage = [string]$ErrorRecord
+        }
+    }
+
+    $record = [ordered]@{
+        Timestamp = (Get-Date).ToString('o')
+        SessionId = [string]$script:AMRSessionId
+        Phase = 'Phase 7 - Error Handling & Stability'
+        Severity = $Severity
+        Area = $Area
+        Operation = $Operation
+        Target = $Target
+        Message = $Message
+        ExceptionType = $exceptionType
+        ExceptionMessage = $exceptionMessage
+        ScriptStackTrace = $scriptStack
+        PositionMessage = $position
+    }
+
+    try {
+        $line = ConvertTo-Json -InputObject $record -Depth 7 -Compress -ErrorAction Stop
+        $path = [string]$script:DiagnosticFile
+        if ([string]::IsNullOrWhiteSpace($path)) { throw 'Diagnostic log path is not initialized.' }
+        [System.IO.File]::AppendAllText($path, $line + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+    } catch {
+        # Last-resort fallback must never call Write-AMRLog (recursion risk).
+        try {
+            $fallback = Join-Path $env:TEMP 'AMR_Diagnostics_Fallback.log'
+            $fallbackLine = '[{0}] [{1}] [{2}] {3} | {4}' -f (Get-Date -Format 'o'),$Severity,$Area,$Message,$exceptionMessage
+            [System.IO.File]::AppendAllText($fallback, $fallbackLine + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+        } catch { }
+    }
+}
+
+function Register-AMRExceptionHandlers {
+    try {
+        $script:DispatcherUnhandledHandler = [System.Windows.Threading.DispatcherUnhandledExceptionEventHandler]{
+            param($sender, $eventArgs)
+            try {
+                Write-AMRDiagnostic -Severity 'ERROR' -Area 'WPF' -Operation 'DispatcherUnhandledException' -Message 'An unhandled WPF dispatcher exception was captured.' -ErrorRecord $eventArgs.Exception
+                if ($script:Status) { $script:Status.Text = 'An unexpected interface error was logged. Review Diagnostics.' }
+                # Keep the utility responsive after recording the failure; the affected action may not have completed.
+                $eventArgs.Handled = $true
+            } catch { }
+        }
+        $script:Window.Dispatcher.add_UnhandledException($script:DispatcherUnhandledHandler)
+    } catch {
+        Write-AMRDiagnostic -Severity 'WARNING' -Area 'WPF' -Operation 'RegisterDispatcherHandler' -Message 'Could not register the WPF dispatcher exception handler.' -ErrorRecord $_
+    }
+
+    try {
+        $script:AppDomainUnhandledHandler = [System.UnhandledExceptionEventHandler]{
+            param($sender, $eventArgs)
+            try {
+                Write-AMRDiagnostic -Severity 'FATAL' -Area 'Runtime' -Operation 'AppDomainUnhandledException' -Message 'An unhandled process-domain exception was captured.' -ErrorRecord $eventArgs.ExceptionObject
+            } catch { }
+        }
+        [AppDomain]::CurrentDomain.add_UnhandledException($script:AppDomainUnhandledHandler)
+    } catch {
+        Write-AMRDiagnostic -Severity 'WARNING' -Area 'Runtime' -Operation 'RegisterAppDomainHandler' -Message 'Could not register the AppDomain exception handler.' -ErrorRecord $_
+    }
+
+    try {
+        $script:TaskUnhandledHandler = [System.Threading.Tasks.UnobservedTaskExceptionEventHandler]{
+            param($sender, $eventArgs)
+            try {
+                Write-AMRDiagnostic -Severity 'ERROR' -Area 'Async' -Operation 'UnobservedTaskException' -Message 'An unobserved background task exception was captured.' -ErrorRecord $eventArgs.Exception
+                $eventArgs.SetObserved()
+            } catch { }
+        }
+        [System.Threading.Tasks.TaskScheduler]::add_UnobservedTaskException($script:TaskUnhandledHandler)
+    } catch {
+        Write-AMRDiagnostic -Severity 'WARNING' -Area 'Async' -Operation 'RegisterTaskHandler' -Message 'Could not register the background task exception handler.' -ErrorRecord $_
+    }
 }
 
 # --- Thread-Safe Multi-Category Real-time Logging Engine ---
@@ -64,12 +178,12 @@ function Write-AMRLog {
     param(
         [string]$Message,
         [ValidateSet('INFO','SUCCESS','WARNING','ERROR','DEBUG')][string]$Level='INFO',
-        [ValidateSet('System','Overview','Software','Customize','Cleanup')][string]$Area='System'
+        [ValidateSet('System','Overview','Software','Customize','Tweaks','Cleanup','Network','Security','Optimize','Backup')][string]$Area='System'
     )
     $time = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
     $logLine = "[$time] [$Level] [$Area] $Message"
     
-    Add-Content -LiteralPath $script:LogFile -Value $logLine -Encoding UTF8 -ErrorAction SilentlyContinue
+    try { Add-Content -LiteralPath $script:LogFile -Value $logLine -Encoding UTF8 -ErrorAction Stop } catch { Write-AMRDiagnostic -Severity 'ERROR' -Area 'Logging' -Operation 'AppendMainLog' -Message 'Could not append to the main application log.' -ErrorRecord $_ -Target $script:LogFile }
     
     if ($script:Window) {
         try {
@@ -83,7 +197,7 @@ function Write-AMRLog {
                     $script:LogControls[$Area].ScrollToEnd()
                 }
             })
-        } catch {}
+        } catch { Write-AMRDiagnostic -Severity 'WARNING' -Area 'Logging' -Operation 'UpdateLogConsole' -Message 'Could not update the WPF log console.' -ErrorRecord $_ }
     }
     
     if ($script:Status -and $script:Window) {
@@ -91,7 +205,7 @@ function Write-AMRLog {
             $script:Window.Dispatcher.Invoke([Action]{
                 $script:Status.Text = "[$Area] $Message"
             })
-        } catch {}
+        } catch { Write-AMRDiagnostic -Severity 'WARNING' -Area 'Logging' -Operation 'UpdateStatusBar' -Message 'Could not update the WPF status bar.' -ErrorRecord $_ }
     }
 }
 
@@ -105,7 +219,588 @@ function Show-AMRMessage {
     return [System.Windows.MessageBox]::Show($script:Window, $Message, $Title, $Buttons, $Icon)
 }
 
-# --- SAFE REGISTRY WRITER ---
+# --- TWEAK AUDIT ENGINE ---
+$script:TweakAuditFile = Join-Path $script:LogDir ("AMR_Tweaks_{0}.jsonl" -f (Get-Date -Format 'yyyyMMdd'))
+$script:AMRReliabilityPhase = 'Phase 7 - Error Handling & Stability'
+
+function Get-AMRTweakContext {
+    if (-not [string]::IsNullOrWhiteSpace([string]$script:CurrentTweakName)) { return [string]$script:CurrentTweakName }
+    $names = @()
+    foreach ($group in @($script:AMRCustomizeCheckboxNames, $script:AMRBasicCheckboxNames)) {
+        foreach ($name in @($group)) {
+            try {
+                $control = C $name
+                if ($control -and $control.IsChecked -eq $true) {
+                    $label = [string]$control.Content
+                    if ([string]::IsNullOrWhiteSpace($label)) { $label = $name }
+                    $names += $label
+                }
+            } catch {}
+        }
+    }
+    if ($names.Count -gt 0) { return ($names -join ', ') }
+    return 'Manual / Unclassified tweak'
+}
+
+function Get-AMRPathSnapshot {
+    param([string]$Path)
+    try {
+        if ([string]::IsNullOrWhiteSpace($Path)) { throw 'Path is empty.' }
+        if (-not (Test-Path -LiteralPath $Path -ErrorAction Stop)) {
+            return [pscustomobject]@{ Exists=$false; Count=0; Bytes=0; Readable=$true }
+        }
+        $items = @(Get-ChildItem -LiteralPath $Path -Force -Recurse -ErrorAction Stop)
+        $bytes = [int64]0
+        foreach ($item in $items) { if (-not $item.PSIsContainer) { $bytes += [int64]$item.Length } }
+        return [pscustomobject]@{ Exists=$true; Count=$items.Count; Bytes=$bytes; Readable=$true }
+    } catch {
+        Write-AMRDiagnostic -Severity 'WARNING' -Area 'Cleanup' -Operation 'ReadPathSnapshot' -Message 'Could not read a cleanup path snapshot.' -ErrorRecord $_ -Target $Path
+        return [pscustomobject]@{ Exists=$null; Count=$null; Bytes=$null; Readable=$false; Error=$_.Exception.Message }
+    }
+}
+
+function Get-AMRRecycleBinSnapshot {
+    try {
+        $shell = New-Object -ComObject Shell.Application
+        $bin = $shell.Namespace(0xA)
+        if ($null -eq $bin) { throw 'Recycle Bin namespace is unavailable.' }
+        $items = @($bin.Items())
+        $bytes = [int64]0
+        foreach ($item in $items) { try { $bytes += [int64]$item.Size } catch {} }
+        return [pscustomobject]@{ Count=$items.Count; Bytes=$bytes; Readable=$true }
+    } catch { Write-AMRDiagnostic -Severity 'WARNING' -Area 'Cleanup' -Operation 'ReadRecycleBinSnapshot' -Message 'Could not read the Recycle Bin snapshot.' -ErrorRecord $_; return [pscustomobject]@{ Count=$null; Bytes=$null; Readable=$false; Error=$_.Exception.Message } }
+}
+
+function Get-AMRRegistrySnapshot {
+    param([string]$Path,[string]$Name)
+    try {
+        if (-not (Test-Path -LiteralPath $Path -ErrorAction Stop)) {
+            return [pscustomobject]@{ Exists=$false; Value=$null; Type=$null; Readable=$true }
+        }
+        $key = Get-Item -LiteralPath $Path -ErrorAction Stop
+        $valueNames = @($key.GetValueNames())
+        if ($valueNames -notcontains $Name) {
+            return [pscustomobject]@{ Exists=$false; Value=$null; Type=$null; Readable=$true }
+        }
+        # Preserve the literal REG_EXPAND_SZ data rather than expanding environment variables.
+        $options = [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+        $value = $key.GetValue($Name, $null, $options)
+        $kind = $key.GetValueKind($Name).ToString()
+        return [pscustomobject]@{ Exists=$true; Value=$value; Type=$kind; Readable=$true }
+    } catch {
+        Write-AMRDiagnostic -Severity 'WARNING' -Area 'Registry' -Operation 'ReadRegistrySnapshot' -Message 'Could not read a Registry value snapshot.' -ErrorRecord $_ -Target ($Path + '\' + $Name)
+        return [pscustomobject]@{ Exists=$null; Value=$null; Type=$null; Readable=$false; Error=$_.Exception.Message }
+    }
+}
+
+function ConvertTo-AMRServiceStartMode {
+    param([AllowNull()][string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+    switch -Regex ($Value.Trim()) {
+        '^(Auto|Automatic)$' { return 'Automatic' }
+        '^(Manual|Demand)$' { return 'Manual' }
+        '^(Disabled)$' { return 'Disabled' }
+        default { return $Value.Trim() }
+    }
+}
+
+function Get-AMRServiceSnapshot {
+    param([string]$Name)
+    try {
+        if ([string]::IsNullOrWhiteSpace($Name)) { throw 'Service name is empty.' }
+        $escapedName = $Name.Replace("'", "''")
+        $svc = Get-CimInstance -ClassName Win32_Service -Filter ("Name='{0}'" -f $escapedName) -ErrorAction Stop
+        if (-not $svc) {
+            return [pscustomobject]@{ Exists=$false; State=$null; StartMode=$null; StartModeRaw=$null; StartValue=$null; DelayedAutoStart=$null; Readable=$true; DelayedAutoStartReadable=$true }
+        }
+        $rawMode = [string]$svc.StartMode
+        $serviceRegPath = Join-Path 'HKLM:\SYSTEM\CurrentControlSet\Services' $Name
+        $serviceReg = Get-ItemProperty -LiteralPath $serviceRegPath -ErrorAction Stop
+        $startValue = $null
+        if (-not $serviceReg.PSObject.Properties['Start']) { throw ("Service registry Start value is missing for {0}." -f $Name) }
+        $startValue = [int]$serviceReg.Start
+        if ($startValue -notin @(0,1,2,3,4)) { throw ("Service registry Start value is invalid for {0}: {1}." -f $Name,$startValue) }
+        $delayedAuto = $false
+        if ($serviceReg.PSObject.Properties['DelayedAutoStart']) { $delayedAuto = ([int]$serviceReg.DelayedAutoStart -ne 0) }
+        return [pscustomobject]@{
+            Exists=$true
+            State=[string]$svc.State
+            StartMode=(ConvertTo-AMRServiceStartMode -Value $rawMode)
+            StartModeRaw=$rawMode
+            StartValue=$startValue
+            DelayedAutoStart=[bool]$delayedAuto
+            Readable=$true
+            DelayedAutoStartReadable=$true
+        }
+    } catch {
+        Write-AMRDiagnostic -Severity 'WARNING' -Area 'Services' -Operation 'ReadServiceSnapshot' -Message 'Could not read the complete service state.' -ErrorRecord $_ -Target $Name
+        return [pscustomobject]@{ Exists=$null; State=$null; StartMode=$null; StartModeRaw=$null; StartValue=$null; DelayedAutoStart=$null; Readable=$false; DelayedAutoStartReadable=$false; Error=$_.Exception.Message }
+    }
+}
+
+function Get-AMRPowerPlanSnapshot {
+    try {
+        $out = (& powercfg.exe /getactivescheme 2>&1 | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) { throw $out }
+        $guidMatch = [regex]::Match($out,'(?i)[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}')
+        if (-not $guidMatch.Success) { throw 'The active power scheme was returned, but its GUID could not be identified.' }
+        return [pscustomobject]@{ ActiveScheme=$out; Guid=$guidMatch.Value.ToLowerInvariant(); Readable=$true }
+    } catch { Write-AMRDiagnostic -Severity 'WARNING' -Area 'Power' -Operation 'ReadActivePowerPlan' -Message 'Could not read the active power plan.' -ErrorRecord $_; return [pscustomobject]@{ ActiveScheme=$null; Guid=$null; Readable=$false; Error=$_.Exception.Message } }
+}
+
+function Get-AMRHibernationSnapshot {
+    # Do not parse `powercfg /a`: its output is localized and varies between Windows versions.
+    # HibernateEnabled is a language-independent DWORD maintained by Windows.
+    $subKeyPath = 'SYSTEM\CurrentControlSet\Control\Power'
+    $baseKey = $null; $powerKey = $null
+    try {
+        $view = [Microsoft.Win32.RegistryView]::Registry64
+        $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
+        $powerKey = $baseKey.OpenSubKey($subKeyPath, $false)
+        if (-not $powerKey) { throw "Registry key HKLM:\$subKeyPath was not found." }
+        $valueNames = @($powerKey.GetValueNames())
+        if ($valueNames -notcontains 'HibernateEnabled') { throw 'HibernateEnabled registry value was not found.' }
+        $rawValue = $powerKey.GetValue('HibernateEnabled', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        if ($null -eq $rawValue) { throw 'HibernateEnabled could not be read.' }
+        $enabled = ([int]$rawValue -ne 0)
+        $systemDrive = if ($env:SystemDrive) { $env:SystemDrive } else { 'C:' }
+        $hiberFile = Join-Path ($systemDrive + '\') 'hiberfil.sys'
+        $filePresent = Test-Path -LiteralPath $hiberFile -PathType Leaf
+        return [pscustomobject]@{
+            HibernateEnabled=[bool]$enabled
+            HibernateEnabledRaw=[int]$rawValue
+            HibernationFilePresent=[bool]$filePresent
+            RegistryPath=('HKLM:\' + $subKeyPath)
+            Readable=$true
+            Method='Registry DWORD (language-independent)'
+        }
+    } catch {
+        Write-AMRDiagnostic -Severity 'WARNING' -Area 'Power' -Operation 'ReadHibernationSnapshot' -Message 'Could not read the Hibernate registry state.' -ErrorRecord $_ -Target ('HKLM:\' + $subKeyPath)
+        return [pscustomobject]@{ HibernateEnabled=$null; HibernateEnabledRaw=$null; HibernationFilePresent=$null; RegistryPath=('HKLM:\' + $subKeyPath); Readable=$false; Method='Registry DWORD (language-independent)'; Error=$_.Exception.Message }
+    } finally {
+        if ($powerKey) { $powerKey.Dispose() }
+        if ($baseKey) { $baseKey.Dispose() }
+    }
+}
+
+function Set-AMRAuditedService {
+    param([string]$Name,[ValidateSet('Automatic','Manual','Disabled')][string]$StartupType,[bool]$StopAfter=$false)
+    $before = Get-AMRServiceSnapshot -Name $Name
+    $source = Get-AMRRestoreSource
+    $execution = 'Success'; $errorText = $null
+    $baselineSaved = $false
+    if (-not $before.Readable -or -not $before.Exists) {
+        $execution = 'Failed'
+        $errorText = if (-not $before.Readable) { 'Could not completely read the service state (CIM and service registry).' } else { 'The requested service does not exist.' }
+    } else {
+        $baselineData = [pscustomobject]@{
+            Name=$Name; StartMode=$before.StartMode; StartModeRaw=$before.StartModeRaw
+            StartValue=$before.StartValue; DelayedAutoStart=[bool]$before.DelayedAutoStart; State=$before.State
+        }
+        $baselineSaved = Save-AMRStateBaseline -Kind 'Service' -Identity $Name -Source $source -Data $baselineData
+        if (-not $baselineSaved) {
+            $execution = 'Failed'
+            $errorText = 'Original service baseline could not be saved; the service was not changed.'
+        } else {
+            try {
+                Set-Service -Name $Name -StartupType $StartupType -ErrorAction Stop
+                if ($StopAfter) { Stop-Service -Name $Name -Force -ErrorAction Stop }
+            } catch {
+                $execution = 'Failed'
+                $errorText = $_.Exception.Message
+            }
+        }
+    }
+
+    $after = Get-AMRServiceSnapshot -Name $Name
+    $deadline = (Get-Date).AddSeconds(12)
+    do {
+        $modeMatches = $after.Readable -and $after.Exists -and ($after.StartMode -eq $StartupType)
+        $stateMatches = (-not $StopAfter) -or ($after.Readable -and $after.Exists -and $after.State -eq 'Stopped')
+        if ($modeMatches -and $stateMatches) { break }
+        Start-Sleep -Milliseconds 400
+        $after = Get-AMRServiceSnapshot -Name $Name
+    } while ((Get-Date) -lt $deadline)
+
+    $expectedStartValue = switch ($StartupType) { 'Automatic' { 2 } 'Manual' { 3 } 'Disabled' { 4 } }
+    $verified = $after.Readable -and $after.Exists -and ($after.StartMode -eq $StartupType) -and ($after.StartValue -eq $expectedStartValue)
+    if ($StopAfter) { $verified = $verified -and ($after.State -eq 'Stopped') }
+    $beforeAlreadyMatchedRequest = $before.Readable -and $before.Exists -and ($before.StartMode -eq $StartupType) -and ($before.StartValue -eq $expectedStartValue) -and ((-not $StopAfter) -or ($before.State -eq 'Stopped'))
+    $verification = if ($verified -and $beforeAlreadyMatchedRequest) { 'No Change' }
+                    elseif ($verified) { 'Passed' }
+                    elseif (-not $after.Readable) { 'Not Verified' }
+                    else { 'Failed' }
+
+    if ($execution -eq 'Success' -and $verification -notin @('Passed','No Change')) { $execution = 'Not Verified' }
+    Write-AMRTweakAudit -Tweak (Get-AMRTweakContext) -Source $(if($script:CurrentTweakSource){$script:CurrentTweakSource}else{'System Tweaks'}) -Target ("Service: {0}" -f $Name) -Before $before -Requested ([pscustomobject]@{StartupType=$StartupType;Stop=$StopAfter}) -After $after -Execution $execution -Verification $verification -FailureDetails $errorText
+    if ($errorText) { Write-AMRLog ("Service {0} change failed: {1}" -f $Name,$errorText) ERROR Tweaks }
+    elseif ($verification -eq 'Not Verified' -or $verification -eq 'Failed') { Write-AMRLog ("Service {0} did not reach requested state. Requested startup={1}, stop={2}; observed startup={3}, state={4}." -f $Name,$StartupType,$StopAfter,$after.StartMode,$after.State) WARNING Tweaks }
+    return [bool]($execution -eq 'Success' -and $verification -in @('Passed','No Change'))
+}
+
+function Invoke-AMRAuditedPowerPlan {
+    param([string]$Guid,[string]$TweakName)
+    $before = Get-AMRPowerPlanSnapshot
+    $execution='Success'; $errorText=$null
+    if ($Guid -notmatch '(?i)^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$') {
+        $execution='Failed'; $errorText='Requested power plan GUID is invalid.'
+    } elseif (-not $before.Readable -or -not $before.Guid) {
+        $execution='Not Verified'; $errorText='Could not read the original active power plan; refusing to change it.'
+    } elseif (-not (Save-AMRStateBaseline -Kind 'PowerPlan' -Identity 'ActivePowerScheme' -Source (Get-AMRRestoreSource) -Data ([pscustomobject]@{ Guid=$before.Guid; ActiveScheme=$before.ActiveScheme }))) {
+        $execution='Failed'; $errorText='Original power plan baseline could not be saved; the active plan was not changed.'
+    } elseif ($before.Guid -ne $Guid.ToLowerInvariant()) {
+        try {
+            & powercfg.exe /setactive $Guid 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "powercfg exit code $LASTEXITCODE" }
+        } catch { $execution='Failed'; $errorText=$_.Exception.Message }
+    }
+    $after = Get-AMRPowerPlanSnapshot
+    $verified = $after.Readable -and ($after.Guid -eq $Guid.ToLowerInvariant())
+    $verification = if ($verified -and $before.Readable -and $before.Guid -eq $after.Guid) { 'No Change' } elseif ($verified) { 'Passed' } elseif (-not $after.Readable) { 'Not Verified' } else { 'Failed' }
+    if ($execution -eq 'Success' -and $verification -notin @('Passed','No Change')) { $execution='Not Verified' }
+    Write-AMRTweakAudit -Tweak $TweakName -Source $(if($script:CurrentTweakSource){$script:CurrentTweakSource}else{'Basic Tweaks'}) -Target 'Active Windows power scheme' -Before $before -Requested $Guid -After $after -Execution $execution -Verification $verification -FailureDetails $errorText
+    if($errorText){Write-AMRLog ("Power plan change failed or was blocked: {0}" -f $errorText) ERROR Tweaks}
+    return [bool]($verified -and $execution -eq 'Success')
+}
+
+function Invoke-AMRAuditedHibernationOff {
+    param([string]$TweakName)
+    $before=Get-AMRHibernationSnapshot
+    $execution='Success'; $errorText=$null
+    if (-not $before.Readable) {
+        $execution='Not Verified'; $errorText='Could not read the original hibernation state; refusing to change it.'
+    } elseif (-not (Save-AMRStateBaseline -Kind 'Hibernate' -Identity 'HibernateEnabled' -Source (Get-AMRRestoreSource) -Data ([pscustomobject]@{ Enabled=[bool]$before.HibernateEnabled; RawValue=[int]$before.HibernateEnabledRaw }))) {
+        $execution='Failed'; $errorText='Original hibernation baseline could not be saved; hibernation was not changed.'
+    } elseif ($before.HibernateEnabled -eq $false) {
+        $execution='Success'
+    } else {
+        try { & powercfg.exe /hibernate off 2>&1 | Out-Null; if($LASTEXITCODE -ne 0){throw "powercfg exit code $LASTEXITCODE"} }
+        catch {$execution='Failed';$errorText=$_.Exception.Message}
+    }
+    $after=Get-AMRHibernationSnapshot
+    $verified=$after.Readable -and ($after.HibernateEnabled -eq $false)
+    $verification=if($verified -and $before.Readable -and $before.HibernateEnabled -eq $false){'No Change'}elseif($verified){'Passed'}elseif(-not $after.Readable){'Not Verified'}else{'Failed'}
+    if ($execution -eq 'Success' -and $verification -notin @('Passed','No Change')) { $execution='Not Verified' }
+    Write-AMRTweakAudit -Tweak $TweakName -Source $(if($script:CurrentTweakSource){$script:CurrentTweakSource}else{'Customize / Basic Tweaks'}) -Target 'Windows hibernation capability' -Before $before -Requested 'Hibernate disabled (HibernateEnabled=0)' -After $after -Execution $execution -Verification $verification -FailureDetails $errorText
+    if($errorText){Write-AMRLog ("Hibernation change failed or was blocked: {0}" -f $errorText) ERROR Tweaks}
+    return [bool]($verified -and $execution -eq 'Success')
+}
+
+function Write-AMRTweakAudit {
+    param(
+        [string]$Tweak,[string]$Source,[string]$Target,
+        [object]$Before,[object]$Requested,[object]$After,
+        [string]$Execution,[string]$Verification,[string]$FailureDetails,[string]$VerificationScope
+    )
+    try {
+        $status = if ($Execution -eq 'Partial') { 'Partial' }
+                  elseif ($Execution -eq 'Failed' -or $Verification -eq 'Failed') { 'Failed' }
+                  elseif ($Execution -eq 'Not Verified' -or $Verification -eq 'Not Verified') { 'Not Verified' }
+                  elseif ($Verification -eq 'No Change') { 'No Change' }
+                  elseif ($Execution -eq 'Success' -and $Verification -eq 'Passed') { 'Success' }
+                  else { 'Partial' }
+        $record = [pscustomobject]@{
+            Timestamp=(Get-Date).ToString('o'); Tweak=$Tweak; Source=$Source; Target=$Target
+            Before=$Before; Requested=$Requested; After=$After
+            Execution=$Execution; Verification=$Verification; Status=$status
+            VerificationScope=$VerificationScope; FailureDetails=$FailureDetails
+        }
+        ($record | ConvertTo-Json -Depth 9 -Compress) | Add-Content -LiteralPath $script:TweakAuditFile -Encoding UTF8 -ErrorAction Stop
+        $beforeText = if ($Before -and $Before.PSObject.Properties['Exists'] -and $Before.Exists -eq $false) { '<Not set>' } elseif ($Before -and $Before.Readable -eq $false) { '<Unreadable>' } elseif ($Before -and $Before.PSObject.Properties['Value']) { [string]$Before.Value } elseif ($Before) { ConvertTo-Json -InputObject $Before -Compress -Depth 7 } else { '<Unavailable>' }
+        $afterText = if ($After -and $After.PSObject.Properties['Exists'] -and $After.Exists -eq $false) { '<Not set>' } elseif ($After -and $After.Readable -eq $false) { '<Unreadable>' } elseif ($After -and $After.PSObject.Properties['Value']) { [string]$After.Value } elseif ($After) { ConvertTo-Json -InputObject $After -Compress -Depth 7 } else { '<Unavailable>' }
+        $logLevel = if ($status -eq 'Success') { 'SUCCESS' } elseif ($status -eq 'Failed') { 'ERROR' } else { 'WARNING' }
+        Write-AMRLog ("[TWEAK] {0} | {1} | Before: {2} | Requested: {3} | After: {4} | Status={5} | Execution={6} | Verification={7} | Failure={8}" -f $Tweak,$Target,$beforeText,$Requested,$afterText,$status,$Execution,$Verification,$FailureDetails) $logLevel Tweaks
+    } catch {
+        Write-AMRDiagnostic -Severity 'ERROR' -Area 'Audit' -Operation 'WriteTweakAudit' -Message 'Could not persist a tweak audit record.' -ErrorRecord $_ -Target $script:TweakAuditFile
+        Write-AMRLog ("Could not write tweak audit record: {0}" -f $_.Exception.Message) WARNING Tweaks
+    }
+}
+
+# --- SAFE REGISTRY WRITER WITH BEFORE/AFTER AUDIT ---
+# --- RESTORE BASELINE: durable first-seen Registry state per panel ---
+$script:TweakBaselineFile = Join-Path $script:BackupDir 'AMR_Tweaks_Baseline.clixml'
+
+
+function Get-AMRRestoreSource {
+    $source = [string]$script:CurrentTweakSource
+    if ($source -eq 'Basic Tweaks') { return 'Basic Tweaks' }
+    # Tweaks applied from other utility pages are included in the left-side Restore Defaults scope.
+    return 'Customize'
+}
+
+function Save-AMRStateBaseline {
+    param([ValidateSet('Service','PowerPlan','Hibernate')][string]$Kind,[string]$Identity,[string]$Source,[object]$Data)
+    try {
+        if ($null -eq $Data) { throw 'Baseline data is empty.' }
+        $items = @()
+        if (Test-Path -LiteralPath $script:TweakBaselineFile) {
+            $items = @(Import-Clixml -LiteralPath $script:TweakBaselineFile -ErrorAction Stop)
+        }
+        $key = ('{0}|{1}' -f $Kind,$Identity).ToLowerInvariant()
+        if (@($items | Where-Object { $_.Key -eq $key -and $_.PSObject.Properties['Source'] -and $_.Source -eq $Source }).Count -eq 0) {
+            $items += [pscustomobject]@{
+                Key=$key; Kind=$Kind; Identity=$Identity; Source=$Source; Data=$Data
+                Captured=(Get-Date).ToString('o'); CaptureVersion=3
+            }
+            $tempFile = "$($script:TweakBaselineFile).tmp"
+            $items | Export-Clixml -LiteralPath $tempFile -Depth 12 -Force -ErrorAction Stop
+            if (Test-Path -LiteralPath $script:TweakBaselineFile) {
+                try { [System.IO.File]::Replace($tempFile,$script:TweakBaselineFile,$null) }
+                catch { Move-Item -LiteralPath $tempFile -Destination $script:TweakBaselineFile -Force -ErrorAction Stop }
+            } else { Move-Item -LiteralPath $tempFile -Destination $script:TweakBaselineFile -Force -ErrorAction Stop }
+        }
+        return $true
+    } catch {
+        Write-AMRLog ("Could not save original {0} state for {1}: {2}" -f $Kind,$Identity,$_.Exception.Message) ERROR Tweaks
+        return $false
+    }
+}
+
+function Get-AMRRegistryValueKind {
+    param([object]$Snapshot)
+    if ($Snapshot -and $Snapshot.Type -and ([string]$Snapshot.Type -in @('String','ExpandString','Binary','DWord','MultiString','QWord'))) {
+        return [string]$Snapshot.Type
+    }
+    # Legacy fallback only. Snapshot.Type from the Registry is authoritative.
+    $value = if ($Snapshot) { $Snapshot.Value } else { $null }
+    if ($value -is [byte[]]) { return 'Binary' }
+    if ($value -is [string[]]) { return 'MultiString' }
+    if ($value -is [long] -or $value -is [uint64]) { return 'QWord' }
+    if ($value -is [int] -or $value -is [uint32] -or $value -is [bool]) { return 'DWord' }
+    return 'String'
+}
+
+function Save-AMRTweakBaseline {
+    param([string]$Path,[string]$Name,[object]$Snapshot)
+    try {
+        if (-not $Snapshot -or $Snapshot.Readable -ne $true) {
+            Write-AMRLog "Original Registry state was not readable; refusing to capture an incomplete baseline for $Path -> $Name." WARNING Tweaks
+            return $false
+        }
+        $items = @()
+        if (Test-Path -LiteralPath $script:TweakBaselineFile) {
+            $items = @(Import-Clixml -LiteralPath $script:TweakBaselineFile -ErrorAction Stop)
+        }
+        $key = ($Path.TrimEnd('\') + '|' + $Name).ToLowerInvariant()
+        $source = Get-AMRRestoreSource
+        if (@($items | Where-Object { $_.Key -eq $key -and ((-not $_.PSObject.Properties['Source'] -and $source -eq 'Customize') -or ($_.PSObject.Properties['Source'] -and $_.Source -eq $source)) }).Count -eq 0) {
+            $items += [pscustomobject]@{
+                Key=$key; Kind='Registry'; Path=$Path; Name=$Name; Source=$source
+                Exists=[bool]$Snapshot.Exists; Value=$Snapshot.Value
+                PropertyType=(Get-AMRRegistryValueKind -Snapshot $Snapshot)
+                Captured=(Get-Date).ToString('o'); CaptureVersion=2
+            }
+            # Atomic write: preserve the last valid baseline if the process stops mid-write.
+            $tempFile = "$($script:TweakBaselineFile).tmp"
+            $items | Export-Clixml -LiteralPath $tempFile -Depth 10 -Force -ErrorAction Stop
+            if (Test-Path -LiteralPath $script:TweakBaselineFile) {
+                try { [System.IO.File]::Replace($tempFile,$script:TweakBaselineFile,$null) }
+                catch { Move-Item -LiteralPath $tempFile -Destination $script:TweakBaselineFile -Force -ErrorAction Stop }
+            } else {
+                Move-Item -LiteralPath $tempFile -Destination $script:TweakBaselineFile -Force -ErrorAction Stop
+            }
+        }
+        return $true
+    } catch {
+        Write-AMRLog "Could not save original Registry state for $Path -> $Name : $($_.Exception.Message)" ERROR Tweaks
+        return $false
+    }
+}
+
+function Test-AMRRegistryValueEqual {
+    param([object]$Actual,[object]$Expected)
+    try {
+        if ($null -eq $Actual -and $null -eq $Expected) { return $true }
+        if ($null -eq $Actual -or $null -eq $Expected) { return $false }
+        if ($Actual -is [byte[]] -and $Expected -is [byte[]]) {
+            return ([Convert]::ToBase64String($Actual) -ceq [Convert]::ToBase64String($Expected))
+        }
+        if ($Actual -is [string[]] -and $Expected -is [string[]]) {
+            return (($Actual -join [char]0) -ceq ($Expected -join [char]0))
+        }
+        return ((ConvertTo-Json -InputObject $Actual -Compress -Depth 10) -ceq (ConvertTo-Json -InputObject $Expected -Compress -Depth 10))
+    } catch { return ([string]$Actual -ceq [string]$Expected) }
+}
+
+function Restore-AMRTweakBaseline {
+    param([ValidateSet('Customize','Basic Tweaks')][string]$Source = 'Customize')
+    if (-not (Test-Path -LiteralPath $script:TweakBaselineFile)) {
+        Write-AMRLog "Restore requested for $Source, but no saved original state exists." WARNING Tweaks
+        return [pscustomobject]@{ Restored=0; Failed=0; Total=0; Source=$Source; Scope='No baseline found' }
+    }
+    try { $allItems = @(Import-Clixml -LiteralPath $script:TweakBaselineFile -ErrorAction Stop) }
+    catch {
+        Write-AMRLog "Restore stopped: baseline file could not be read. $($_.Exception.Message)" ERROR Tweaks
+        return [pscustomobject]@{ Restored=0; Failed=1; Total=0; Source=$Source; Error=$_.Exception.Message }
+    }
+    # Old records without Source belong to Customize. Old records without Kind are Registry.
+    $items = @($allItems | Where-Object {
+        if ($_.PSObject.Properties['Source']) { $_.Source -eq $Source }
+        else { $Source -eq 'Customize' }
+    })
+    if ($items.Count -eq 0) {
+        Write-AMRLog "No saved original states were found for $Source." WARNING Tweaks
+        return [pscustomobject]@{ Restored=0; Failed=0; Total=0; Source=$Source }
+    }
+
+    $restored=0; $failed=0
+    foreach ($item in $items) {
+        $kind = if ($item.PSObject.Properties['Kind'] -and $item.Kind) { [string]$item.Kind } else { 'Registry' }
+        $before=$null; $after=$null; $requested=$null; $ok=$false; $verified=$false; $errorText=$null
+        try {
+            switch ($kind) {
+                'Registry' {
+                    $before = Get-AMRRegistrySnapshot -Path $item.Path -Name $item.Name
+                    if ($before.Readable -ne $true) { throw 'Current Registry state cannot be read; refusing an unverified restore.' }
+                    if ($item.Exists) {
+                        if (-not (Test-Path -LiteralPath $item.Path)) { New-Item -Path $item.Path -Force -ErrorAction Stop | Out-Null }
+                        $regKind=[string]$item.PropertyType
+                        if ($regKind -notin @('String','ExpandString','Binary','DWord','MultiString','QWord')) {
+                            $regKind = Get-AMRRegistryValueKind -Snapshot ([pscustomobject]@{Value=$item.Value;Type=$null})
+                        }
+                        New-ItemProperty -LiteralPath $item.Path -Name $item.Name -Value $item.Value -PropertyType $regKind -Force -ErrorAction Stop | Out-Null
+                        $requested = [pscustomobject]@{Exists=$true;Value=$item.Value;Type=$regKind}
+                    } else {
+                        if ($before.Exists) { Remove-ItemProperty -LiteralPath $item.Path -Name $item.Name -ErrorAction Stop }
+                        $requested = [pscustomobject]@{Exists=$false;Value=$null;Type=$null}
+                    }
+                    $ok=$true
+                    $after=Get-AMRRegistrySnapshot -Path $item.Path -Name $item.Name
+                    if ($after.Readable) {
+                        if (-not $item.Exists) { $verified=($after.Exists -eq $false) }
+                        elseif ($after.Exists) {
+                            $expectedKind=[string]$item.PropertyType
+                            $kindMatches=[string]::IsNullOrWhiteSpace($expectedKind) -or ($after.Type -eq $expectedKind)
+                            $verified=$kindMatches -and (Test-AMRRegistryValueEqual -Actual $after.Value -Expected $item.Value)
+                        }
+                    }
+                }
+                'Service' {
+                    $data=$item.Data
+                    $name=[string]$data.Name
+                    $before=Get-AMRServiceSnapshot -Name $name
+                    if (-not $before.Readable -or -not $before.Exists) { throw 'The original Windows service cannot be read or no longer exists.' }
+                    $hasSavedDelayedAuto = [bool]$data.PSObject.Properties['DelayedAutoStart']
+                    $savedDelayedAuto = if ($hasSavedDelayedAuto) { [bool]$data.DelayedAutoStart } else { $false }
+                    $rawMode = if ($data.PSObject.Properties['StartModeRaw']) { [string]$data.StartModeRaw } else { [string]$data.StartMode }
+                    if ([string]::IsNullOrWhiteSpace($rawMode)) { throw 'The saved service startup mode is missing.' }
+                    # Phase 5 service baselines did not persist DelayedAutoStart. For an
+                    # Automatic legacy record the original delayed flag cannot be inferred
+                    # safely, so do not silently convert Delayed Automatic to Automatic.
+                    if (-not $hasSavedDelayedAuto -and (ConvertTo-AMRServiceStartMode -Value $rawMode) -eq 'Automatic') {
+                        throw 'This legacy service baseline did not capture DelayedAutoStart. Exact restoration is not verifiable; the service was left unchanged.'
+                    }
+                    $requested=[pscustomobject]@{StartMode=$data.StartMode;StartModeRaw=$rawMode;DelayedAutoStart=$savedDelayedAuto;State=$data.State}
+                    $scMode = switch -Regex ($rawMode) {
+                        '(?i)^(Auto|Automatic)$' { 'auto'; break }
+                        '(?i)^(Manual|Demand)$' { 'demand'; break }
+                        '(?i)^Disabled$' { 'disabled'; break }
+                        '(?i)^Boot$' { 'boot'; break }
+                        '(?i)^System$' { 'system'; break }
+                        default { throw ("Unsupported saved service startup mode: {0}" -f $rawMode) }
+                    }
+                    if ($scMode -eq 'auto' -and $savedDelayedAuto) { $scMode = 'delayed-auto' }
+                    $expectedStartValue = switch ($scMode) { 'boot' { 0 } 'system' { 1 } 'auto' { 2 } 'delayed-auto' { 2 } 'demand' { 3 } 'disabled' { 4 } default { $null } }
+                    $svc=Get-Service -Name $name -ErrorAction Stop
+                    # A service can originally be Disabled yet still be Running. Temporarily
+                    # make it demand-startable if it must be started before restoring Disabled.
+                    if ([string]$data.State -eq 'Running' -and $scMode -eq 'disabled' -and $svc.Status -ne 'Running') {
+                        $tempOutput = (& sc.exe config $name 'start=' 'demand' 2>&1 | Out-String).Trim()
+                        if ($LASTEXITCODE -ne 0) { throw ("Could not temporarily enable service {0} for state restoration: {1}" -f $name,$tempOutput) }
+                    } else {
+                        $scOutput = (& sc.exe config $name 'start=' $scMode 2>&1 | Out-String).Trim()
+                        if ($LASTEXITCODE -ne 0) { throw ("sc.exe could not restore startup mode for {0}: {1}" -f $name,$scOutput) }
+                    }
+                    # Restore the prior running state after setting a startable mode.
+                    $svc=Get-Service -Name $name -ErrorAction Stop
+                    if ([string]$data.State -eq 'Running' -and $svc.Status -ne 'Running') {
+                        Start-Service -Name $name -ErrorAction Stop
+                    } elseif ([string]$data.State -eq 'Stopped' -and $svc.Status -ne 'Stopped') {
+                        Stop-Service -Name $name -Force -ErrorAction Stop
+                    } elseif ([string]$data.State -notin @('Running','Stopped')) {
+                        throw ("Unsupported saved service state: {0}" -f $data.State)
+                    }
+                    if ($scMode -eq 'disabled') {
+                        $disabledOutput = (& sc.exe config $name 'start=' 'disabled' 2>&1 | Out-String).Trim()
+                        if ($LASTEXITCODE -ne 0) { throw ("Could not restore Disabled startup mode for {0}: {1}" -f $name,$disabledOutput) }
+                    }
+                    $svc=Get-Service -Name $name -ErrorAction Stop
+                    $targetState=if([string]$data.State -eq 'Running'){[System.ServiceProcess.ServiceControllerStatus]::Running}else{[System.ServiceProcess.ServiceControllerStatus]::Stopped}
+                    $svc.WaitForStatus($targetState,[TimeSpan]::FromSeconds(30))
+                    $deadline=(Get-Date).AddSeconds(10)
+                    do {
+                        $after=Get-AMRServiceSnapshot -Name $name
+                        if ($after.Readable -and $after.Exists -and $after.StartMode -eq $data.StartMode -and $after.StartValue -eq $expectedStartValue -and $after.DelayedAutoStart -eq $savedDelayedAuto -and $after.State -eq $data.State) { break }
+                        Start-Sleep -Milliseconds 400
+                    } while ((Get-Date) -lt $deadline)
+                    $ok=$true
+                    $verified=$after.Readable -and $after.Exists -and $after.StartMode -eq $data.StartMode -and $after.StartValue -eq $expectedStartValue -and $after.DelayedAutoStart -eq $savedDelayedAuto -and $after.State -eq $data.State
+                }
+                'PowerPlan' {
+                    $before=Get-AMRPowerPlanSnapshot
+                    if (-not $before.Readable) { throw 'The current active power plan could not be read.' }
+                    $guid=[string]$item.Data.Guid
+                    if ($guid -notmatch '(?i)^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$') { throw 'The saved power plan GUID is invalid.' }
+                    $requested=$guid
+                    & powercfg.exe /setactive $guid 2>&1 | Out-Null
+                    if ($LASTEXITCODE -ne 0) { throw ("powercfg /setactive failed with exit code {0}." -f $LASTEXITCODE) }
+                    $ok=$true
+                    $after=Get-AMRPowerPlanSnapshot
+                    $verified=$after.Readable -and $after.Guid -eq $guid.ToLowerInvariant()
+                }
+                'Hibernate' {
+                    $before=Get-AMRHibernationSnapshot
+                    if (-not $before.Readable) { throw 'The current hibernation state could not be read.' }
+                    $enabled=[bool]$item.Data.Enabled
+                    $requested=[pscustomobject]@{HibernateEnabled=$enabled}
+                    $argument=if($enabled){'on'}else{'off'}
+                    & powercfg.exe /hibernate $argument 2>&1 | Out-Null
+                    if ($LASTEXITCODE -ne 0) { throw ("powercfg /hibernate {0} failed with exit code {1}." -f $argument,$LASTEXITCODE) }
+                    $ok=$true
+                    $after=Get-AMRHibernationSnapshot
+                    $verified=$after.Readable -and ($after.HibernateEnabled -eq $enabled)
+                }
+                default { throw ("Unknown saved baseline record type: {0}" -f $kind) }
+            }
+        } catch {
+            $errorText=$_.Exception.Message
+            if ($kind -eq 'Registry' -and -not $before) { $before=Get-AMRRegistrySnapshot -Path $item.Path -Name $item.Name }
+            elseif ($kind -eq 'Service' -and -not $before) { $before=Get-AMRServiceSnapshot -Name ([string]$item.Data.Name) }
+            elseif ($kind -eq 'PowerPlan' -and -not $before) { $before=Get-AMRPowerPlanSnapshot }
+            elseif ($kind -eq 'Hibernate' -and -not $before) { $before=Get-AMRHibernationSnapshot }
+        }
+        if ($kind -eq 'Registry' -and -not $after) { $after=Get-AMRRegistrySnapshot -Path $item.Path -Name $item.Name }
+        elseif ($kind -eq 'Service' -and -not $after) { $after=Get-AMRServiceSnapshot -Name ([string]$item.Data.Name) }
+        elseif ($kind -eq 'PowerPlan' -and -not $after) { $after=Get-AMRPowerPlanSnapshot }
+        elseif ($kind -eq 'Hibernate' -and -not $after) { $after=Get-AMRHibernationSnapshot }
+
+        if ($ok -and $verified) { $restored++ } else { $failed++ }
+        $targetIdentity = if ($item.PSObject.Properties['Identity'] -and $item.Identity) { [string]$item.Identity } elseif ($item.PSObject.Properties['Path']) { "$($item.Path) -> $($item.Name)" } else { [string]$item.Key }
+        Write-AMRTweakAudit -Tweak 'Restore original tweak state' -Source 'Restore Defaults' -Target ("{0}: {1}" -f $kind,$targetIdentity) -Before $before -Requested $requested -After $after -Execution $(if($verified){'Success'}elseif($errorText){'Failed'}elseif($ok){'Not Verified'}else{'Failed'}) -Verification $(if($verified){'Passed'}elseif($errorText){'Failed'}else{'Not Verified'}) -FailureDetails $errorText
+        if ($errorText) { Write-AMRLog ("Restore failed for {0} baseline {1}: {2}" -f $kind,$item.Key,$errorText) ERROR Tweaks } elseif (-not $verified) { Write-AMRLog ("Restore for {0} baseline {1} was not verified against the original state." -f $kind,$item.Key) WARNING Tweaks }
+    }
+
+    Write-AMRLog ("Restore Defaults for {0}: {1}/{2} restored; {3} failed. Scope: captured Registry, Services, Power Plan and Hibernate states." -f $Source,$restored,$items.Count,$failed) $(if($failed -eq 0){'SUCCESS'}else{'WARNING'}) Tweaks
+    # Keep failed records for retry. Remove this panel's records only after every item is verified.
+    if ($failed -eq 0) {
+        $remaining = @($allItems | Where-Object {
+            if ($_.PSObject.Properties['Source']) { $_.Source -ne $Source }
+            else { $Source -ne 'Customize' }
+        })
+        try {
+            if ($remaining.Count -gt 0) {
+                $tempFile="$($script:TweakBaselineFile).tmp"
+                $remaining | Export-Clixml -LiteralPath $tempFile -Depth 12 -Force -ErrorAction Stop
+                if (Test-Path -LiteralPath $script:TweakBaselineFile) {
+                    try { [System.IO.File]::Replace($tempFile,$script:TweakBaselineFile,$null) }
+                    catch { Move-Item -LiteralPath $tempFile -Destination $script:TweakBaselineFile -Force -ErrorAction Stop }
+                } else { Move-Item -LiteralPath $tempFile -Destination $script:TweakBaselineFile -Force -ErrorAction Stop }
+            } else { Remove-Item -LiteralPath $script:TweakBaselineFile -Force -ErrorAction Stop }
+        } catch { Write-AMRLog "Restore succeeded, but baseline cleanup failed: $($_.Exception.Message)" WARNING Tweaks }
+    }
+    return [pscustomobject]@{ Restored=$restored; Failed=$failed; Total=$items.Count; Source=$Source; Scope='Registry, Services, Power Plan, Hibernate' }
+}
+
 function Set-AMRRegistryKey {
     param(
         [string]$Path,
@@ -113,17 +808,44 @@ function Set-AMRRegistryKey {
         [object]$Value,
         [string]$PropertyType='DWord'
     )
-    try {
-        if (-not (Test-Path -Path $Path)) {
-            New-Item -Path $Path -Force -ErrorAction Stop | Out-Null
+    $before = Get-AMRRegistrySnapshot -Path $Path -Name $Name
+    $source = if ([string]$script:CurrentTweakSource) { [string]$script:CurrentTweakSource } else { 'Customize / Basic Tweaks' }
+    $tweak = Get-AMRTweakContext
+    $success = $false; $failure = $null; $verified = $false
+
+    if (-not $before.Readable) {
+        $failure = 'Original Registry state could not be read; refusing to change this value.'
+    } elseif (-not (Save-AMRTweakBaseline -Path $Path -Name $Name -Snapshot $before)) {
+        $failure = 'Original Registry baseline could not be saved; refusing to change this value.'
+    } else {
+        try {
+            if (-not (Test-Path -LiteralPath $Path -ErrorAction Stop)) {
+                New-Item -Path $Path -Force -ErrorAction Stop | Out-Null
+            }
+            New-ItemProperty -LiteralPath $Path -Name $Name -Value $Value -PropertyType $PropertyType -Force -ErrorAction Stop | Out-Null
+            $success = $true
+            Write-AMRLog "Registry set [$Path -> $Name = $Value]" INFO Customize
+        } catch {
+            $failure = $_.Exception.Message
+            Write-AMRLog "Failed setting Registry [$Path -> $Name]: $failure" ERROR Customize
         }
-        New-ItemProperty -Path $Path -Name $Name -Value $Value -PropertyType $PropertyType -Force -ErrorAction Stop | Out-Null
-        Write-AMRLog "Registry set [$Path -> $Name = $Value]" SUCCESS Customize
-        return $true
-    } catch {
-        Write-AMRLog "Failed setting Registry [$Path -> $Name]: $_" ERROR Customize
-        return $false
     }
+
+    $after = Get-AMRRegistrySnapshot -Path $Path -Name $Name
+    if ($after.Readable -and $after.Exists -eq $true) {
+        try {
+            $typeMatches = ([string]$after.Type -eq [string]$PropertyType)
+            $valueMatches = Test-AMRRegistryValueEqual -Actual $after.Value -Expected $Value
+            $verified = $typeMatches -and $valueMatches
+        } catch { $verified = $false }
+    }
+    $execution = if ($success) { 'Success' } elseif ($failure) { 'Failed' } else { 'Not Verified' }
+    $verification = if ($verified) {
+        if ($before.Readable -and $before.Exists -and ([string]$before.Type -eq [string]$after.Type) -and (Test-AMRRegistryValueEqual -Actual $before.Value -Expected $after.Value)) { 'No Change' } else { 'Passed' }
+    } elseif (-not $after.Readable) { 'Not Verified' } elseif ($success) { 'Failed' } else { 'Not Verified' }
+    if ($success -and $verification -notin @('Passed','No Change')) { $execution='Not Verified' }
+    Write-AMRTweakAudit -Tweak $tweak -Source $source -Target ("{0} -> {1}" -f $Path,$Name) -Before $before -Requested ([pscustomobject]@{Value=$Value;Type=$PropertyType}) -After $after -Execution $execution -Verification $verification -FailureDetails $failure -VerificationScope 'Registry value and RegistryValueKind read-back only; Windows feature behavior may require policy support, sign-out, or restart.'
+    return [bool]($success -and $verified)
 }
 
 # --- 3. EXPANDED SOFTWARE CATALOG (500 APPLICATIONS; 235 EXISTING + 265 ADDITIONS) ---
@@ -1239,9 +1961,9 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
    <TabItem Header="Customize">
     <Grid Margin="8,4,8,8">
      <Grid.ColumnDefinitions>
-      <ColumnDefinition Width="*"/>
-      <ColumnDefinition Width="2"/>
-      <ColumnDefinition Width="*"/>
+      <ColumnDefinition Width="0.9*"/>
+      <ColumnDefinition Width="3"/>
+      <ColumnDefinition Width="1.1*"/>
      </Grid.ColumnDefinitions>
      <!-- Existing customization tools remain on the left, independently scrollable. -->
      <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="4,0,8,8">
@@ -1252,12 +1974,13 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
         <ColumnDefinition Width="Auto"/>
        </Grid.ColumnDefinitions>
        <StackPanel Grid.Column="0" Margin="0,0,8,0" VerticalAlignment="Center">
-        <TextBlock Text="Windows Customization" FontSize="12" FontWeight="Bold" Foreground="#FFFFFF" TextWrapping="Wrap"/>
+        <TextBlock Text="Windows Customization" FontSize="11" FontWeight="Bold" Foreground="#FFFFFF" TextWrapping="Wrap"/>
         <TextBlock Text="Select the tweaks you want to apply safely." Foreground="#A1A1AA" FontSize="9" TextWrapping="Wrap" Margin="0,2,0,0"/>
        </StackPanel>
        <StackPanel Grid.Column="1" VerticalAlignment="Center" MinWidth="112">
         <Button Name="ApplyCustomizeBtn" Content="⚡ Apply Tweaks" Background="#10B981" Foreground="#FFFFFF" BorderThickness="0" FontSize="9" FontWeight="Bold" Padding="7,5"/>
         <Button Name="CancelCustomizeBtn" Content="✕ Cancel Tweaks" Background="#3F1D1D" Foreground="#FECACA" BorderBrush="#7F1D1D" FontSize="9" Padding="7,5" Margin="0,4,0,0" ToolTip="Clear selections in the left panel only"/>
+        <Button Name="RestoreDefaultsBtn" Content="↶ Restore Defaults" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F" FontSize="9" Padding="7,5" Margin="0,4,0,0" ToolTip="Restore Registry settings captured before the first tweak application"/>
         <TextBlock Name="CustomizeSelectionCount" Text="0 selected on left" Foreground="#A1A1AA" FontSize="9" TextAlignment="Center" Margin="0,4,0,0"/>
        </StackPanel>
       </Grid>
@@ -1334,7 +2057,7 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
       </WrapPanel>
       </StackPanel>
      </ScrollViewer>
-     <Border Grid.Column="1" Background="#3F3F46" Margin="0,8"/>
+     <Border Grid.Column="1" Background="#A6A6B0" Opacity="0.22" Margin="0,8"/>
      <!-- Basic tweaks occupy the right half of the same Customize tab. -->
      <ScrollViewer Grid.Column="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="8,0,4,8">
       <StackPanel Name="BasicTweaksPanel">
@@ -1351,6 +2074,7 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
          <TextBlock Name="BasicPresetStatus" Text="Custom selection — choose a preset or select options below." Foreground="#93C5FD" TextWrapping="Wrap" Margin="2,0,2,4"/>
          <TextBlock Name="BasicSelectionCount" Text="0 selected on right | 0 selected total" Foreground="#A7F3D0" FontSize="12" FontWeight="SemiBold" Margin="2,0,2,8"/>
          <Button Name="CancelAllTweaksBtn" Content="✕ Cancel All / Clear Selections" Background="#3F1D1D" Foreground="#FECACA" BorderBrush="#7F1D1D" Padding="8,7" Margin="0,0,0,7"/>
+         <Button Name="RestoreBasicDefaultsBtn" Content="↶ Restore Defaults" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F" Padding="8,7" Margin="0,0,0,7" ToolTip="Restore original Registry values captured by right-side Basic Tweaks only"/>
          <Button Name="ApplyBasicTweaksBtn" Content="⚡ Apply Selected Tweaks" Background="#10B981" Foreground="#FFFFFF" BorderThickness="0" FontWeight="Bold" Padding="12,9" HorizontalAlignment="Stretch"/>
         </StackPanel>
        </Border>
@@ -1507,19 +2231,95 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
      <Border Padding="20">
       <StackPanel>
-       <TextBlock Text="System Optimization Engine" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,0,0,8"/>
-       <TextBlock Text="50 optimization tools for performance, startup, storage, maintenance, and Windows settings." Foreground="#AEB8C8" TextWrapping="Wrap" Margin="0,0,0,12"/>
-       <TextBox Name="OptSearchBox" Height="34" Padding="10,5" FontSize="14" ToolTip="Search optimization tools by name or keyword" Margin="0,0,0,8"/>
-       <ComboBox Name="OptCategoryFilter" Height="34" Padding="8,4" FontSize="14" Margin="0,0,0,8" SelectedIndex="0">
-        <ComboBoxItem Content="⚙️ All Categories"/>
-        <ComboBoxItem Content="⚙️ Performance &amp; Power"/>
-        <ComboBoxItem Content="⚙️ Startup &amp; Background"/>
-        <ComboBoxItem Content="⚙️ Storage &amp; Cleanup"/>
-        <ComboBoxItem Content="⚙️ Windows Maintenance"/>
-        <ComboBoxItem Content="⚙️ Network &amp; Responsiveness"/>
-        <ComboBoxItem Content="⚙️ Privacy &amp; Features"/>
-        <ComboBoxItem Content="⚙️ Diagnostics &amp; Monitoring"/>
-       </ComboBox>
+       <Grid Margin="0,0,0,12">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
+        <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,16,0">
+         <TextBlock Text="System Optimization Engine" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,0,0,8"/>
+         <TextBlock Text="50 optimization tools for performance, startup, storage, maintenance, and Windows settings." Foreground="#AEB8C8" TextWrapping="Wrap"/>
+        </StackPanel>
+        <Grid Grid.Column="1" VerticalAlignment="Center">
+         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+         <Grid Grid.Column="0" Margin="0,0,6,0">
+         <TextBox Name="OptSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search optimization tools by name or keyword" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2"/>
+         <TextBlock Text="⌕" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="11,0,0,2" FontSize="21" FontWeight="SemiBold" Foreground="#79AAA5"/>
+        </Grid>
+         <ComboBox Name="OptCategoryFilter" Grid.Column="1" Height="34" Padding="8,4" FontSize="13" Margin="6,0,0,0" SelectedIndex="0" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F">
+          <ComboBox.Resources>
+           <Style TargetType="{x:Type ComboBox}">
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
+            <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
+            <Setter Property="Template">
+             <Setter.Value>
+              <ControlTemplate TargetType="{x:Type ComboBox}">
+               <Grid>
+                <ToggleButton x:Name="DropDownToggle" Focusable="False" ClickMode="Press" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                 <ToggleButton.Template>
+                  <ControlTemplate TargetType="{x:Type ToggleButton}">
+                   <Border x:Name="ToggleBorder" Background="{Binding Background, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderThickness="1" CornerRadius="6" Padding="8,4">
+                    <Grid>
+                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/></Grid.ColumnDefinitions>
+                     <ContentPresenter Grid.Column="0" Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentStringFormat="{Binding SelectionBoxItemStringFormat, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" VerticalAlignment="Center" HorizontalAlignment="Left"/>
+                     <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="#B7D5D1" StrokeThickness="1.6" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Grid>
+                   </Border>
+                   <ControlTemplate.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ToggleBorder" Property="BorderBrush" Value="#79AAA5"/></Trigger>
+                    <Trigger Property="IsPressed" Value="True"><Setter TargetName="ToggleBorder" Property="Background" Value="#31515A"/></Trigger>
+                   </ControlTemplate.Triggers>
+                  </ControlTemplate>
+                 </ToggleButton.Template>
+                </ToggleButton>
+                <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+                 <Border Background="#263B46" BorderBrush="#6B9994" BorderThickness="1" CornerRadius="7" Padding="3" SnapsToDevicePixels="True">
+                  <ScrollViewer MaxHeight="320" CanContentScroll="True">
+                   <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                  </ScrollViewer>
+                 </Border>
+                </Popup>
+               </Grid>
+               <ControlTemplate.Triggers>
+                <Trigger Property="HasItems" Value="False"><Setter TargetName="PART_Popup" Property="MinHeight" Value="24"/></Trigger>
+                <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
+               </ControlTemplate.Triggers>
+              </ControlTemplate>
+             </Setter.Value>
+            </Setter>
+           </Style>
+
+           <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#263B46"/>
+           <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#D9F0ED"/>
+           <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#6B9994"/>
+           <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
+          </ComboBox.Resources>
+          <ComboBox.ItemContainerStyle>
+           <Style TargetType="ComboBoxItem">
+            <Setter Property="Foreground" Value="#D9F0ED"/>
+            <Setter Property="Background" Value="#263B46"/>
+            <Setter Property="BorderBrush" Value="#6B9994"/>
+            <Setter Property="Padding" Value="9,6"/>
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Style.Triggers>
+             <Trigger Property="IsHighlighted" Value="True">
+              <Setter Property="Background" Value="#6B9994"/>
+              <Setter Property="Foreground" Value="#FFFFFF"/>
+             </Trigger>
+             <Trigger Property="IsSelected" Value="True">
+              <Setter Property="Background" Value="#31515A"/>
+              <Setter Property="Foreground" Value="#FFFFFF"/>
+             </Trigger>
+             <Trigger Property="IsEnabled" Value="False">
+              <Setter Property="Foreground" Value="#78918F"/>
+             </Trigger>
+            </Style.Triggers>
+           </Style>
+          </ComboBox.ItemContainerStyle>
+
+          <ComboBoxItem Content="⚙️ All Categories"/><ComboBoxItem Content="⚙️ Performance &amp; Power"/><ComboBoxItem Content="⚙️ Startup &amp; Background"/><ComboBoxItem Content="⚙️ Storage &amp; Cleanup"/><ComboBoxItem Content="⚙️ Windows Maintenance"/><ComboBoxItem Content="⚙️ Network &amp; Responsiveness"/><ComboBoxItem Content="⚙️ Privacy &amp; Features"/><ComboBoxItem Content="⚙️ Diagnostics &amp; Monitoring"/>
+         </ComboBox>
+        </Grid>
+       </Grid>
        <TextBlock Name="OptResultsCount" Foreground="#AEB8C8" Margin="0,0,0,10"/>
        <UniformGrid Name="OptToolsGrid" Columns="2"/>
       </StackPanel>
@@ -1532,20 +2332,93 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
      <Border Padding="20">
       <StackPanel>
-       <TextBlock Text="Security &amp; Privacy Console" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,0,0,8"/>
-       <TextBlock Text="50 security and privacy tools for protection, firewall, accounts, privacy, and auditing." Foreground="#AEB8C8" TextWrapping="Wrap" Margin="0,0,0,12"/>
-       <TextBox Name="SecSearchBox" Height="34" Padding="10,5" FontSize="14" ToolTip="Search security tools by name or keyword" Margin="0,0,0,8"/>
-       <ComboBox Name="SecCategoryFilter" Height="34" Padding="8,4" FontSize="14" Margin="0,0,0,8" SelectedIndex="0">
-        <ComboBoxItem Content="🛡️ All Categories"/>
-        <ComboBoxItem Content="🛡️ Defender &amp; Antivirus"/>
-        <ComboBoxItem Content="🛡️ Firewall &amp; Network"/>
-        <ComboBoxItem Content="🛡️ Privacy &amp; Tracking"/>
-        <ComboBoxItem Content="🛡️ Accounts &amp; Sign-in"/>
-        <ComboBoxItem Content="🛡️ Encryption &amp; Protection"/>
-        <ComboBoxItem Content="🛡️ Auditing &amp; Reports"/>
-        <ComboBoxItem Content="🛡️ Security Settings"/>
-       </ComboBox>
-       <TextBlock Name="SecResultsCount" Foreground="#AEB8C8" Margin="0,0,0,10"/>
+       <Grid Margin="0,0,0,12">
+       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
+       <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,16,0">
+        <TextBlock Text="Security &amp; Privacy Console" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,0,0,8"/>
+        <TextBlock Text="50 security and privacy tools for protection, firewall, accounts, privacy, and auditing." Foreground="#AEB8C8" TextWrapping="Wrap"/>
+       </StackPanel>
+       <Grid Grid.Column="1" VerticalAlignment="Center"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+        <Grid Grid.Column="0" Margin="0,0,6,0">
+         <TextBox Name="SecSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search security tools by name or keyword" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2"/>
+         <TextBlock Text="⌕" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="11,0,0,2" FontSize="21" FontWeight="SemiBold" Foreground="#79AAA5"/>
+        </Grid>
+        <ComboBox Name="SecCategoryFilter" Grid.Column="1" Height="34" Padding="8,4" FontSize="13" Margin="6,0,0,0" SelectedIndex="0" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F">
+          <ComboBox.Resources>
+           <Style TargetType="{x:Type ComboBox}">
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
+            <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
+            <Setter Property="Template">
+             <Setter.Value>
+              <ControlTemplate TargetType="{x:Type ComboBox}">
+               <Grid>
+                <ToggleButton x:Name="DropDownToggle" Focusable="False" ClickMode="Press" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                 <ToggleButton.Template>
+                  <ControlTemplate TargetType="{x:Type ToggleButton}">
+                   <Border x:Name="ToggleBorder" Background="{Binding Background, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderThickness="1" CornerRadius="6" Padding="8,4">
+                    <Grid>
+                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/></Grid.ColumnDefinitions>
+                     <ContentPresenter Grid.Column="0" Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentStringFormat="{Binding SelectionBoxItemStringFormat, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" VerticalAlignment="Center" HorizontalAlignment="Left"/>
+                     <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="#B7D5D1" StrokeThickness="1.6" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Grid>
+                   </Border>
+                   <ControlTemplate.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ToggleBorder" Property="BorderBrush" Value="#79AAA5"/></Trigger>
+                    <Trigger Property="IsPressed" Value="True"><Setter TargetName="ToggleBorder" Property="Background" Value="#31515A"/></Trigger>
+                   </ControlTemplate.Triggers>
+                  </ControlTemplate>
+                 </ToggleButton.Template>
+                </ToggleButton>
+                <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+                 <Border Background="#263B46" BorderBrush="#6B9994" BorderThickness="1" CornerRadius="7" Padding="3" SnapsToDevicePixels="True">
+                  <ScrollViewer MaxHeight="320" CanContentScroll="True">
+                   <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                  </ScrollViewer>
+                 </Border>
+                </Popup>
+               </Grid>
+               <ControlTemplate.Triggers>
+                <Trigger Property="HasItems" Value="False"><Setter TargetName="PART_Popup" Property="MinHeight" Value="24"/></Trigger>
+                <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
+               </ControlTemplate.Triggers>
+              </ControlTemplate>
+             </Setter.Value>
+            </Setter>
+           </Style>
+
+           <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#263B46"/>
+           <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#D9F0ED"/>
+           <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#6B9994"/>
+           <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
+          </ComboBox.Resources>
+          <ComboBox.ItemContainerStyle>
+           <Style TargetType="ComboBoxItem">
+            <Setter Property="Foreground" Value="#D9F0ED"/>
+            <Setter Property="Background" Value="#263B46"/>
+            <Setter Property="BorderBrush" Value="#6B9994"/>
+            <Setter Property="Padding" Value="9,6"/>
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Style.Triggers>
+             <Trigger Property="IsHighlighted" Value="True">
+              <Setter Property="Background" Value="#6B9994"/>
+              <Setter Property="Foreground" Value="#FFFFFF"/>
+             </Trigger>
+             <Trigger Property="IsSelected" Value="True">
+              <Setter Property="Background" Value="#31515A"/>
+              <Setter Property="Foreground" Value="#FFFFFF"/>
+             </Trigger>
+             <Trigger Property="IsEnabled" Value="False">
+              <Setter Property="Foreground" Value="#78918F"/>
+             </Trigger>
+            </Style.Triggers>
+           </Style>
+          </ComboBox.ItemContainerStyle>
+<ComboBoxItem Content="🛡️ All Categories"/><ComboBoxItem Content="🛡️ Defender &amp; Antivirus"/><ComboBoxItem Content="🛡️ Firewall &amp; Network"/><ComboBoxItem Content="🛡️ Privacy &amp; Tracking"/><ComboBoxItem Content="🛡️ Accounts &amp; Sign-in"/><ComboBoxItem Content="🛡️ Encryption &amp; Protection"/><ComboBoxItem Content="🛡️ Auditing &amp; Reports"/><ComboBoxItem Content="🛡️ Security Settings"/></ComboBox>
+       </Grid>
+      </Grid>
+      <TextBlock Name="SecResultsCount" Foreground="#AEB8C8" Margin="0,0,0,10"/>
        <UniformGrid Name="SecToolsGrid" Columns="2"/>
       </StackPanel>
      </Border>
@@ -1557,12 +2430,92 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
     <Border Padding="20">
      <StackPanel>
-      <TextBlock Text="Advanced System Configuration" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,0,0,8"/>
-      <TextBlock Text="50 system tools for performance, startup, recovery, diagnostics, services, and configuration." Foreground="#AEB8C8" TextWrapping="Wrap" Margin="0,0,0,12"/>
-      <TextBox Name="SysSearchBox" Height="34" Padding="10,5" FontSize="14" ToolTip="Search system tools by name or keyword" Margin="0,0,0,8"/>
-      <ComboBox Name="SysCategoryFilter" Height="32" Margin="0,0,0,8" SelectedIndex="0">
-       <ComboBoxItem Content="⚙️ All Categories"/><ComboBoxItem Content="⚙️ Performance &amp; Power"/><ComboBoxItem Content="⚙️ Startup &amp; Boot"/><ComboBoxItem Content="⚙️ Recovery &amp; Repair"/><ComboBoxItem Content="⚙️ Diagnostics &amp; Reports"/><ComboBoxItem Content="⚙️ Services &amp; Processes"/><ComboBoxItem Content="⚙️ Windows Settings"/><ComboBoxItem Content="⚙️ Storage &amp; Devices"/><ComboBoxItem Content="⚙️ Security &amp; Maintenance"/>
-      </ComboBox>
+      <Grid Margin="0,0,0,12">
+       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
+       <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,16,0">
+        <TextBlock Text="Advanced System Configuration" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,0,0,8"/>
+        <TextBlock Text="50 system tools for performance, startup, recovery, diagnostics, services, and configuration." Foreground="#AEB8C8" TextWrapping="Wrap"/>
+       </StackPanel>
+       <Grid Grid.Column="1" VerticalAlignment="Center"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+        <Grid Grid.Column="0" Margin="0,0,6,0">
+         <TextBox Name="SysSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search system tools by name or keyword" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2"/>
+         <TextBlock Text="⌕" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="11,0,0,2" FontSize="21" FontWeight="SemiBold" Foreground="#79AAA5"/>
+        </Grid>
+        <ComboBox Name="SysCategoryFilter" Grid.Column="1" Height="34" Padding="8,4" FontSize="13" Margin="6,0,0,0" SelectedIndex="0" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F">
+          <ComboBox.Resources>
+           <Style TargetType="{x:Type ComboBox}">
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
+            <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
+            <Setter Property="Template">
+             <Setter.Value>
+              <ControlTemplate TargetType="{x:Type ComboBox}">
+               <Grid>
+                <ToggleButton x:Name="DropDownToggle" Focusable="False" ClickMode="Press" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                 <ToggleButton.Template>
+                  <ControlTemplate TargetType="{x:Type ToggleButton}">
+                   <Border x:Name="ToggleBorder" Background="{Binding Background, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderThickness="1" CornerRadius="6" Padding="8,4">
+                    <Grid>
+                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/></Grid.ColumnDefinitions>
+                     <ContentPresenter Grid.Column="0" Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentStringFormat="{Binding SelectionBoxItemStringFormat, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" VerticalAlignment="Center" HorizontalAlignment="Left"/>
+                     <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="#B7D5D1" StrokeThickness="1.6" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Grid>
+                   </Border>
+                   <ControlTemplate.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ToggleBorder" Property="BorderBrush" Value="#79AAA5"/></Trigger>
+                    <Trigger Property="IsPressed" Value="True"><Setter TargetName="ToggleBorder" Property="Background" Value="#31515A"/></Trigger>
+                   </ControlTemplate.Triggers>
+                  </ControlTemplate>
+                 </ToggleButton.Template>
+                </ToggleButton>
+                <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+                 <Border Background="#263B46" BorderBrush="#6B9994" BorderThickness="1" CornerRadius="7" Padding="3" SnapsToDevicePixels="True">
+                  <ScrollViewer MaxHeight="320" CanContentScroll="True">
+                   <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                  </ScrollViewer>
+                 </Border>
+                </Popup>
+               </Grid>
+               <ControlTemplate.Triggers>
+                <Trigger Property="HasItems" Value="False"><Setter TargetName="PART_Popup" Property="MinHeight" Value="24"/></Trigger>
+                <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
+               </ControlTemplate.Triggers>
+              </ControlTemplate>
+             </Setter.Value>
+            </Setter>
+           </Style>
+
+           <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#263B46"/>
+           <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#D9F0ED"/>
+           <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#6B9994"/>
+           <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
+          </ComboBox.Resources>
+          <ComboBox.ItemContainerStyle>
+           <Style TargetType="ComboBoxItem">
+            <Setter Property="Foreground" Value="#D9F0ED"/>
+            <Setter Property="Background" Value="#263B46"/>
+            <Setter Property="BorderBrush" Value="#6B9994"/>
+            <Setter Property="Padding" Value="9,6"/>
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Style.Triggers>
+             <Trigger Property="IsHighlighted" Value="True">
+              <Setter Property="Background" Value="#6B9994"/>
+              <Setter Property="Foreground" Value="#FFFFFF"/>
+             </Trigger>
+             <Trigger Property="IsSelected" Value="True">
+              <Setter Property="Background" Value="#31515A"/>
+              <Setter Property="Foreground" Value="#FFFFFF"/>
+             </Trigger>
+             <Trigger Property="IsEnabled" Value="False">
+              <Setter Property="Foreground" Value="#78918F"/>
+             </Trigger>
+            </Style.Triggers>
+           </Style>
+          </ComboBox.ItemContainerStyle>
+<ComboBoxItem Content="⚙️ All Categories"/><ComboBoxItem Content="⚙️ Performance &amp; Power"/><ComboBoxItem Content="⚙️ Startup &amp; Boot"/><ComboBoxItem Content="⚙️ Recovery &amp; Repair"/><ComboBoxItem Content="⚙️ Diagnostics &amp; Reports"/><ComboBoxItem Content="⚙️ Services &amp; Processes"/><ComboBoxItem Content="⚙️ Windows Settings"/><ComboBoxItem Content="⚙️ Storage &amp; Devices"/><ComboBoxItem Content="⚙️ Security &amp; Maintenance"/></ComboBox>
+       </Grid>
+      </Grid>
       <TextBlock Name="SysResultsCount" Text="50 system tools" Foreground="#AEB8C8" Margin="0,0,0,12"/>
       <UniformGrid Name="SysToolsGrid" Columns="2"/>
      </StackPanel>
@@ -1575,13 +2528,93 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
      <Border Padding="20">
       <StackPanel>
-       <TextBlock Text="Network Diagnostic &amp; Repair Center" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,0,0,8"/>
-       <TextBlock Text="Search, diagnose, inspect, and repair common Windows networking issues." Foreground="#AEB8C8" TextWrapping="Wrap" Margin="0,0,0,12"/>
-       <TextBox Name="NetSearchBox" Height="34" Padding="10,5" FontSize="14" ToolTip="Search network tools by name or keyword" Margin="0,0,0,8"/>
-       <ComboBox Name="NetCategoryFilter" Height="32" Margin="0,0,0,8" SelectedIndex="0">
-        <ComboBoxItem Content="All Categories"/><ComboBoxItem Content="Diagnostics"/><ComboBoxItem Content="DNS &amp; IP"/><ComboBoxItem Content="Repair &amp; Reset"/><ComboBoxItem Content="Adapters &amp; Wi-Fi"/><ComboBoxItem Content="Connections &amp; Ports"/><ComboBoxItem Content="Reports &amp; Settings"/>
-       </ComboBox>
-       <TextBlock Name="NetResultsCount" Text="50 network tools" Foreground="#AEB8C8" Margin="0,0,0,12"/>
+       <Grid Margin="0,0,0,12">
+       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
+       <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,16,0">
+        <TextBlock Text="Network Diagnostic &amp; Repair Center" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,0,0,8"/>
+        <TextBlock Text="Search, diagnose, inspect, and repair common Windows networking issues." Foreground="#AEB8C8" TextWrapping="Wrap"/>
+       </StackPanel>
+       <Grid Grid.Column="1" VerticalAlignment="Center"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+        <Grid Grid.Column="0" Margin="0,0,6,0">
+         <TextBox Name="NetSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search network tools by name or keyword" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2"/>
+         <TextBlock Text="⌕" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="11,0,0,2" FontSize="21" FontWeight="SemiBold" Foreground="#79AAA5"/>
+        </Grid>
+        <ComboBox Name="NetCategoryFilter" Grid.Column="1" Height="34" Padding="8,4" FontSize="13" Margin="6,0,0,0" SelectedIndex="0" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F">
+          <ComboBox.Resources>
+           <Style TargetType="{x:Type ComboBox}">
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
+            <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
+            <Setter Property="Template">
+             <Setter.Value>
+              <ControlTemplate TargetType="{x:Type ComboBox}">
+               <Grid>
+                <ToggleButton x:Name="DropDownToggle" Focusable="False" ClickMode="Press" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                 <ToggleButton.Template>
+                  <ControlTemplate TargetType="{x:Type ToggleButton}">
+                   <Border x:Name="ToggleBorder" Background="{Binding Background, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderThickness="1" CornerRadius="6" Padding="8,4">
+                    <Grid>
+                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/></Grid.ColumnDefinitions>
+                     <ContentPresenter Grid.Column="0" Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentStringFormat="{Binding SelectionBoxItemStringFormat, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" VerticalAlignment="Center" HorizontalAlignment="Left"/>
+                     <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="#B7D5D1" StrokeThickness="1.6" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Grid>
+                   </Border>
+                   <ControlTemplate.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ToggleBorder" Property="BorderBrush" Value="#79AAA5"/></Trigger>
+                    <Trigger Property="IsPressed" Value="True"><Setter TargetName="ToggleBorder" Property="Background" Value="#31515A"/></Trigger>
+                   </ControlTemplate.Triggers>
+                  </ControlTemplate>
+                 </ToggleButton.Template>
+                </ToggleButton>
+                <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+                 <Border Background="#263B46" BorderBrush="#6B9994" BorderThickness="1" CornerRadius="7" Padding="3" SnapsToDevicePixels="True">
+                  <ScrollViewer MaxHeight="320" CanContentScroll="True">
+                   <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                  </ScrollViewer>
+                 </Border>
+                </Popup>
+               </Grid>
+               <ControlTemplate.Triggers>
+                <Trigger Property="HasItems" Value="False"><Setter TargetName="PART_Popup" Property="MinHeight" Value="24"/></Trigger>
+                <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
+               </ControlTemplate.Triggers>
+              </ControlTemplate>
+             </Setter.Value>
+            </Setter>
+           </Style>
+
+           <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#263B46"/>
+           <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#D9F0ED"/>
+           <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#6B9994"/>
+           <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
+          </ComboBox.Resources>
+          <ComboBox.ItemContainerStyle>
+           <Style TargetType="ComboBoxItem">
+            <Setter Property="Foreground" Value="#D9F0ED"/>
+            <Setter Property="Background" Value="#263B46"/>
+            <Setter Property="BorderBrush" Value="#6B9994"/>
+            <Setter Property="Padding" Value="9,6"/>
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Style.Triggers>
+             <Trigger Property="IsHighlighted" Value="True">
+              <Setter Property="Background" Value="#6B9994"/>
+              <Setter Property="Foreground" Value="#FFFFFF"/>
+             </Trigger>
+             <Trigger Property="IsSelected" Value="True">
+              <Setter Property="Background" Value="#31515A"/>
+              <Setter Property="Foreground" Value="#FFFFFF"/>
+             </Trigger>
+             <Trigger Property="IsEnabled" Value="False">
+              <Setter Property="Foreground" Value="#78918F"/>
+             </Trigger>
+            </Style.Triggers>
+           </Style>
+          </ComboBox.ItemContainerStyle>
+<ComboBoxItem Content="🌐 All Categories"/><ComboBoxItem Content="🌐 Diagnostics"/><ComboBoxItem Content="🌐 DNS &amp; IP"/><ComboBoxItem Content="🌐 Repair &amp; Reset"/><ComboBoxItem Content="🌐 Adapters &amp; Wi-Fi"/><ComboBoxItem Content="🌐 Connections &amp; Ports"/><ComboBoxItem Content="🌐 Reports &amp; Settings"/></ComboBox>
+       </Grid>
+      </Grid>
+      <TextBlock Name="NetResultsCount" Text="50 network tools" Foreground="#AEB8C8" Margin="0,0,0,12"/>
        <UniformGrid Name="NetToolsGrid" Columns="2"/>
       </StackPanel>
      </Border>
@@ -1593,14 +2626,93 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
      <Border Padding="20">
       <StackPanel>
-       <TextBlock Text="Backup &amp; Recovery Center" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,0,0,10"/>
-       <TextBlock Text="Export important system settings and recovery information. Exports are saved under ProgramData\AMR-Utility\Backups." Foreground="#AEB8C8" TextWrapping="Wrap" Margin="0,0,0,12"/>
-       <TextBox Name="BackupSearchBox" Height="34" Padding="10,5" FontSize="14" ToolTip="Search backup actions" Margin="0,0,0,8"/>
-       <ComboBox Name="BackupCategoryFilter" Height="32" Margin="0,0,0,8" SelectedIndex="0">
-        <ComboBoxItem Content="All Categories"/>
-        <ComboBoxItem Content="Recovery"/><ComboBoxItem Content="Registry &amp; System"/><ComboBoxItem Content="Drivers &amp; Hardware"/><ComboBoxItem Content="Network"/><ComboBoxItem Content="Security"/><ComboBoxItem Content="Configuration &amp; Reports"/>
-       </ComboBox>
-       <TextBlock Name="BackupResultsCount" Text="50 backup actions" Foreground="#AEB8C8" Margin="0,0,0,10"/>
+       <Grid Margin="0,0,0,12">
+       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
+       <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,16,0">
+        <TextBlock Text="Backup &amp; Recovery Center" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,0,0,8"/>
+        <TextBlock Text="Export important system settings and recovery information. Exports are saved under ProgramData\AMR-Utility\Backups." Foreground="#AEB8C8" TextWrapping="Wrap"/>
+       </StackPanel>
+       <Grid Grid.Column="1" VerticalAlignment="Center"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+        <Grid Grid.Column="0" Margin="0,0,6,0">
+         <TextBox Name="BackupSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search backup tools by name or keyword" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2"/>
+         <TextBlock Text="⌕" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="11,0,0,2" FontSize="21" FontWeight="SemiBold" Foreground="#79AAA5"/>
+        </Grid>
+        <ComboBox Name="BackupCategoryFilter" Grid.Column="1" Height="34" Padding="8,4" FontSize="13" Margin="6,0,0,0" SelectedIndex="0" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F">
+          <ComboBox.Resources>
+           <Style TargetType="{x:Type ComboBox}">
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
+            <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
+            <Setter Property="Template">
+             <Setter.Value>
+              <ControlTemplate TargetType="{x:Type ComboBox}">
+               <Grid>
+                <ToggleButton x:Name="DropDownToggle" Focusable="False" ClickMode="Press" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                 <ToggleButton.Template>
+                  <ControlTemplate TargetType="{x:Type ToggleButton}">
+                   <Border x:Name="ToggleBorder" Background="{Binding Background, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderThickness="1" CornerRadius="6" Padding="8,4">
+                    <Grid>
+                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/></Grid.ColumnDefinitions>
+                     <ContentPresenter Grid.Column="0" Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentStringFormat="{Binding SelectionBoxItemStringFormat, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" VerticalAlignment="Center" HorizontalAlignment="Left"/>
+                     <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="#B7D5D1" StrokeThickness="1.6" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Grid>
+                   </Border>
+                   <ControlTemplate.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ToggleBorder" Property="BorderBrush" Value="#79AAA5"/></Trigger>
+                    <Trigger Property="IsPressed" Value="True"><Setter TargetName="ToggleBorder" Property="Background" Value="#31515A"/></Trigger>
+                   </ControlTemplate.Triggers>
+                  </ControlTemplate>
+                 </ToggleButton.Template>
+                </ToggleButton>
+                <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+                 <Border Background="#263B46" BorderBrush="#6B9994" BorderThickness="1" CornerRadius="7" Padding="3" SnapsToDevicePixels="True">
+                  <ScrollViewer MaxHeight="320" CanContentScroll="True">
+                   <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                  </ScrollViewer>
+                 </Border>
+                </Popup>
+               </Grid>
+               <ControlTemplate.Triggers>
+                <Trigger Property="HasItems" Value="False"><Setter TargetName="PART_Popup" Property="MinHeight" Value="24"/></Trigger>
+                <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
+               </ControlTemplate.Triggers>
+              </ControlTemplate>
+             </Setter.Value>
+            </Setter>
+           </Style>
+
+           <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#263B46"/>
+           <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#D9F0ED"/>
+           <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#6B9994"/>
+           <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
+          </ComboBox.Resources>
+          <ComboBox.ItemContainerStyle>
+           <Style TargetType="ComboBoxItem">
+            <Setter Property="Foreground" Value="#D9F0ED"/>
+            <Setter Property="Background" Value="#263B46"/>
+            <Setter Property="BorderBrush" Value="#6B9994"/>
+            <Setter Property="Padding" Value="9,6"/>
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Style.Triggers>
+             <Trigger Property="IsHighlighted" Value="True">
+              <Setter Property="Background" Value="#6B9994"/>
+              <Setter Property="Foreground" Value="#FFFFFF"/>
+             </Trigger>
+             <Trigger Property="IsSelected" Value="True">
+              <Setter Property="Background" Value="#31515A"/>
+              <Setter Property="Foreground" Value="#FFFFFF"/>
+             </Trigger>
+             <Trigger Property="IsEnabled" Value="False">
+              <Setter Property="Foreground" Value="#78918F"/>
+             </Trigger>
+            </Style.Triggers>
+           </Style>
+          </ComboBox.ItemContainerStyle>
+<ComboBoxItem Content="💾 All Categories"/><ComboBoxItem Content="💾 Recovery"/><ComboBoxItem Content="💾 Registry &amp; System"/><ComboBoxItem Content="💾 Drivers &amp; Hardware"/><ComboBoxItem Content="💾 Network"/><ComboBoxItem Content="💾 Security"/><ComboBoxItem Content="💾 Configuration &amp; Reports"/></ComboBox>
+       </Grid>
+      </Grid>
+      <TextBlock Name="BackupResultsCount" Text="50 backup actions" Foreground="#AEB8C8" Margin="0,0,0,10"/>
        <UniformGrid Name="BackupActionsGrid" Columns="2"/>
       </StackPanel>
      </Border>
@@ -1612,18 +2724,98 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" CanContentScroll="True">
      <Border Padding="20">
       <StackPanel>
-      <TextBlock Text="Quick Administration Utilities" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,0,0,12"/>
-      <DockPanel Margin="0,0,0,16" LastChildFill="True">
-       <ComboBox Name="UtilCategoryFilter" Width="230" Height="34" Margin="0,0,12,0" SelectedIndex="0" VerticalContentAlignment="Center">
-        <ComboBoxItem Content="All Categories"/>
-        <ComboBoxItem Content="System &amp; Performance"/>
-        <ComboBoxItem Content="Hardware &amp; Devices"/>
-        <ComboBoxItem Content="Network &amp; Security"/>
-        <ComboBoxItem Content="Administration"/>
-        <ComboBoxItem Content="Troubleshooting &amp; Recovery"/>
-       </ComboBox>
-       <TextBox Name="UtilSearchBox" Height="34" Padding="10,5" FontSize="14" ToolTip="Search Utilities by name or keyword" Text=""/>
-      </DockPanel>
+      <Grid Margin="0,0,0,12">
+       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
+       <TextBlock Grid.Column="0" Text="Quick Administration Utilities" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" VerticalAlignment="Center" Margin="0,0,16,0"/>
+       <Grid Grid.Column="1" VerticalAlignment="Center"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+        <Grid Grid.Column="0" Margin="0,0,6,0">
+         <TextBox Name="UtilSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search Utilities by name or keyword" Text="" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2"/>
+         <TextBlock Text="⌕" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="11,0,0,2" FontSize="21" FontWeight="SemiBold" Foreground="#79AAA5"/>
+        </Grid>
+        <ComboBox Name="UtilCategoryFilter" Grid.Column="1" Height="34" Padding="8,4" FontSize="13" Margin="6,0,0,0" SelectedIndex="0" VerticalContentAlignment="Center" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F">
+          <ComboBox.Resources>
+           <Style TargetType="{x:Type ComboBox}">
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
+            <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
+            <Setter Property="Template">
+             <Setter.Value>
+              <ControlTemplate TargetType="{x:Type ComboBox}">
+               <Grid>
+                <ToggleButton x:Name="DropDownToggle" Focusable="False" ClickMode="Press" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                 <ToggleButton.Template>
+                  <ControlTemplate TargetType="{x:Type ToggleButton}">
+                   <Border x:Name="ToggleBorder" Background="{Binding Background, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderThickness="1" CornerRadius="6" Padding="8,4">
+                    <Grid>
+                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/></Grid.ColumnDefinitions>
+                     <ContentPresenter Grid.Column="0" Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentStringFormat="{Binding SelectionBoxItemStringFormat, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" VerticalAlignment="Center" HorizontalAlignment="Left"/>
+                     <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="#B7D5D1" StrokeThickness="1.6" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Grid>
+                   </Border>
+                   <ControlTemplate.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ToggleBorder" Property="BorderBrush" Value="#79AAA5"/></Trigger>
+                    <Trigger Property="IsPressed" Value="True"><Setter TargetName="ToggleBorder" Property="Background" Value="#31515A"/></Trigger>
+                   </ControlTemplate.Triggers>
+                  </ControlTemplate>
+                 </ToggleButton.Template>
+                </ToggleButton>
+                <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+                 <Border Background="#263B46" BorderBrush="#6B9994" BorderThickness="1" CornerRadius="7" Padding="3" SnapsToDevicePixels="True">
+                  <ScrollViewer MaxHeight="320" CanContentScroll="True">
+                   <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                  </ScrollViewer>
+                 </Border>
+                </Popup>
+               </Grid>
+               <ControlTemplate.Triggers>
+                <Trigger Property="HasItems" Value="False"><Setter TargetName="PART_Popup" Property="MinHeight" Value="24"/></Trigger>
+                <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
+               </ControlTemplate.Triggers>
+              </ControlTemplate>
+             </Setter.Value>
+            </Setter>
+           </Style>
+
+           <!-- Keep both the dropdown surface and its outer popup frame on the app's dark palette. -->
+           <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#263B46"/>
+           <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#D9F0ED"/>
+           <SolidColorBrush x:Key="{x:Static SystemColors.MenuBrushKey}" Color="#263B46"/>
+           <SolidColorBrush x:Key="{x:Static SystemColors.MenuTextBrushKey}" Color="#D9F0ED"/>
+           <SolidColorBrush x:Key="{x:Static SystemColors.ControlBrushKey}" Color="#263B46"/>
+           <SolidColorBrush x:Key="{x:Static SystemColors.ControlTextBrushKey}" Color="#D9F0ED"/>
+           <SolidColorBrush x:Key="{x:Static SystemColors.WindowFrameBrushKey}" Color="#6B9994"/>
+           <SolidColorBrush x:Key="{x:Static SystemColors.ActiveBorderBrushKey}" Color="#6B9994"/>
+           <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#6B9994"/>
+           <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
+          </ComboBox.Resources>
+          <ComboBox.ItemContainerStyle>
+           <Style TargetType="ComboBoxItem">
+            <Setter Property="Foreground" Value="#D9F0ED"/>
+            <Setter Property="Background" Value="#263B46"/>
+            <Setter Property="BorderBrush" Value="#6B9994"/>
+            <Setter Property="Padding" Value="9,6"/>
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Style.Triggers>
+             <Trigger Property="IsHighlighted" Value="True">
+              <Setter Property="Background" Value="#6B9994"/>
+              <Setter Property="Foreground" Value="#FFFFFF"/>
+             </Trigger>
+             <Trigger Property="IsSelected" Value="True">
+              <Setter Property="Background" Value="#31515A"/>
+              <Setter Property="Foreground" Value="#FFFFFF"/>
+             </Trigger>
+             <Trigger Property="IsEnabled" Value="False">
+              <Setter Property="Foreground" Value="#78918F"/>
+             </Trigger>
+            </Style.Triggers>
+           </Style>
+          </ComboBox.ItemContainerStyle>
+
+         <ComboBoxItem Content="All Categories"/><ComboBoxItem Content="System &amp; Performance"/><ComboBoxItem Content="Hardware &amp; Devices"/><ComboBoxItem Content="Network &amp; Security"/><ComboBoxItem Content="Administration"/><ComboBoxItem Content="Troubleshooting &amp; Recovery"/>
+        </ComboBox>
+       </Grid>
+      </Grid>
       <TextBlock Name="UtilResultsCount" Text="50 utilities" Foreground="#AEB8C8" Margin="0,0,0,12"/>
       <WrapPanel Name="UtilButtonsPanel" Orientation="Horizontal">
        <Button Name="UtilControlPanelBtn" Content="🛠 Open Classic Control Panel" Width="260" Margin="0,0,15,15"/>
@@ -1722,6 +2914,9 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
        <TabItem Header="⚡ Customize Engine">
         <TextBox Name="LogConsoleCustomize" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#09090B" Foreground="#8B5CF6" FontFamily="Consolas" FontSize="13" Padding="15" AcceptsReturn="True"/>
        </TabItem>
+       <TabItem Header="🧪 Tweaks Audit">
+        <TextBox Name="LogConsoleTweaks" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#09090B" Foreground="#34D399" FontFamily="Consolas" FontSize="13" Padding="15" AcceptsReturn="True"/>
+       </TabItem>
        <TabItem Header="🧹 Cleanup Logs">
         <TextBox Name="LogConsoleCleanup" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#09090B" Foreground="#22D3EE" FontFamily="Consolas" FontSize="13" Padding="15" AcceptsReturn="True"/>
        </TabItem>
@@ -1801,6 +2996,7 @@ $script:Window = [Windows.Markup.XamlReader]::Load($reader)
 function C { param([string]$Name) return $script:Window.FindName($Name) }
 
 $script:Status        = C 'StatusText'
+Register-AMRExceptionHandlers
 $script:ProgressBar   = C 'InstallProgressBar'
 $script:ProgressText  = C 'ProgressText'
 $script:LogControls['All']       = C 'LogConsoleAll'
@@ -1808,6 +3004,7 @@ $script:LogControls['System']    = C 'LogConsoleSystem'
 $script:LogControls['Overview']  = C 'LogConsoleOverview'
 $script:LogControls['Software']  = C 'LogConsoleSoftware'
 $script:LogControls['Customize'] = C 'LogConsoleCustomize'
+$script:LogControls['Tweaks']    = C 'LogConsoleTweaks'
 $script:LogControls['Cleanup']   = C 'LogConsoleCleanup'
 
 # Logs Tab Actions
@@ -1821,10 +3018,18 @@ $script:LogControls['Cleanup']   = C 'LogConsoleCleanup'
 (C 'ExportLogsBtn').Add_Click({
     try {
         $exportPath = Join-Path $script:ExportDir ("AMR_Log_Export_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
-        Copy-Item -Path $script:LogFile -Destination $exportPath -Force
-        Show-AMRMessage "Log exported successfully to:`n$exportPath" "Export Complete" OK Information | Out-Null
-        Write-AMRLog "Exported log file to: $exportPath" SUCCESS System
+        Copy-Item -LiteralPath $script:LogFile -Destination $exportPath -Force -ErrorAction Stop
+        $diagnosticExportPath = Join-Path $script:ExportDir ("AMR_Diagnostics_Export_{0}.jsonl" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+        $diagnosticExported = $false
+        if (Test-Path -LiteralPath $script:DiagnosticFile -PathType Leaf -ErrorAction Stop) {
+            Copy-Item -LiteralPath $script:DiagnosticFile -Destination $diagnosticExportPath -Force -ErrorAction Stop
+            $diagnosticExported = $true
+        }
+        $exportMessage = if ($diagnosticExported) { "Application log and diagnostic log exported:`n$exportPath`n$diagnosticExportPath" } else { "Application log exported:`n$exportPath`nNo diagnostic file exists yet." }
+        Show-AMRMessage $exportMessage "Export Complete" OK Information | Out-Null
+        Write-AMRLog "Exported application log to: $exportPath" SUCCESS System
     } catch {
+        Write-AMRDiagnostic -Severity 'ERROR' -Area 'Logging' -Operation 'ExportLogs' -Message 'Could not export application/diagnostic logs.' -ErrorRecord $_
         Show-AMRMessage "Failed to export logs: $_" "Export Error" OK Error | Out-Null
     }
 })
@@ -2723,7 +3928,7 @@ function Complete-AMRInstallQueue {
                 $script:ProgressBar.Value = [int]$matches[1]
                 $line = $matches[2]
             }
-            Add-Content -LiteralPath $script:LogFile -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue
+            try { Add-Content -LiteralPath $script:LogFile -Value $line -Encoding UTF8 -ErrorAction Stop } catch { Write-AMRDiagnostic -Severity 'ERROR' -Area 'Software' -Operation 'AppendInstallQueueLog' -Message 'Could not persist an installer worker log line.' -ErrorRecord $_ -Target $script:LogFile }
             foreach ($key in @('All','Software')) {
                 $control = $script:LogControls[$key]
                 if ($control) {
@@ -2870,7 +4075,7 @@ function Execute-SmartMultiTierInstallAsync {
                         $script:ProgressBar.Value = [int]$matches[1]
                         $queuedLine = $matches[2]
                     }
-                    Add-Content -LiteralPath $script:LogFile -Value $queuedLine -Encoding UTF8 -ErrorAction SilentlyContinue
+                    try { Add-Content -LiteralPath $script:LogFile -Value $queuedLine -Encoding UTF8 -ErrorAction Stop } catch { Write-AMRDiagnostic -Severity 'ERROR' -Area 'Software' -Operation 'AppendInstallTimerLog' -Message 'Could not persist an installer progress log line.' -ErrorRecord $_ -Target $script:LogFile }
                     foreach ($key in @('All','Software')) {
                         $control = $script:LogControls[$key]
                         if ($control) {
@@ -2956,104 +4161,158 @@ function Execute-SmartMultiTierInstallAsync {
 
     # 1. Appearance & Visuals
     if ((C 'chkDarkMode').IsChecked -eq $true) {
+        $script:CurrentTweakName = [string](C 'chkDarkMode').Content
+        $script:CurrentTweakSource = 'Customize'
         $r1 = Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "AppsUseLightTheme" -Value 0
         $r2 = Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "SystemUsesLightTheme" -Value 0
         if ($r1 -and $r2) { $appliedSuccessCount++; $needsExplorerRestart = $true }
     }
     if ((C 'chkDisableTransparency').IsChecked -eq $true) {
+        $script:CurrentTweakName = [string](C 'chkDisableTransparency').Content
+        $script:CurrentTweakSource = 'Customize'
         if (Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "EnableTransparency" -Value 0) { $appliedSuccessCount++; $needsExplorerRestart = $true }
     }
     if ((C 'chkDisableAccentColor').IsChecked -eq $true) {
+        $script:CurrentTweakName = [string](C 'chkDisableAccentColor').Content
+        $script:CurrentTweakSource = 'Customize'
         if (Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\DWM" -Name "ColorPrevalence" -Value 0) { $appliedSuccessCount++; $needsExplorerRestart = $true }
     }
     if ((C 'chkClassicVolume').IsChecked -eq $true) {
+        $script:CurrentTweakName = [string](C 'chkClassicVolume').Content
+        $script:CurrentTweakSource = 'Customize'
         if (Set-AMRRegistryKey -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\MTCUVC" -Name "EnableMtcUvc" -Value 0) { $appliedSuccessCount++ }
     }
     if ((C 'chkDisableAnimations').IsChecked -eq $true) {
+        $script:CurrentTweakName = [string](C 'chkDisableAnimations').Content
+        $script:CurrentTweakSource = 'Customize'
         if (Set-AMRRegistryKey -Path "HKCU:\Control Panel\Desktop\WindowMetrics" -Name "MinAnimate" -Value "0" -PropertyType String) { $appliedSuccessCount++ }
     }
 
     # 2. Taskbar & Start Menu
     if ((C 'chkShowSeconds').IsChecked -eq $true) {
+        $script:CurrentTweakName = [string](C 'chkShowSeconds').Content
+        $script:CurrentTweakSource = 'Customize'
         if (Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ShowSecondsInSystemClock" -Value 1) { $appliedSuccessCount++; $needsExplorerRestart = $true }
     }
     if ((C 'chkDisableBingSearch').IsChecked -eq $true) {
+        $script:CurrentTweakName = [string](C 'chkDisableBingSearch').Content
+        $script:CurrentTweakSource = 'Customize'
         if (Set-AMRRegistryKey -Path "HKCU:\Software\Policies\Microsoft\Windows\Explorer" -Name "DisableSearchBoxSuggestions" -Value 1) { $appliedSuccessCount++; $needsExplorerRestart = $true }
     }
     if ((C 'chkTaskbarLeft').IsChecked -eq $true) {
+        $script:CurrentTweakName = [string](C 'chkTaskbarLeft').Content
+        $script:CurrentTweakSource = 'Customize'
         if (Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "TaskbarAl" -Value 0) { $appliedSuccessCount++; $needsExplorerRestart = $true }
     }
     if ((C 'chkHideWidgets').IsChecked -eq $true) {
+        $script:CurrentTweakName = [string](C 'chkHideWidgets').Content
+        $script:CurrentTweakSource = 'Customize'
         if (Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "TaskbarDa" -Value 0) { $appliedSuccessCount++; $needsExplorerRestart = $true }
     }
     if ((C 'chkHideTaskView').IsChecked -eq $true) {
+        $script:CurrentTweakName = [string](C 'chkHideTaskView').Content
+        $script:CurrentTweakSource = 'Customize'
         if (Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ShowTaskViewButton" -Value 0) { $appliedSuccessCount++; $needsExplorerRestart = $true }
     }
 
     # 3. File Explorer & View
     if ((C 'chkHiddenFiles').IsChecked -eq $true) {
+        $script:CurrentTweakName = [string](C 'chkHiddenFiles').Content
+        $script:CurrentTweakSource = 'Customize'
         $r1 = Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Hidden" -Value 1
         $r2 = Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "HideFileExt" -Value 0
         if ($r1 -and $r2) { $appliedSuccessCount++; $needsExplorerRestart = $true }
     }
     if ((C 'chkOpenThisPC').IsChecked -eq $true) {
+        $script:CurrentTweakName = [string](C 'chkOpenThisPC').Content
+        $script:CurrentTweakSource = 'Customize'
         if (Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "LaunchTo" -Value 1) { $appliedSuccessCount++; $needsExplorerRestart = $true }
     }
     if ((C 'chkClassicContextMenu').IsChecked -eq $true) {
+        $script:CurrentTweakName = [string](C 'chkClassicContextMenu').Content
+        $script:CurrentTweakSource = 'Customize'
         if (Set-AMRRegistryKey -Path "HKCU:\Software\Classes\CLSID\{86ca3a0d-4a87-4447-a4cd-410b15471612}\InprocServer32" -Name "" -Value "" -PropertyType String) { $appliedSuccessCount++; $needsExplorerRestart = $true }
     }
     if ((C 'chkHideRecentFiles').IsChecked -eq $true) {
+        $script:CurrentTweakName = [string](C 'chkHideRecentFiles').Content
+        $script:CurrentTweakSource = 'Customize'
         $r1 = Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer" -Name "ShowRecent" -Value 0
         $r2 = Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer" -Name "ShowFrequent" -Value 0
         if ($r1 -and $r2) { $appliedSuccessCount++; $needsExplorerRestart = $true }
     }
     if ((C 'chkSeparateFolderProcess').IsChecked -eq $true) {
+        $script:CurrentTweakName = [string](C 'chkSeparateFolderProcess').Content
+        $script:CurrentTweakSource = 'Customize'
         if (Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "SeparateProcess" -Value 1) { $appliedSuccessCount++; $needsExplorerRestart = $true }
     }
 
     # 4. Behavior & Accessibility
     if ((C 'chkDisableStickyKeys').IsChecked -eq $true) {
+        $script:CurrentTweakName = [string](C 'chkDisableStickyKeys').Content
+        $script:CurrentTweakSource = 'Customize'
         if (Set-AMRRegistryKey -Path "HKCU:\Control Panel\Accessibility\StickyKeys" -Name "Flags" -Value "506" -PropertyType String) { $appliedSuccessCount++ }
     }
     if ((C 'chkDisableAutoRebootUpdate').IsChecked -eq $true) {
+        $script:CurrentTweakName = [string](C 'chkDisableAutoRebootUpdate').Content
+        $script:CurrentTweakSource = 'Customize'
         if (Set-AMRRegistryKey -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "NoAutoRebootWithLoggedOnUsers" -Value 1) { $appliedSuccessCount++ }
     }
     if ((C 'chkShowBSODDetails').IsChecked -eq $true) {
+        $script:CurrentTweakName = [string](C 'chkShowBSODDetails').Content
+        $script:CurrentTweakSource = 'Customize'
         if (Set-AMRRegistryKey -Path "HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl" -Name "DisplayParameters" -Value 1) { $appliedSuccessCount++ }
     }
     if ((C 'chkDisableShortcutSuffix').IsChecked -eq $true) {
+        $script:CurrentTweakName = [string](C 'chkDisableShortcutSuffix').Content
+        $script:CurrentTweakSource = 'Customize'
         if (Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer" -Name "link" -Value ([byte[]]@(0,0,0,0)) -PropertyType Binary) { $appliedSuccessCount++; $needsExplorerRestart = $true }
     }
 
     # 5. Privacy & Tracking
     if ((C 'chkDisableAdvertisingID').IsChecked -eq $true) {
+        $script:CurrentTweakName = [string](C 'chkDisableAdvertisingID').Content
+        $script:CurrentTweakSource = 'Customize'
         if (Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo" -Name "Enabled" -Value 0) { $appliedSuccessCount++ }
     }
     if ((C 'chkDisableLocationTracking').IsChecked -eq $true) {
+        $script:CurrentTweakName = [string](C 'chkDisableLocationTracking').Content
+        $script:CurrentTweakSource = 'Customize'
         if (Set-AMRRegistryKey -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location" -Name "Value" -Value "Deny" -PropertyType String) { $appliedSuccessCount++ }
     }
     if ((C 'chkDisableFeedbackPrompts').IsChecked -eq $true) {
+        $script:CurrentTweakName = [string](C 'chkDisableFeedbackPrompts').Content
+        $script:CurrentTweakSource = 'Customize'
         if (Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\Siuf\Rules" -Name "NumberOfSIUFInPeriod" -Value 0) { $appliedSuccessCount++ }
     }
     if ((C 'chkDisableTailoredExperiences').IsChecked -eq $true) {
+        $script:CurrentTweakName = [string](C 'chkDisableTailoredExperiences').Content
+        $script:CurrentTweakSource = 'Customize'
         if (Set-AMRRegistryKey -Path "HKCU:\Software\Policies\Microsoft\Windows\CloudContent" -Name "DisableTailoredExperiencesWithDiagnosticData" -Value 1) { $appliedSuccessCount++ }
     }
 
     # 6. Performance & Gaming Tools
     if ((C 'chkEnableGameMode').IsChecked -eq $true) {
+        $script:CurrentTweakName = [string](C 'chkEnableGameMode').Content
+        $script:CurrentTweakSource = 'Customize'
         if (Set-AMRRegistryKey -Path "HKCU:\Software\Microsoft\GameBar" -Name "AllowAutoGameMode" -Value 1) { $appliedSuccessCount++ }
     }
     if ((C 'chkDisableSearchIndexing').IsChecked -eq $true) {
-        Set-Service -Name "WSearch" -StartupType Manual -ErrorAction SilentlyContinue
+        $script:CurrentTweakName = [string](C 'chkDisableSearchIndexing').Content
+        $script:CurrentTweakSource = 'Customize'
+        Set-AMRAuditedService -Name 'WSearch' -StartupType Manual | Out-Null
         $appliedSuccessCount++
     }
     if ((C 'chkAddTakeOwnership').IsChecked -eq $true) {
+        $script:CurrentTweakName = [string](C 'chkAddTakeOwnership').Content
+        $script:CurrentTweakSource = 'Customize'
         $cmd = 'cmd.exe /c takeown /f "%1" && icacls "%1" /grant administrators:F'
         if (Set-AMRRegistryKey -Path "HKCR:\*\shell\TakeOwnership\command" -Name "" -Value $cmd -PropertyType String) { $appliedSuccessCount++ }
     }
     if ((C 'chkDisableHibernation').IsChecked -eq $true) {
-        powercfg -h off | Out-Null
-        Write-AMRLog "Disabled system hibernation to free disk space." SUCCESS Customize
+        $script:CurrentTweakName = [string](C 'chkDisableHibernation').Content
+        $script:CurrentTweakSource = 'Customize'
+        Invoke-AMRAuditedHibernationOff -TweakName (Get-AMRTweakContext) | Out-Null
+        Write-AMRLog "Disabled system hibernation to free disk space." SUCCESS Tweaks
         $appliedSuccessCount++
     }
 
@@ -3066,6 +4325,7 @@ function Execute-SmartMultiTierInstallAsync {
     } else {
         Show-AMRMessage "Please select at least one tweak to apply." "Notice" OK Warning | Out-Null
     }
+    $script:CurrentTweakName = $null; $script:CurrentTweakSource = $null
 })
 
 # BASIC TWEAKS PRESETS - selecting a preset only checks options; it never executes them.
@@ -3120,6 +4380,31 @@ foreach ($name in $script:AMRBasicCheckboxNames) {
     Update-AMRTweakSelectionCounts
     Write-AMRLog 'Cleared selected tweaks in the right Basic Tweaks panel.' INFO Customize
 })
+(C 'RestoreDefaultsBtn').Add_Click({
+    $answer = Show-AMRMessage 'Restore Defaults will restore the original Registry values, supported Windows service startup/running states, active Power Plan, and Hibernate state captured before the first change. It cannot recover deleted temporary files or Recycle Bin contents. Continue?' 'Restore Defaults' YesNo Warning
+    if ($answer -ne 'Yes') { return }
+    try {
+        $result = Restore-AMRTweakBaseline -Source 'Customize'
+        Show-AMRMessage ("Restore finished. Restored: {0} / {1}; Failed: {2}. Scope: {3}. Check Tweaks Audit for per-setting details." -f $result.Restored,$result.Total,$result.Failed,$result.Scope) 'Restore Defaults' OK $(if($result.Failed -eq 0 -and $result.Total -gt 0){'Information'}else{'Warning'}) | Out-Null
+    } catch {
+        Write-AMRLog "Restore Defaults failed: $_" ERROR Tweaks
+        Show-AMRMessage "Restore Defaults failed: $_" 'Restore Defaults' OK Error | Out-Null
+    }
+})
+
+
+(C 'RestoreBasicDefaultsBtn').Add_Click({
+    $answer = Show-AMRMessage 'Restore Defaults on the RIGHT panel will restore only original states captured by Basic Tweaks (Registry, supported services, Power Plan, and Hibernate). It will not affect left-side Customize settings or recover deleted files. Continue?' 'Restore Basic Tweaks Defaults' YesNo Warning
+    if ($answer -ne 'Yes') { return }
+    try {
+        $result = Restore-AMRTweakBaseline -Source 'Basic Tweaks'
+        Show-AMRMessage ("Right-side restore finished. Restored: {0} / {1}; Failed: {2}. Scope: {3}. Check Tweaks Audit for details." -f $result.Restored,$result.Total,$result.Failed,$result.Scope) 'Restore Basic Tweaks Defaults' OK $(if($result.Failed -eq 0 -and $result.Total -gt 0){'Information'}else{'Warning'}) | Out-Null
+    } catch {
+        Write-AMRLog "Right-side Restore Defaults failed: $_" ERROR Tweaks
+        Show-AMRMessage "Restore failed: $_" 'Restore Basic Tweaks Defaults' OK Error | Out-Null
+    }
+})
+
 (C 'BasicPresetEssentialBtn').Add_Click({ Set-AMRBasicPreset -Preset Essential })
 (C 'BasicPresetMinimalBtn').Add_Click({ Set-AMRBasicPreset -Preset Minimal })
 (C 'BasicPresetMediumBtn').Add_Click({ Set-AMRBasicPreset -Preset Medium })
@@ -3135,153 +4420,286 @@ Update-AMRTweakSelectionCounts
     $restartExplorer = $false
     try {
         if ((C 'btTempFiles').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btTempFiles').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             $tempPath = [IO.Path]::GetTempPath()
-            Get-ChildItem -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                try { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction Stop; $count++ } catch { }
+            $beforeTemp = Get-AMRPathSnapshot -Path $tempPath
+            $removedTemp = 0; $failedTemp = 0; $tempFailureDetails = @(); $tempItems = @()
+            try {
+                if ($beforeTemp.Readable -and $beforeTemp.Exists) { $tempItems = @(Get-ChildItem -LiteralPath $tempPath -Force -ErrorAction Stop) }
+                elseif (-not $beforeTemp.Readable) { throw 'Temporary folder could not be scanned completely.' }
+            } catch { $failedTemp++; $tempFailureDetails += $_.Exception.Message }
+            foreach ($tempItem in $tempItems) {
+                try {
+                    Remove-Item -LiteralPath $tempItem.FullName -Recurse -Force -ErrorAction Stop
+                    if (Test-Path -LiteralPath $tempItem.FullName -ErrorAction Stop) { throw 'Item still exists after Remove-Item.' }
+                    $removedTemp++
+                } catch { $failedTemp++; $tempFailureDetails += ("{0}: {1}" -f $tempItem.FullName,$_.Exception.Message) }
             }
-            Write-AMRLog 'Attempted current-user temporary-file cleanup; in-use files were skipped.' INFO Customize
+            $afterTemp = Get-AMRPathSnapshot -Path $tempPath
+            $tempExecution = if ($failedTemp -gt 0 -and $removedTemp -gt 0) { 'Partial' } elseif ($failedTemp -gt 0) { 'Failed' } else { 'Success' }
+            $tempVerification = if (-not $beforeTemp.Readable -or -not $afterTemp.Readable) { 'Not Verified' } elseif ($failedTemp -gt 0) { 'Failed' } elseif ($removedTemp -gt 0 -and $afterTemp.Count -lt $beforeTemp.Count) { 'Passed' } else { 'No Change' }
+            Write-AMRTweakAudit -Tweak 'Delete current-user temporary files' -Source 'Basic Tweaks' -Target $tempPath -Before $beforeTemp -Requested 'Remove available temporary items' -After $afterTemp -Execution $tempExecution -Verification $tempVerification -FailureDetails ($tempFailureDetails -join ' | ')
+            if ($removedTemp -gt 0) { $count++ }
+            Write-AMRLog ("Temporary cleanup: removed {0} top-level item(s); before {1} item(s)/{2} bytes, after {3} item(s)/{4} bytes." -f $removedTemp,$beforeTemp.Count,$beforeTemp.Bytes,$afterTemp.Count,$afterTemp.Bytes) INFO Tweaks
         }
         if ((C 'btEmptyRecycleBin').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btEmptyRecycleBin').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             $answer = Show-AMRMessage 'This permanently empties the Recycle Bin. Continue?' 'Confirm Recycle Bin cleanup' YesNo Warning
-            if ($answer -eq 'Yes') { Clear-RecycleBin -Force -ErrorAction Stop; $count++ }
+            if ($answer -eq 'Yes') {
+                $beforeBin = Get-AMRRecycleBinSnapshot
+                $binExecution = 'Success'; $binError = $null
+                if (-not $beforeBin.Readable) { $binExecution = 'Not Verified'; $binError = 'Recycle Bin state could not be read before cleanup.' }
+                else {
+                    try { Clear-RecycleBin -Force -ErrorAction Stop }
+                    catch { $binExecution = 'Failed'; $binError = $_.Exception.Message }
+                }
+                $afterBin = Get-AMRRecycleBinSnapshot
+                $binVerification = if (-not $beforeBin.Readable -or -not $afterBin.Readable) { 'Not Verified' } elseif ($afterBin.Count -eq 0 -and $beforeBin.Count -gt 0) { 'Passed' } elseif ($afterBin.Count -eq 0 -and $beforeBin.Count -eq 0) { 'No Change' } else { 'Failed' }
+                if ($binExecution -eq 'Success' -and $binVerification -eq 'Passed') { $count++ }
+                elseif ($binExecution -eq 'Success' -and $binVerification -notin @('No Change')) { $binExecution = 'Not Verified' }
+                Write-AMRTweakAudit -Tweak 'Empty Recycle Bin' -Source 'Basic Tweaks' -Target 'Windows Recycle Bin' -Before $beforeBin -Requested 'Empty all items' -After $afterBin -Execution $binExecution -Verification $binVerification -FailureDetails $binError
+                Write-AMRLog ("Recycle Bin: before {0} item(s)/{1} bytes, after {2} item(s)/{3} bytes." -f $beforeBin.Count,$beforeBin.Bytes,$afterBin.Count,$afterBin.Bytes) INFO Tweaks
+            } else {
+                Write-AMRLog 'Recycle Bin cleanup was cancelled by the user; no change was made.' INFO Tweaks
+            }
         }
         if ((C 'btClearRecent').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btClearRecent').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             $recent = Join-Path $env:APPDATA 'Microsoft\Windows\Recent'
-            if (Test-Path $recent) { Get-ChildItem -LiteralPath $recent -Force -ErrorAction SilentlyContinue | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue; $count++ }
+            $beforeRecent = Get-AMRPathSnapshot -Path $recent
+            $removedRecent = 0; $failedRecent = 0; $recentFailureDetails = @(); $recentItems = @()
+            try {
+                if ($beforeRecent.Readable -and $beforeRecent.Exists) { $recentItems = @(Get-ChildItem -LiteralPath $recent -Force -ErrorAction Stop) }
+                elseif (-not $beforeRecent.Readable) { throw 'Recent Items folder could not be scanned completely.' }
+            } catch { $failedRecent++; $recentFailureDetails += $_.Exception.Message }
+            foreach ($recentItem in $recentItems) {
+                try {
+                    Remove-Item -LiteralPath $recentItem.FullName -Force -Recurse -ErrorAction Stop
+                    if (Test-Path -LiteralPath $recentItem.FullName -ErrorAction Stop) { throw 'Item still exists after Remove-Item.' }
+                    $removedRecent++
+                } catch { $failedRecent++; $recentFailureDetails += ("{0}: {1}" -f $recentItem.FullName,$_.Exception.Message) }
+            }
+            $afterRecent = Get-AMRPathSnapshot -Path $recent
+            $recentExecution = if ($failedRecent -gt 0 -and $removedRecent -gt 0) {'Partial'} elseif ($failedRecent -gt 0) {'Failed'} else {'Success'}
+            $recentVerification = if (-not $beforeRecent.Readable -or -not $afterRecent.Readable) {'Not Verified'} elseif ($failedRecent -gt 0) {'Failed'} elseif ($removedRecent -gt 0 -and $afterRecent.Count -lt $beforeRecent.Count) {'Passed'} else {'No Change'}
+            Write-AMRTweakAudit -Tweak (Get-AMRTweakContext) -Source 'Basic Tweaks' -Target $recent -Before $beforeRecent -Requested 'Remove recent items' -After $afterRecent -Execution $recentExecution -Verification $recentVerification -FailureDetails ($recentFailureDetails -join ' | ')
+            if ($removedRecent -gt 0) { $count++ }
         }
         if ((C 'btDisableTips').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btDisableTips').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'SubscribedContent-338389Enabled' -Value 0) { $count++ }
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'SystemPaneSuggestionsEnabled' -Value 0) { $count++ }
         }
         if ((C 'btDisableTransparency').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btDisableTransparency').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name 'EnableTransparency' -Value 0) { $count++; $restartExplorer=$true }
         }
         if ((C 'btDisableAnimations').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btDisableAnimations').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Control Panel\Desktop\WindowMetrics' -Name 'MinAnimate' -Value '0' -PropertyType String) { $count++ }
         }
         if ((C 'btPowerHigh').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btPowerHigh').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             $plans = (& powercfg /list 2>$null) -join "`n"
             $match = [regex]::Match($plans, '([a-fA-F0-9-]{36}).*\(High performance\)', 'IgnoreCase')
-            if ($match.Success) { & powercfg /setactive $match.Groups[1].Value; if ($LASTEXITCODE -eq 0) { $count++ } }
+            if ($match.Success) { if (Invoke-AMRAuditedPowerPlan -Guid $match.Groups[1].Value -TweakName (Get-AMRTweakContext)) { $count++ } }
             else { Show-AMRMessage 'High Performance plan was not found on this device. No power plan was changed.' 'Power plan unavailable' OK Information | Out-Null }
         }
         if ((C 'btGameMode').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btGameMode').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\GameBar' -Name 'AllowAutoGameMode' -Value 1) { $count++ }
         }
         if ((C 'btShowExtensions').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btShowExtensions').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'HideFileExt' -Value 0) { $count++; $restartExplorer=$true }
         }
         if ((C 'btShowHidden').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btShowHidden').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'Hidden' -Value 1) { $count++; $restartExplorer=$true }
         }
         if ((C 'btThisPC').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btThisPC').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'LaunchTo' -Value 1) { $count++; $restartExplorer=$true }
         }
         if ((C 'btDisableRecent').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btDisableRecent').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             $a = Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer' -Name 'ShowRecent' -Value 0
             $b = Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer' -Name 'ShowFrequent' -Value 0
             if ($a -and $b) { $count++; $restartExplorer=$true }
         }
         if ((C 'btDisableAds').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btDisableAds').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo' -Name 'Enabled' -Value 0) { $count++ }
         }
         if ((C 'btDisableFeedback').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btDisableFeedback').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Siuf\Rules' -Name 'NumberOfSIUFInPeriod' -Value 0) { $count++ }
         }
         if ((C 'btDisableBackground').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btDisableBackground').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications' -Name 'GlobalUserDisabled' -Value 1) { $count++ }
         }
         if ((C 'btDisableCortana').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btDisableCortana').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' -Name 'AllowCortana' -Value 0) { $count++ }
         }
         if ((C 'btActivityHistory').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btActivityHistory').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             $p='HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'
-            if (Set-AMRRegistryKey -Path $p -Name 'EnableActivityFeed' -Value 1) { $count++ }
+            # Disable Activity History collection and publishing; keep clipboard history untouched.
+            if (Set-AMRRegistryKey -Path $p -Name 'EnableActivityFeed' -Value 0) { $count++ }
             if (Set-AMRRegistryKey -Path $p -Name 'PublishUserActivities' -Value 0) { $count++ }
             if (Set-AMRRegistryKey -Path $p -Name 'UploadUserActivities' -Value 0) { $count++ }
         }
         if ((C 'btConsumerFeatures').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btConsumerFeatures').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent' -Name 'DisableWindowsConsumerFeatures' -Value 1) { $count++ }
         }
         if ((C 'btDeliveryOptimization').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btDeliveryOptimization').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization' -Name 'DODownloadMode' -Value 0) { $count++ }
         }
         if ((C 'btTailoredExperiences').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btTailoredExperiences').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy' -Name 'TailoredExperiencesWithDiagnosticDataEnabled' -Value 0) { $count++ }
         }
         if ((C 'btInputPersonalization').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btInputPersonalization').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\InputPersonalization' -Name 'RestrictImplicitTextCollection' -Value 1) { $count++ }
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\InputPersonalization' -Name 'RestrictImplicitInkCollection' -Value 1) { $count++ }
         }
         if ((C 'btLockScreenTips').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btLockScreenTips').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'RotatingLockScreenEnabled' -Value 0) { $count++ }
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'RotatingLockScreenOverlayEnabled' -Value 0) { $count++ }
         }
         if ((C 'btDisableTelemetryService').IsChecked -eq $true) {
-            try { Set-Service -Name 'DiagTrack' -StartupType Disabled -ErrorAction Stop; Stop-Service -Name 'DiagTrack' -Force -ErrorAction SilentlyContinue; $count++ }
-            catch { Write-AMRLog ('Could not disable DiagTrack service: ' + $_.Exception.Message) WARNING Customize }
+            $script:CurrentTweakName = [string](C 'btDisableTelemetryService').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
+            try { if (Set-AMRAuditedService -Name 'DiagTrack' -StartupType Disabled -StopAfter $true) { $count++ } }
+            catch { Write-AMRLog ('Could not disable DiagTrack service: ' + $_.Exception.Message) WARNING Tweaks }
         }
         if ((C 'btDisableGameDVR').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btDisableGameDVR').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\System\GameConfigStore' -Name 'GameDVR_Enabled' -Value 0) { $count++ }
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR' -Name 'AppCaptureEnabled' -Value 0) { $count++ }
         }
         if ((C 'btDisableWebSearch').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btDisableWebSearch').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' -Name 'DisableWebSearch' -Value 1) { $count++ }
             if (Set-AMRRegistryKey -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' -Name 'ConnectedSearchUseWeb' -Value 0) { $count++ }
         }
         if ((C 'btDisableAppLaunchTracking').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btDisableAppLaunchTracking').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'Start_TrackProgs' -Value 0) { $count++; $restartExplorer=$true }
         }
         if ((C 'btDisableWidgets').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btDisableWidgets').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'TaskbarDa' -Value 0) { $count++; $restartExplorer=$true }
         }
         if ((C 'btDisableHibernation').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btDisableHibernation').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             $answer = Show-AMRMessage 'Disabling hibernation removes the hibernation file and disables Hibernate (and may disable Fast Startup). Continue?' 'Confirm hibernation change' YesNo Warning
-            if ($answer -eq 'Yes') { & powercfg.exe /hibernate off; if ($LASTEXITCODE -eq 0) { $count++ } }
+            if ($answer -eq 'Yes') { if (Invoke-AMRAuditedHibernationOff -TweakName (Get-AMRTweakContext)) { $count++ } }
         }
         if ((C 'btDisableStartAppSuggestions').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btDisableStartAppSuggestions').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             $p='HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager'
             $ok1=Set-AMRRegistryKey -Path $p -Name 'SubscribedContent-338388Enabled' -Value 0
             $ok2=Set-AMRRegistryKey -Path $p -Name 'SubscribedContent-338389Enabled' -Value 0
             if ($ok1 -and $ok2) { $count++ }
         }
         if ((C 'btDisableSilentInstalls').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btDisableSilentInstalls').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'SilentInstalledAppsEnabled' -Value 0) { $count++ }
         }
         if ((C 'btDisableSoftLanding').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btDisableSoftLanding').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'SoftLandingEnabled' -Value 0) { $count++ }
         }
         if ((C 'btDisableSettingsSuggestions').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btDisableSettingsSuggestions').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'SubscribedContent-338393Enabled' -Value 0) { $count++ }
         }
         if ((C 'btDisableSyncNotifications').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btDisableSyncNotifications').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'ShowSyncProviderNotifications' -Value 0) { $count++; $restartExplorer=$true }
         }
         if ((C 'btDisableOnlineSpeech').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btDisableOnlineSpeech').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Speech_OneCore\Settings\OnlineSpeechPrivacy' -Name 'HasAccepted' -Value 0) { $count++ }
         }
         if ((C 'btDisableHandwritingData').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btDisableHandwritingData').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\InputPersonalization\TrainedDataStore' -Name 'HarvestContacts' -Value 0) { $count++ }
         }
         if ((C 'btShowFullPath').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btShowFullPath').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState' -Name 'FullPath' -Value 1) { $count++; $restartExplorer=$true }
         }
         if ((C 'btDisableAutoPlay').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btDisableAutoPlay').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer' -Name 'NoDriveTypeAutoRun' -Value 255) { $count++ }
         }
         if ((C 'btDisableRecentDocsTracking').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btDisableRecentDocsTracking').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer' -Name 'NoRecentDocsHistory' -Value 1) { $count++ }
         }
         if ((C 'btDisableSearchHighlights').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btDisableSearchHighlights').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\SearchSettings' -Name 'IsDynamicSearchBoxEnabled' -Value 0) { $count++ }
         }
         if ((C 'btUseCompactExplorer').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btUseCompactExplorer').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'UseCompactMode' -Value 1) { $count++; $restartExplorer=$true }
         }
         if ((C 'btDisableLockScreenCamera').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btDisableLockScreenCamera').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' -Name 'RotatingLockScreenEnabled' -Value 0) { $count++ }
         }
         if ((C 'btDisableLockScreenSlideShow').IsChecked -eq $true) {
+            $script:CurrentTweakName = [string](C 'btDisableLockScreenSlideShow').Content
+            $script:CurrentTweakSource = 'Basic Tweaks'
             if (Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lock Screen' -Name 'SlideshowEnabled' -Value 0) { $count++ }
         }
         if ($restartExplorer) {
@@ -3350,11 +4768,45 @@ $script:AMROptimizeTools = @(
 @{Name='Generate System Diagnostics Report';Category='Diagnostics & Monitoring';Key='PerfReport';Keywords='perfmon report diagnostics performance'}
 )
 
+function Invoke-AMRVerifiedTempCleanup {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][string]$Path,[Parameter(Mandatory=$true)][string]$Label)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Container -ErrorAction Stop)) {
+        throw ("{0} folder does not exist or cannot be accessed: {1}" -f $Label,$Path)
+    }
+
+    $entries = @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop)
+    $deleted = 0
+    $failed = 0
+    $failureDetails = @()
+    foreach ($entry in $entries) {
+        try {
+            Remove-Item -LiteralPath $entry.FullName -Recurse -Force -ErrorAction Stop
+            if (Test-Path -LiteralPath $entry.FullName -ErrorAction Stop) {
+                throw 'Entry still exists after the delete request.'
+            }
+            $deleted++
+        } catch {
+            $failed++
+            $detail = '{0}: {1}' -f $entry.FullName,$_.Exception.Message
+            $failureDetails += $detail
+            Write-AMRDiagnostic -Severity 'WARNING' -Area 'Cleanup' -Operation 'VerifiedTempDelete' -Message $detail -ErrorRecord $_ -Target $entry.FullName
+        }
+    }
+
+    $result = [pscustomobject]@{ Path=$Path; Deleted=$deleted; Failed=$failed; FailureDetails=@($failureDetails) }
+    if ($failed -gt 0) {
+        throw ("{0} cleanup was partial. Verified deleted entries: {1}; failed/not verified: {2}. Details: {3}" -f $Label,$deleted,$failed,($failureDetails -join ' | '))
+    }
+    return $result
+}
+
 function Invoke-AMROptimizeTool {
  param([string]$Key)
  try {
   switch ($Key) {
-   'TelemetryOff' { Set-Service -Name 'DiagTrack' -StartupType Disabled -ErrorAction SilentlyContinue; Stop-Service -Name 'DiagTrack' -Force -ErrorAction SilentlyContinue; Set-AMRRegistryKey -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' -Name 'AllowTelemetry' -Value 0 | Out-Null; Show-AMRMessage 'Diagnostic tracking restrictions were applied where supported. Some Windows editions may ignore policy settings.' 'Optimize' OK Information | Out-Null; return }
+   'TelemetryOff' { $script:CurrentTweakName='Disable telemetry service'; $script:CurrentTweakSource='Optimize'; Set-AMRAuditedService -Name 'DiagTrack' -StartupType Disabled -StopAfter $true | Out-Null; Set-AMRRegistryKey -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' -Name 'AllowTelemetry' -Value 0 | Out-Null; Show-AMRMessage 'Diagnostic tracking restrictions were applied where supported. Some Windows editions may ignore policy settings.' 'Optimize' OK Information | Out-Null; return }
    'BackgroundOff' { Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications' -Name 'GlobalUserDisabled' -Value 1 | Out-Null; Show-AMRMessage 'Background app access was disabled for supported apps.' 'Optimize' OK Information | Out-Null; return }
    'CortanaOff' { Set-AMRRegistryKey -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' -Name 'AllowCortana' -Value 0 | Out-Null; Show-AMRMessage 'Cortana policy was applied where supported. This setting may not affect newer Windows Search versions.' 'Optimize' OK Information | Out-Null; return }
    'PowerPlan' { powercfg /getactivescheme; return }
@@ -3374,8 +4826,8 @@ function Invoke-AMROptimizeTool {
    'TempSettings' { Start-Process 'ms-settings:temporaryfiles'; return }
    'OptimizeDrives' { Start-Process dfrgui.exe; return }
    'DriveSpace' { Get-PSDrive -PSProvider FileSystem | Select-Object Name,Root,@{N='UsedGB';E={[math]::Round($_.Used/1GB,2)}},@{N='FreeGB';E={[math]::Round($_.Free/1GB,2)}} | Out-GridView -Title 'Drive Space'; return }
-   'ClearUserTemp' { if((Show-AMRMessage 'Delete files from your current user TEMP folder? Files in use may remain.' 'Confirm Cleanup' YesNo Warning) -ne 'Yes'){return}; Get-ChildItem -LiteralPath $env:TEMP -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue; Show-AMRMessage 'User temporary-file cleanup completed (files in use may remain).' 'Optimize' OK Information | Out-Null; return }
-   'ClearWindowsTemp' { if((Show-AMRMessage 'Delete files from the Windows TEMP folder? Administrator rights may be required.' 'Confirm Cleanup' YesNo Warning) -ne 'Yes'){return}; Get-ChildItem -LiteralPath (Join-Path $env:windir 'Temp') -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue; Show-AMRMessage 'Windows temporary-file cleanup attempted.' 'Optimize' OK Information | Out-Null; return }
+   'ClearUserTemp' { if((Show-AMRMessage 'Delete files from your current user TEMP folder? Files in use may remain.' 'Confirm Cleanup' YesNo Warning) -ne 'Yes'){return}; $cleanupResult=Invoke-AMRVerifiedTempCleanup -Path $env:TEMP -Label 'User TEMP'; Write-AMRLog ("User TEMP cleanup verified: {0} top-level entries deleted; {1} failed." -f $cleanupResult.Deleted,$cleanupResult.Failed) SUCCESS Cleanup; Show-AMRMessage ("User temporary-file cleanup verified.`nDeleted entries: {0}`nFailed: {1}" -f $cleanupResult.Deleted,$cleanupResult.Failed) 'Optimize' OK Information | Out-Null; return }
+   'ClearWindowsTemp' { if((Show-AMRMessage 'Delete files from the Windows TEMP folder? Administrator rights may be required.' 'Confirm Cleanup' YesNo Warning) -ne 'Yes'){return}; $cleanupResult=Invoke-AMRVerifiedTempCleanup -Path (Join-Path $env:windir 'Temp') -Label 'Windows TEMP'; Write-AMRLog ("Windows TEMP cleanup verified: {0} top-level entries deleted; {1} failed." -f $cleanupResult.Deleted,$cleanupResult.Failed) SUCCESS Cleanup; Show-AMRMessage ("Windows temporary-file cleanup verified.`nDeleted entries: {0}`nFailed: {1}" -f $cleanupResult.Deleted,$cleanupResult.Failed) 'Optimize' OK Information | Out-Null; return }
    'RecycleBin' { Start-Process explorer.exe -ArgumentList 'shell:RecycleBinFolder'; return }
    'InstalledApps' { Start-Process 'ms-settings:appsfeatures'; return }
    'DefaultApps' { Start-Process 'ms-settings:defaultapps'; return }
@@ -3397,7 +4849,7 @@ function Invoke-AMROptimizeTool {
    'StartupFolder' { Start-Process explorer.exe -ArgumentList 'shell:startup'; return }
    'NetworkStatus' { Start-Process 'ms-settings:network-status'; return }
    'InternetOptions' { Start-Process inetcpl.cpl; return }
-   'FlushDNS' { ipconfig /flushdns; Show-AMRMessage 'DNS resolver cache flush command completed.' 'Optimize' OK Information | Out-Null; return }
+   'FlushDNS' { Invoke-AMRNativeCommand -FilePath 'ipconfig.exe' -ArgumentList @('/flushdns') -Operation 'Flush DNS resolver cache' | Out-Null; Show-AMRMessage 'DNS resolver cache flush command returned exit code 0.' 'Optimize' OK Information | Out-Null; return }
    'DeliveryOptimization' { Start-Process 'ms-settings:delivery-optimization'; return }
    'Privacy' { Start-Process 'ms-settings:privacy'; return }
    'SearchPrivacy' { Start-Process 'ms-settings:search-permissions'; return }
@@ -3640,7 +5092,7 @@ function Invoke-AMRSystemTool {
    'PerfMon' { Start-Process perfmon.exe; return }
    'SystemInfo' { $p=Join-Path $env:USERPROFILE 'Desktop\AMR-System-Information.txt'; msinfo32.exe /report $p; $msg="System information report requested: $p"; break }
    'WinVersion' { Start-Process winver.exe; return }
-   'RecentErrors' { $msg=(Get-WinEvent -FilterHashtable @{LogName='System';Level=1,2;StartTime=(Get-Date).AddDays(-7)} -MaxEvents 30 -ErrorAction SilentlyContinue | Select-Object TimeCreated,Id,LevelDisplayName,ProviderName,Message | Format-List | Out-String); break }
+   'RecentErrors' { $msg=(Get-WinEvent -FilterHashtable @{LogName='System';Level=1,2;StartTime=(Get-Date).AddDays(-7)} -MaxEvents 30 -ErrorAction Stop | Select-Object TimeCreated,Id,LevelDisplayName,ProviderName,Message | Format-List | Out-String); break }
    'Processes' { $msg=(Get-Process | Sort-Object CPU -Descending | Select-Object -First 35 Name,Id,CPU,WorkingSet64 | Format-Table -AutoSize | Out-String); break }
    'TaskManager' { Start-Process taskmgr.exe; return }
    'Services' { Start-Process services.msc; return }
@@ -3672,7 +5124,7 @@ function Invoke-AMRSystemTool {
 }
 function Update-AMRSystemView {
  $grid=C 'SysToolsGrid'; $grid.Children.Clear(); $search=[string](C 'SysSearchBox').Text
- $selected=(C 'SysCategoryFilter').SelectedItem; $category='All Categories'; if($selected){$category=([string]$selected.Content -replace '^⚙️\s*','')}
+ $selected=(C 'SysCategoryFilter').SelectedItem; $category='All Categories'; if($selected){$category=([string]$selected.Content -replace '^[^A-Za-z0-9]+\s*','')}
  $visible=0
  foreach($tool in $script:AMRSystemTools){
   if($category -ne 'All Categories' -and $tool.Category -ne $category){continue}
@@ -3749,8 +5201,8 @@ function Invoke-AMRNetworkTool {
   switch ($Key) {
    'FlushDNS' { Clear-DnsClientCache -ErrorAction Stop; $msg='System DNS cache flushed successfully.'; break }
    'ShowDNS' { $msg=(ipconfig /displaydns 2>&1 | Out-String); break }
-   'RenewIP' { ipconfig /renew | Out-Null; $msg='DHCP IP address renewal command completed.'; break }
-   'ReleaseIP' { if ((Show-AMRMessage 'This temporarily disconnects network interfaces using DHCP. Continue?' 'Confirm IP Release' YesNo Warning) -ne 'Yes') { return }; ipconfig /release | Out-Null; $msg='DHCP release command completed.'; break }
+   'RenewIP' { Invoke-AMRNativeCommand -FilePath 'ipconfig.exe' -ArgumentList @('/renew') -Operation 'DHCP IP renewal' | Out-Null; $msg='DHCP IP address renewal command returned exit code 0.'; break }
+   'ReleaseIP' { if ((Show-AMRMessage 'This temporarily disconnects network interfaces using DHCP. Continue?' 'Confirm IP Release' YesNo Warning) -ne 'Yes') { return }; Invoke-AMRNativeCommand -FilePath 'ipconfig.exe' -ArgumentList @('/release') -Operation 'DHCP IP release' | Out-Null; $msg='DHCP release command returned exit code 0.'; break }
    'IPConfig' { $msg=(ipconfig /all 2>&1 | Out-String); break }
    'IPv4' { $msg=(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop | Format-Table -AutoSize | Out-String); break }
    'IPv6' { $msg=(Get-NetIPAddress -AddressFamily IPv6 -ErrorAction Stop | Format-Table -AutoSize | Out-String); break }
@@ -3758,12 +5210,12 @@ function Invoke-AMRNetworkTool {
    'DNSServers' { $msg=(Get-DnsClientServerAddress | Format-Table -AutoSize | Out-String); break }
    'DHCP' { $msg=(Get-NetIPInterface | Select-Object InterfaceAlias,AddressFamily,Dhcp,ConnectionState | Format-Table -AutoSize | Out-String); break }
    'ARP' { $msg=(arp -a | Out-String); break }
-   'ClearARP' { netsh interface ip delete arpcache | Out-Null; $msg='ARP cache clear command completed.'; break }
+   'ClearARP' { Invoke-AMRNativeCommand -FilePath 'netsh.exe' -ArgumentList @('interface','ip','delete','arpcache') -Operation 'Clear ARP cache' | Out-Null; $msg='ARP cache clear command returned exit code 0.'; break }
    'Routes' { $msg=(route print | Out-String); break }
-   'DNSRenew' { Clear-DnsClientCache -ErrorAction SilentlyContinue; ipconfig /renew | Out-Null; $msg='DNS cache cleared and DHCP renewal requested.'; break }
-   'ResetTCP' { if ((Show-AMRMessage 'Resetting TCP/IP can affect network configuration and may require a restart. Continue?' 'Confirm TCP/IP Reset' YesNo Warning) -ne 'Yes') { return }; netsh int ip reset | Out-Null; $msg='TCP/IP reset requested. Restart Windows to complete the reset.'; break }
-   'ResetWinsock' { if ((Show-AMRMessage 'Resetting Winsock can affect networking software and may require a restart. Continue?' 'Confirm Winsock Reset' YesNo Warning) -ne 'Yes') { return }; netsh winsock reset | Out-Null; $msg='Winsock reset requested. Restart Windows to complete the reset.'; break }
-   'ResetBoth' { if ((Show-AMRMessage 'This resets TCP/IP and Winsock and may require a restart. Continue?' 'Confirm Network Reset' YesNo Warning) -ne 'Yes') { return }; netsh int ip reset | Out-Null; netsh winsock reset | Out-Null; $msg='TCP/IP and Winsock reset commands completed. Restart Windows.'; break }
+   'DNSRenew' { Clear-DnsClientCache -ErrorAction Stop; Invoke-AMRNativeCommand -FilePath 'ipconfig.exe' -ArgumentList @('/renew') -Operation 'DNS flush and DHCP renewal' | Out-Null; $msg='DNS cache cleared and DHCP renewal command returned exit code 0.'; break }
+   'ResetTCP' { if ((Show-AMRMessage 'Resetting TCP/IP can affect network configuration and may require a restart. Continue?' 'Confirm TCP/IP Reset' YesNo Warning) -ne 'Yes') { return }; Invoke-AMRNativeCommand -FilePath 'netsh.exe' -ArgumentList @('int','ip','reset') -Operation 'TCP/IP stack reset' | Out-Null; $msg='TCP/IP reset command returned exit code 0. Restart Windows to complete the reset.'; break }
+   'ResetWinsock' { if ((Show-AMRMessage 'Resetting Winsock can affect networking software and may require a restart. Continue?' 'Confirm Winsock Reset' YesNo Warning) -ne 'Yes') { return }; Invoke-AMRNativeCommand -FilePath 'netsh.exe' -ArgumentList @('winsock','reset') -Operation 'Winsock reset' | Out-Null; $msg='Winsock reset command returned exit code 0. Restart Windows to complete the reset.'; break }
+   'ResetBoth' { if ((Show-AMRMessage 'This resets TCP/IP and Winsock and may require a restart. Continue?' 'Confirm Network Reset' YesNo Warning) -ne 'Yes') { return }; Invoke-AMRNativeCommand -FilePath 'netsh.exe' -ArgumentList @('int','ip','reset') -Operation 'TCP/IP stack reset' | Out-Null; Invoke-AMRNativeCommand -FilePath 'netsh.exe' -ArgumentList @('winsock','reset') -Operation 'Winsock reset' | Out-Null; $msg='TCP/IP and Winsock reset commands both returned exit code 0. Restart Windows.'; break }
    'RestartDNS' { Restart-Service Dnscache -Force -ErrorAction Stop; $msg='DNS Client service restart requested.'; break }
    'Troubleshooter' { Start-Process 'ms-settings:network-status'; return }
    'NetworkReset' { Start-Process 'ms-settings:network-advancedsettings'; return }
@@ -3810,13 +5262,13 @@ function Invoke-AMRNetworkTool {
 }
 function Update-AMRNetworkView {
  $grid=C 'NetToolsGrid'; $grid.Children.Clear(); $search=[string](C 'NetSearchBox').Text
- $selected=(C 'NetCategoryFilter').SelectedItem; $category='All Categories'; if($selected){$category=([string]$selected.Content -replace '^⚙️\s*','')}
+ $selected=(C 'NetCategoryFilter').SelectedItem; $category='All Categories'; if($selected){$category=([string]$selected.Content -replace '^[^A-Za-z0-9]+\s*','')}
  $visible=0
  foreach($tool in $script:AMRNetworkTools){
   if($category -ne 'All Categories' -and $tool.Category -ne $category){continue}
   $haystack=('{0} {1} {2}' -f $tool.Name,$tool.Category,$tool.Keywords)
   if(-not [string]::IsNullOrWhiteSpace($search) -and $haystack -notlike "*$search*"){continue}
-  $button=New-Object System.Windows.Controls.Button; $button.Content=('⚙️  ' + $tool.Name); $button.Tag=$tool.Key; $button.Margin='0,0,10,10'; $button.Padding='12,10'; $button.MinHeight=48; $button.HorizontalContentAlignment='Left'; $button.ToolTip=("{0} • {1}" -f $tool.Category,$tool.Keywords)
+  $button=New-Object System.Windows.Controls.Button; $button.Content=('🌐  ' + $tool.Name); $button.Tag=$tool.Key; $button.Margin='0,0,10,10'; $button.Padding='12,10'; $button.MinHeight=48; $button.HorizontalContentAlignment='Left'; $button.ToolTip=("{0} • {1}" -f $tool.Category,$tool.Keywords)
   $button.Add_Click({ Invoke-AMRNetworkTool -Key ([string]$this.Tag) }.GetNewClosure()); [void]$grid.Children.Add($button); $visible++
  }
  (C 'NetResultsCount').Text=('{0} network tools shown' -f $visible)
@@ -4050,23 +5502,69 @@ $script:CleanupCategories = @(
 
 function Get-AMRCleanupFiles {
     param([string[]]$Roots)
-    $found = New-Object System.Collections.Generic.List[System.IO.FileInfo]
-    $stack = New-Object System.Collections.Generic.Stack[string]
-    foreach ($root in $Roots) { if ($root -and (Test-Path -LiteralPath $root -PathType Container)) { $stack.Push($root) } }
+
+    $found = New-Object 'System.Collections.Generic.List[System.IO.FileInfo]'
+    $errors = New-Object 'System.Collections.Generic.List[object]'
+    $missingRoots = New-Object 'System.Collections.Generic.List[string]'
+    $stack = New-Object 'System.Collections.Generic.Stack[string]'
+    $reparsePointsSkipped = 0
+
+    foreach ($root in $Roots) {
+        if ([string]::IsNullOrWhiteSpace([string]$root)) { continue }
+        try {
+            if (Test-Path -LiteralPath $root -PathType Container -ErrorAction Stop) {
+                $stack.Push([string]$root)
+            } else {
+                $missingRoots.Add([string]$root)
+            }
+        } catch {
+            $errors.Add([pscustomobject]@{
+                Path = [string]$root
+                Stage = 'RootCheck'
+                Message = $_.Exception.Message
+            })
+        }
+    }
+
     while ($stack.Count -gt 0) {
         $current = $stack.Pop()
         try {
             foreach ($item in [System.IO.Directory]::EnumerateFileSystemEntries($current)) {
                 try {
                     $attributes = [System.IO.File]::GetAttributes($item)
-                    if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
-                    if (($attributes -band [IO.FileAttributes]::Directory) -ne 0) { $stack.Push($item) }
-                    else { $found.Add((New-Object -TypeName System.IO.FileInfo -ArgumentList $item)) }
-                } catch { }
+                    if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                        $reparsePointsSkipped++
+                        continue
+                    }
+                    if (($attributes -band [System.IO.FileAttributes]::Directory) -ne 0) {
+                        $stack.Push($item)
+                    } else {
+                        $found.Add((New-Object -TypeName System.IO.FileInfo -ArgumentList $item))
+                    }
+                } catch {
+                    $errors.Add([pscustomobject]@{
+                        Path = [string]$item
+                        Stage = 'InspectEntry'
+                        Message = $_.Exception.Message
+                    })
+                }
             }
-        } catch { }
+        } catch {
+            $errors.Add([pscustomobject]@{
+                Path = [string]$current
+                Stage = 'EnumerateDirectory'
+                Message = $_.Exception.Message
+            })
+        }
     }
-    return $found.ToArray()
+
+    return [pscustomobject]@{
+        Files = $found.ToArray()
+        Errors = $errors.ToArray()
+        MissingRoots = $missingRoots.ToArray()
+        ReparsePointsSkipped = $reparsePointsSkipped
+        Complete = ($errors.Count -eq 0)
+    }
 }
 
 function Update-AMRCleanupProgress {
@@ -4106,33 +5604,85 @@ foreach ($category in $script:CleanupCategories) {
 (C 'CleanupScanBtn').Add_Click({
     $scanButton = C 'CleanupScanBtn'
     $runButton = C 'CleanupRunBtn'
-    $scanButton.IsEnabled = $false; $runButton.IsEnabled = $false
+    $scanButton.IsEnabled = $false
+    $runButton.IsEnabled = $false
     $script:CleanupScanResults = @{}
-    $totalBytes = [int64]0; $totalFiles = 0; $index = 0
+    $totalBytes = [int64]0
+    $totalFiles = 0
+    $totalScanErrors = 0
+    $totalMissingRoots = 0
+    $totalReparseSkipped = 0
+    $index = 0
+
     try {
         Write-AMRLog 'Cleanup category scan started.' INFO Cleanup
         foreach ($category in $script:CleanupCategories) {
             $index++
             Update-AMRCleanupProgress ([int](($index - 1) * 100 / $script:CleanupCategories.Count)) ("Scanning: {0}" -f $category.Label)
-            $files = @(Get-AMRCleanupFiles -Roots $category.Paths)
+
+            $scan = Get-AMRCleanupFiles -Roots $category.Paths
+            $files = @($scan.Files)
             $bytes = [int64]0
-            foreach ($file in $files) { try { $bytes += $file.Length } catch {} }
-            $script:CleanupScanResults[$category.Key] = [pscustomobject]@{ Files=$files; Bytes=$bytes; Count=$files.Count }
+            $sizeUnknown = 0
+            foreach ($file in $files) {
+                try {
+                    $file.Refresh()
+                    if ($file.Exists) { $bytes += [int64]$file.Length }
+                    else { $sizeUnknown++ }
+                } catch {
+                    $sizeUnknown++
+                }
+            }
+
+            $script:CleanupScanResults[$category.Key] = [pscustomobject]@{
+                Files = $files
+                Bytes = $bytes
+                Count = $files.Count
+                Errors = @($scan.Errors)
+                MissingRoots = @($scan.MissingRoots)
+                ReparsePointsSkipped = [int]$scan.ReparsePointsSkipped
+                SizeUnknown = [int]$sizeUnknown
+                Complete = [bool]$scan.Complete
+            }
+
+            $totalBytes += $bytes
+            $totalFiles += $files.Count
+            $totalScanErrors += @($scan.Errors).Count
+            $totalMissingRoots += @($scan.MissingRoots).Count
+            $totalReparseSkipped += [int]$scan.ReparsePointsSkipped
+
             $info = C $category.Info
-            if ($info) { $info.Text = ('{0:N0} files • {1:N2} MB' -f $files.Count,($bytes / 1MB)) }
-            $totalBytes += $bytes; $totalFiles += $files.Count
-            Write-AMRLog ("Scanned {0}: {1:N0} files, {2:N2} MB." -f $category.Label,$files.Count,($bytes/1MB)) INFO Cleanup
+            if ($info) {
+                $status = if ($scan.Complete) { 'Scanned' } else { 'PARTIAL SCAN' }
+                $info.Text = ('{0} • {1:N0} files • {2:N2} MB • {3} scan errors' -f $status,$files.Count,($bytes / 1MB),@($scan.Errors).Count)
+            }
+
+            Write-AMRLog ("Scanned {0}: {1:N0} files, {2:N2} MB; errors={3}; missing roots={4}; reparse points skipped={5}; size unknown={6}." -f $category.Label,$files.Count,($bytes/1MB),@($scan.Errors).Count,@($scan.MissingRoots).Count,$scan.ReparsePointsSkipped,$sizeUnknown) $(if ($scan.Complete) { 'INFO' } else { 'WARNING' }) Cleanup
+
+            $errorLogLimit = [Math]::Min(20,@($scan.Errors).Count)
+            for ($errorIndex = 0; $errorIndex -lt $errorLogLimit; $errorIndex++) {
+                $scanError = $scan.Errors[$errorIndex]
+                Write-AMRLog ("SCAN ERROR | Category={0} | Stage={1} | Path={2} | Error={3}" -f $category.Label,$scanError.Stage,$scanError.Path,$scanError.Message) WARNING Cleanup
+            }
+            if (@($scan.Errors).Count -gt $errorLogLimit) {
+                Write-AMRLog ("Additional scan errors not individually logged for {0}: {1}." -f $category.Label,(@($scan.Errors).Count - $errorLogLimit)) WARNING Cleanup
+            }
         }
-        (C 'CleanupScanSummary').Text = ('Scan complete: {0:N0} files • {1:N2} MB potentially recoverable.' -f $totalFiles,($totalBytes / 1MB))
+
+        $scanState = if ($totalScanErrors -gt 0) { 'PARTIAL SCAN' } else { 'Scan complete' }
+        $scanNote = "{0}: {1:N0} files • {2:N2} MB potentially recoverable • {3} scan errors • {4} missing roots • {5} reparse points skipped." -f $scanState,$totalFiles,($totalBytes / 1MB),$totalScanErrors,$totalMissingRoots,$totalReparseSkipped
+        (C 'CleanupScanSummary').Text = $scanNote
         $runButton.IsEnabled = $true
         Update-AMRCleanupSelectedSummary
-        Update-AMRCleanupProgress 100 'Scan complete. Review the categories and select what you want to clean.'
-        Write-AMRLog ("Cleanup scan completed: {0} files, {1:N2} MB found." -f $totalFiles,($totalBytes / 1MB)) INFO Cleanup
+        Update-AMRCleanupProgress 100 $scanNote
+        Write-AMRLog ("Cleanup scan finished: {0} files, {1:N2} MB, {2} scan errors, {3} missing roots, {4} reparse points skipped." -f $totalFiles,($totalBytes / 1MB),$totalScanErrors,$totalMissingRoots,$totalReparseSkipped) $(if ($totalScanErrors -gt 0) { 'WARNING' } else { 'INFO' }) Cleanup
     } catch {
         Update-AMRCleanupProgress 0 'Scan failed. Check the application log.'
-        Write-AMRLog "Cleanup scan failed: $_" ERROR Cleanup
-        Show-AMRMessage "Cleanup scan failed:`n$_" 'Cleanup' OK Error | Out-Null
-    } finally { $scanButton.IsEnabled = $true }
+        Write-AMRLog ("Cleanup scan failed: {0}" -f $_.Exception.Message) ERROR Cleanup
+        Show-AMRMessage ("Cleanup scan failed:`n{0}" -f $_.Exception.Message) 'Cleanup' OK Error | Out-Null
+    } finally {
+        $scanButton.IsEnabled = $true
+    }
 })
 
 (C 'CleanupRunBtn').Add_Click({
@@ -4141,67 +5691,318 @@ foreach ($category in $script:CleanupCategories) {
         Show-AMRMessage 'Select at least one scanned category first.' 'Cleanup' OK Warning | Out-Null
         return
     }
+
     $notScanned = @($selected | Where-Object { -not $script:CleanupScanResults.ContainsKey($_.Key) })
     if ($notScanned.Count -gt 0) {
-        Show-AMRMessage 'Please run Scan Now before cleaning.' 'Cleanup' OK Warning | Out-Null
+        $names = ($notScanned | ForEach-Object { $_.Label }) -join ', '
+        Show-AMRMessage ("Run Scan Now before cleaning these categories:`n$names") 'Cleanup' OK Warning | Out-Null
         return
     }
-    $estimate = [int64]0; $filesEstimate = 0
-    foreach ($cat in $selected) { $estimate += $script:CleanupScanResults[$cat.Key].Bytes; $filesEstimate += $script:CleanupScanResults[$cat.Key].Count }
+
+    $incompleteScans = @($selected | Where-Object { -not [bool]$script:CleanupScanResults[$_.Key].Complete })
+    if ($incompleteScans.Count -gt 0) {
+        $names = ($incompleteScans | ForEach-Object { $_.Label }) -join "`n• "
+        Show-AMRMessage ("Cleanup was blocked because these categories were only partially scanned. This prevents deleting an incomplete or misleading selection:`n`n• $names`n`nReview the Cleanup log, resolve the access or scan errors, and run Scan Now again.") 'Incomplete Cleanup Scan' OK Warning | Out-Null
+        Write-AMRLog ("Cleanup blocked because selected categories have incomplete scans: {0}." -f (($incompleteScans | ForEach-Object { $_.Label }) -join ', ')) WARNING Cleanup
+        return
+    }
+
+    $estimate = [int64]0
+    $filesEstimate = 0
+    foreach ($cat in $selected) {
+        $estimate += [int64]$script:CleanupScanResults[$cat.Key].Bytes
+        $filesEstimate += [int]$script:CleanupScanResults[$cat.Key].Count
+    }
     $names = ($selected | ForEach-Object { $_.Label }) -join "`n• "
-    $answer = Show-AMRMessage ("You are about to remove the selected temporary/cache files:`n`n• $names`n`nEstimated: {0:N0} files ({1:N2} MB).`n`nThis cannot be undone. Continue?" -f $filesEstimate,($estimate / 1MB)) 'Confirm Cleanup' YesNo Warning
-    if ($answer -ne [System.Windows.MessageBoxResult]::Yes) { Write-AMRLog 'User cancelled the selected cleanup operation at confirmation.' INFO Cleanup; return }
+    $answer = Show-AMRMessage ("You are about to permanently remove the selected temporary/cache files:`n`n• $names`n`nEstimated: {0:N0} files ({1:N2} MB).`n`nThis cannot be undone. Continue?" -f $filesEstimate,($estimate / 1MB)) 'Confirm Cleanup' YesNo Warning
+    if ($answer -ne [System.Windows.MessageBoxResult]::Yes) {
+        Write-AMRLog 'User cancelled the selected cleanup operation at confirmation.' INFO Cleanup
+        return
+    }
+
     Write-AMRLog ("Cleanup confirmed. Selected categories: {0}; estimate: {1:N0} files, {2:N2} MB." -f (($selected | ForEach-Object { $_.Label }) -join ', '),$filesEstimate,($estimate/1MB)) INFO Cleanup
 
-    $runButton = C 'CleanupRunBtn'; $scanButton = C 'CleanupScanBtn'
-    $runButton.IsEnabled = $false; $scanButton.IsEnabled = $false
-    $deleted = 0; $failed = 0; $done = 0
-    $updateWasRunning = $false; $updateServiceTouched = $false
-    try {
-        if ($selected.Key -contains 'Update') {
-            $svc = Get-Service -Name wuauserv -ErrorAction SilentlyContinue
-            if ($svc -and $svc.Status -eq 'Running') { $updateWasRunning = $true }
-            if ($svc) { Stop-Service -Name wuauserv -Force -ErrorAction Stop; $updateServiceTouched = $true }
+    $runButton = C 'CleanupRunBtn'
+    $scanButton = C 'CleanupScanBtn'
+    $runButton.IsEnabled = $false
+    $scanButton.IsEnabled = $false
+
+    $deleted = 0
+    $skipped = 0
+    $failed = 0
+    $systemFailures = 0
+    $bytesFreed = [int64]0
+    $done = 0
+    $updateSelected = [bool](@($selected | Where-Object { $_.Key -eq 'Update' }).Count -gt 0)
+    $updateServiceOriginalState = 'Not Checked'
+    $updateServiceRestoreState = 'Not Required'
+    $updateServiceCanClean = $true
+    $updateServiceStoppedByUs = $false
+    $updateService = $null
+    $diskSpaceBefore = @{}
+    $diskSpaceAfter = @{}
+
+    # Capture free space on every volume represented in the selected scan, where possible.
+    foreach ($cat in $selected) {
+        foreach ($file in @($script:CleanupScanResults[$cat.Key].Files)) {
+            try {
+                $root = [System.IO.Path]::GetPathRoot([string]$file.FullName)
+                if ($root -and -not $diskSpaceBefore.ContainsKey($root)) {
+                    $driveInfo = New-Object System.IO.DriveInfo($root)
+                    $driveInfo.Refresh()
+                    $diskSpaceBefore[$root] = [int64]$driveInfo.AvailableFreeSpace
+                }
+            } catch {
+                Write-AMRLog ("Could not capture initial free space for path {0}: {1}" -f $file.FullName,$_.Exception.Message) WARNING Cleanup
+            }
         }
+    }
+
+    try {
+        # Windows Update cache is cleaned only after a verified stop.
+        if ($updateSelected) {
+            try {
+                $updateService = Get-Service -Name 'wuauserv' -ErrorAction Stop
+                $updateServiceOriginalState = [string]$updateService.Status
+                if ($updateService.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Running) {
+                    Stop-Service -Name 'wuauserv' -Force -ErrorAction Stop
+                    $updateServiceStoppedByUs = $true
+                    $updateService = Get-Service -Name 'wuauserv' -ErrorAction Stop
+                    $updateService.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped,[TimeSpan]::FromSeconds(30))
+                    $updateService.Refresh()
+                    if ($updateService.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Stopped) {
+                        throw 'Windows Update service did not reach the Stopped state.'
+                    }
+                    $updateServiceRestoreState = 'Pending restoration to Running'
+                    Write-AMRLog 'Windows Update service was Running and is now verified Stopped for cache cleanup.' INFO Cleanup
+                } elseif ($updateService.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Stopped) {
+                    $updateServiceRestoreState = 'Originally Stopped; must remain Stopped'
+                    Write-AMRLog 'Windows Update service was already Stopped; it will not be started by cleanup.' INFO Cleanup
+                } else {
+                    throw ("Windows Update service is in an unsupported transitional state: {0}" -f $updateService.Status)
+                }
+            } catch {
+                $updateServiceCanClean = $false
+                $updateServiceRestoreState = 'Service preparation failed; original state will be checked/restored'
+                $systemFailures++
+                try {
+                    $svcCheck = Get-Service -Name 'wuauserv' -ErrorAction Stop
+                    if ($updateServiceOriginalState -eq 'Running' -and $svcCheck.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Stopped) {
+                        $updateServiceStoppedByUs = $true
+                    }
+                } catch { }
+                Write-AMRLog ("Windows Update service could not be safely prepared. Update cache files will not be deleted. Error: {0}" -f $_.Exception.Message) ERROR Cleanup
+            }
+        }
+
         foreach ($cat in $selected) {
             $result = $script:CleanupScanResults[$cat.Key]
             $fileList = @($result.Files)
             $fileIndex = 0
-            Write-AMRLog ("Cleaning category {0}: {1} files." -f $cat.Label,$fileList.Count) INFO Cleanup
+            $categoryDeleted = 0
+            $categorySkipped = 0
+            $categoryFailed = 0
+            $categoryBytesFreed = [int64]0
+            Write-AMRLog ("Cleanup category started: {0}; scanned files: {1}." -f $cat.Label,$fileList.Count) INFO Cleanup
+
             foreach ($file in $fileList) {
                 $fileIndex++
-                try {
-                    if (Test-Path -LiteralPath $file.FullName -PathType Leaf) {
-                        Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
-                        $deleted++
-                        Write-AMRLog ("Deleted file: {0} ({1:N2} MB)." -f $file.FullName,([double]$file.Length/1MB)) SUCCESS Cleanup
-                    } else {
+                $path = [string]$file.FullName
+                $before = 'Unknown'
+                $requested = 'Absent'
+                $after = 'Unknown'
+                $fileBytes = [int64]0
+                $sizeStatus = 'Not Read'
+                $executionText = 'Not Started'
+                $errorText = ''
+
+                if ($cat.Key -eq 'Update' -and -not $updateServiceCanClean) {
+                    $before = 'Not Checked'
+                    $after = 'Not Checked'
+                    $executionText = 'Blocked: Windows Update service state was not verified'
+                    $errorText = 'Windows Update cache cleanup was blocked because the service could not be safely prepared.'
+                    $categoryFailed++
+                    $failed++
+                    Write-AMRLog ("DELETE FAILED / NOT VERIFIED`r`nPath={0}`r`nBefore={1}`r`nRequested={2}`r`nAfter={3}`r`nExecution={4}`r`nError={5}" -f $path,$before,$requested,$after,$executionText,$errorText) ERROR Cleanup
+                } else {
+                    try {
+                        $existsBefore = Test-Path -LiteralPath $path -PathType Leaf -ErrorAction Stop
+                        if (-not $existsBefore) {
+                            $before = 'Absent'
+                            $after = 'Absent'
+                            $executionText = 'Not Run'
+                            $skipped++
+                            $categorySkipped++
+                            Write-AMRLog ("SKIPPED`r`nPath={0}`r`nBefore=Absent`r`nRequested=Absent`r`nAfter=Absent`r`nReason=File was not present at cleanup time." -f $path) INFO Cleanup
+                        } else {
+                            $before = 'Present'
+                            try {
+                                $fileInfo = New-Object System.IO.FileInfo($path)
+                                $fileInfo.Refresh()
+                                if ($fileInfo.Exists) {
+                                    $fileBytes = [int64]$fileInfo.Length
+                                    $sizeStatus = 'Read'
+                                } else {
+                                    $sizeStatus = 'Unavailable: file changed during metadata read'
+                                }
+                            } catch {
+                                $fileBytes = [int64]0
+                                $sizeStatus = 'Unavailable: ' + $_.Exception.Message
+                            }
+
+                            $executionText = 'Remove-Item attempted'
+                            try {
+                                Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+                            } catch {
+                                $errorText = $_.Exception.Message
+                            }
+
+                            # Re-check the actual filesystem state, even if Remove-Item raised an error.
+                            $existsAfter = Test-Path -LiteralPath $path -PathType Leaf -ErrorAction Stop
+                            if (-not $existsAfter) {
+                                $after = 'Absent'
+                                $deleted++
+                                $categoryDeleted++
+                                $bytesFreed += $fileBytes
+                                $categoryBytesFreed += $fileBytes
+                                $executionText = if ($errorText) { 'Remove-Item reported an error; absence verified' } else { 'Remove-Item completed' }
+                                Write-AMRLog ("VERIFIED DELETE`r`nPath={0}`r`nBefore=Present`r`nRequested=Absent`r`nAfter=Absent`r`nBytes={1}`r`nSizeStatus={2}`r`nExecution={3}`r`nVerification=Passed" -f $path,$fileBytes,$sizeStatus,$executionText) SUCCESS Cleanup
+                            } else {
+                                $after = 'Present'
+                                $categoryFailed++
+                                $failed++
+                                if (-not $errorText) { $errorText = 'File still exists after Remove-Item; deletion was not verified.' }
+                                Write-AMRLog ("DELETE FAILED / NOT VERIFIED`r`nPath={0}`r`nBefore=Present`r`nRequested=Absent`r`nAfter=Present`r`nBytes={1}`r`nSizeStatus={2}`r`nExecution={3}`r`nVerification=Failed`r`nError={4}" -f $path,$fileBytes,$sizeStatus,$executionText,$errorText) ERROR Cleanup
+                            }
+                        }
+                    } catch {
+                        $after = 'Unknown'
+                        $categoryFailed++
                         $failed++
-                        Write-AMRLog ("Skipped file because it no longer exists or is inaccessible: {0}" -f $file.FullName) WARNING Cleanup
+                        $errorText = $_.Exception.Message
+                        Write-AMRLog ("DELETE FAILED / NOT VERIFIED`r`nPath={0}`r`nBefore={1}`r`nRequested={2}`r`nAfter={3}`r`nExecution={4}`r`nVerification=Not Verified`r`nError={5}" -f $path,$before,$requested,$after,$executionText,$errorText) ERROR Cleanup
                     }
-                } catch { $failed++; Write-AMRLog ("Failed to delete file: {0}. Reason: {1}" -f $file.FullName,$_.Exception.Message) WARNING Cleanup }
+                }
+
                 if (($fileIndex % 40) -eq 0 -or $fileIndex -eq $fileList.Count) {
                     $pct = [int](($done + $fileIndex) * 100 / [Math]::Max(1,$filesEstimate))
-                    Update-AMRCleanupProgress $pct ("Cleaning {0}: {1}/{2} files • removed {3}" -f $cat.Label,$fileIndex,$fileList.Count,$deleted)
+                    Update-AMRCleanupProgress $pct ("Cleaning {0}: {1}/{2} • verified {3}, skipped {4}, failed {5}" -f $cat.Label,$fileIndex,$fileList.Count,$deleted,$skipped,$failed)
                 }
             }
+
             $done += $fileList.Count
+            $categoryLevel = if ($categoryFailed -gt 0) { 'WARNING' } else { 'INFO' }
+            Write-AMRLog ("CLEANUP CATEGORY SUMMARY | {0} | Verified Deleted: {1} | Skipped: {2} | Failed / Not Verified: {3} | Verified File Bytes: {4}" -f $cat.Label,$categoryDeleted,$categorySkipped,$categoryFailed,$categoryBytesFreed) $categoryLevel Cleanup
         }
     } catch {
-        $failed++
-        Write-AMRLog "Cleanup operation error: $_" ERROR Cleanup
+        $systemFailures++
+        Write-AMRLog ("Cleanup operation encountered an unexpected error: {0}" -f $_.Exception.Message) ERROR Cleanup
     } finally {
-        if ($updateServiceTouched -and $updateWasRunning) { try { Start-Service -Name wuauserv -ErrorAction Stop } catch { $failed++; Write-AMRLog "Could not restart Windows Update service: $_" ERROR Cleanup } }
-        $runButton.IsEnabled = $true; $scanButton.IsEnabled = $true
+        # Restore/verify the service against the exact state observed before cleanup.
+        if ($updateSelected) {
+            if ($updateServiceOriginalState -eq 'Running') {
+                try {
+                    $svcFinal = Get-Service -Name 'wuauserv' -ErrorAction Stop
+                    if ($svcFinal.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Running) {
+                        Start-Service -Name 'wuauserv' -ErrorAction Stop
+                        $svcFinal = Get-Service -Name 'wuauserv' -ErrorAction Stop
+                        $svcFinal.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running,[TimeSpan]::FromSeconds(30))
+                        $svcFinal.Refresh()
+                    }
+                    if ($svcFinal.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Running) {
+                        throw 'Windows Update service did not return to its original Running state.'
+                    }
+                    $updateServiceRestoreState = 'Original Running state restored and verified'
+                    Write-AMRLog 'Windows Update service original Running state verified after cleanup.' SUCCESS Cleanup
+                } catch {
+                    $systemFailures++
+                    $updateServiceRestoreState = 'RESTORE FAILED / NOT VERIFIED'
+                    Write-AMRLog ("Windows Update service restoration/verification failed: {0}" -f $_.Exception.Message) ERROR Cleanup
+                }
+            } elseif ($updateServiceOriginalState -eq 'Stopped') {
+                try {
+                    $svcFinal = Get-Service -Name 'wuauserv' -ErrorAction Stop
+                    if ($svcFinal.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Stopped) {
+                        Stop-Service -Name 'wuauserv' -Force -ErrorAction Stop
+                        $svcFinal = Get-Service -Name 'wuauserv' -ErrorAction Stop
+                        $svcFinal.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped,[TimeSpan]::FromSeconds(30))
+                        $svcFinal.Refresh()
+                    }
+                    if ($svcFinal.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Stopped) {
+                        throw 'Windows Update service did not remain in its original Stopped state.'
+                    }
+                    $updateServiceRestoreState = 'Original Stopped state preserved and verified'
+                    Write-AMRLog 'Windows Update service original Stopped state verified after cleanup.' SUCCESS Cleanup
+                } catch {
+                    $systemFailures++
+                    $updateServiceRestoreState = 'ORIGINAL STOPPED STATE NOT VERIFIED'
+                    Write-AMRLog ("Windows Update original Stopped state restoration/verification failed: {0}" -f $_.Exception.Message) ERROR Cleanup
+                }
+            } else {
+                try {
+                    $svcFinal = Get-Service -Name 'wuauserv' -ErrorAction Stop
+                    if ([string]$svcFinal.Status -ne $updateServiceOriginalState) {
+                        $systemFailures++
+                        $updateServiceRestoreState = ("Original {0} state changed to {1}; restoration not verified" -f $updateServiceOriginalState,$svcFinal.Status)
+                        Write-AMRLog ("Windows Update service changed from its original {0} state to {1}; automatic restoration was not attempted for this unsupported state." -f $updateServiceOriginalState,$svcFinal.Status) ERROR Cleanup
+                    } else {
+                        $updateServiceRestoreState = ("Original {0} state preserved and verified" -f $updateServiceOriginalState)
+                        Write-AMRLog ("Windows Update service remained in its original {0} state." -f $updateServiceOriginalState) SUCCESS Cleanup
+                    }
+                } catch {
+                    $systemFailures++
+                    $updateServiceRestoreState = 'Original service state unavailable; restoration could not be verified'
+                    Write-AMRLog ("Windows Update service final state verification failed: {0}" -f $_.Exception.Message) ERROR Cleanup
+                }
+            }
+        }
+
+        # Measure free-space change separately from the sum of deleted file lengths.
+        foreach ($root in @($diskSpaceBefore.Keys)) {
+            try {
+                $driveInfo = New-Object System.IO.DriveInfo($root)
+                $driveInfo.Refresh()
+                $diskSpaceAfter[$root] = [int64]$driveInfo.AvailableFreeSpace
+            } catch {
+                Write-AMRLog ("Could not measure final free space for volume {0}: {1}" -f $root,$_.Exception.Message) WARNING Cleanup
+            }
+        }
+
+        $runButton.IsEnabled = $true
+        $scanButton.IsEnabled = $true
     }
-    $summary = "Cleanup finished.`nRemoved: $deleted files`nSkipped/failed: $failed files`nRun Scan Now again to refresh the estimates."
-    Update-AMRCleanupProgress 100 ("Finished • removed {0} • skipped/failed {1}" -f $deleted,$failed)
-    (C 'CleanupScanSummary').Text = 'Cleanup finished. Scan again to refresh the results.'
-    foreach ($cat in $selected) { (C $cat.Info).Text = 'Rescan required' }
+
+    $actualFreeSpaceDelta = [int64]0
+    $measuredVolumes = 0
+    foreach ($root in @($diskSpaceBefore.Keys)) {
+        if ($diskSpaceAfter.ContainsKey($root)) {
+            $actualFreeSpaceDelta += ([int64]$diskSpaceAfter[$root] - [int64]$diskSpaceBefore[$root])
+            $measuredVolumes++
+        }
+    }
+
+    $serviceLine = if ($updateSelected) { "Windows Update service: $updateServiceRestoreState" } else { 'Windows Update service: Not involved' }
+    $diskLine = if ($measuredVolumes -gt 0) {
+        "Measured free-space change across $measuredVolumes volume(s): {0:N2} MB" -f ($actualFreeSpaceDelta / 1MB)
+    } else {
+        'Measured free-space change: Not available'
+    }
+    $summary = "Cleanup results:`nVerified Deleted: $deleted files`nSkipped (already absent): $skipped files`nFailed / Not Verified: $failed files`nSystem / Service Failures: $systemFailures`nVerified deleted-file size: {0:N2} MB`n{1}`n{2}`nRun Scan Now again to refresh the estimates." -f ($bytesFreed / 1MB),$diskLine,$serviceLine
+
+    $totalFailures = $failed + $systemFailures
+    $finalLevel = if ($totalFailures -gt 0) { 'ERROR' } else { 'SUCCESS' }
+    Update-AMRCleanupProgress 100 ("Finished • verified deleted {0} • skipped {1} • failed files {2} • system/service failures {3}" -f $deleted,$skipped,$failed,$systemFailures)
+    (C 'CleanupScanSummary').Text = ("Cleanup finished: {0} verified deleted, {1} skipped, {2} failed files, {3} system/service failures. Rescan required." -f $deleted,$skipped,$failed,$systemFailures)
+    foreach ($cat in $selected) {
+        $info = C $cat.Info
+        if ($info) { $info.Text = 'Rescan required' }
+    }
     $script:CleanupScanResults = @{}
     Update-AMRCleanupSelectedSummary
-    Write-AMRLog ("Cleanup completed. Removed: {0}; skipped/failed: {1}." -f $deleted,$failed) SUCCESS Cleanup
-    Show-AMRMessage $summary 'Cleanup Results' OK Information | Out-Null
+
+    Write-AMRLog ("CLEANUP FINAL SUMMARY | Verified Deleted: {0} | Skipped: {1} | Failed Files: {2} | System/Service Failures: {3} | Verified File Bytes: {4} | Measured Free Space Delta: {5} | Windows Update: {6}" -f $deleted,$skipped,$failed,$systemFailures,$bytesFreed,$actualFreeSpaceDelta,$updateServiceRestoreState) $finalLevel Cleanup
+    $messageIcon = if ($totalFailures -gt 0) { Warning } else { Information }
+    Show-AMRMessage $summary 'Cleanup Results' OK $messageIcon | Out-Null
 })
 
 # BACKUP ENGINE - searchable catalog; all actions export/report unless explicitly creating restore point
@@ -4258,6 +6059,52 @@ $script:BackupActions = @(
 @{Name='Open Backup Folder';Category='Recovery';Key='OpenFolder'}
 )
 
+function Invoke-AMRNativeCommand {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][string]$FilePath,
+        [Parameter(Mandatory=$true)][AllowEmptyCollection()][string[]]$ArgumentList,
+        [string]$Operation = 'Native command'
+    )
+    try {
+        $nativeOutput = @(& $FilePath @ArgumentList 2>&1)
+        $nativeExitCode = $LASTEXITCODE
+        if ($null -eq $nativeExitCode) { throw ("{0}: native exit code was not available." -f $Operation) }
+        if ([int]$nativeExitCode -ne 0) {
+            throw ("{0}: {1} returned exit code {2}. Output: {3}" -f $Operation,$FilePath,$nativeExitCode,([string]::Join(' ',[string[]]$nativeOutput)))
+        }
+        Write-AMRDiagnostic -Severity 'INFO' -Area 'System' -Operation 'NativeCommandCompleted' -Message ("{0} completed with exit code 0." -f $Operation) -Target $FilePath
+        return [string]::Join([Environment]::NewLine,[string[]]$nativeOutput)
+    } catch {
+        Write-AMRDiagnostic -Severity 'ERROR' -Area 'System' -Operation $Operation -Message 'Native command failed.' -ErrorRecord $_ -Target $FilePath
+        throw
+    }
+}
+
+function Invoke-AMRNativeExport {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][string]$FilePath,
+        [Parameter(Mandatory=$true)][AllowEmptyCollection()][string[]]$ArgumentList,
+        [Parameter(Mandatory=$true)][string]$OutputPath,
+        [string]$Operation = 'Native export'
+    )
+    try {
+        $nativeOutput = @(& $FilePath @ArgumentList 2>&1)
+        $nativeExitCode = $LASTEXITCODE
+        $nativeOutput | Out-File -LiteralPath $OutputPath -Encoding UTF8 -Force -ErrorAction Stop
+        if ($null -eq $nativeExitCode) { throw ("{0}: native exit code was not available." -f $Operation) }
+        if ([int]$nativeExitCode -ne 0) {
+            throw ("{0}: {1} returned exit code {2}. Output: {3}" -f $Operation,$FilePath,$nativeExitCode,([string]::Join(' ',[string[]]$nativeOutput)))
+        }
+        Write-AMRDiagnostic -Severity 'INFO' -Area 'Backup' -Operation 'NativeCommandCompleted' -Message ("{0} completed with exit code 0." -f $Operation) -Target $FilePath
+        return
+    } catch {
+        Write-AMRDiagnostic -Severity 'ERROR' -Area 'Backup' -Operation $Operation -Message 'Native backup/export command failed.' -ErrorRecord $_ -Target $FilePath
+        throw
+    }
+}
+
 function Invoke-AMRBackupAction {
  param([string]$Key)
  $stamp=Get-Date -Format 'yyyyMMdd_HHmmss'
@@ -4275,18 +6122,18 @@ function Invoke-AMRBackupAction {
    'Registry' { & reg.exe export 'HKCU\Software' (Join-Path $script:BackupDir ("HKCU_Backup_{0}.reg" -f $stamp)) /y | Out-Null; if($LASTEXITCODE -ne 0){throw "reg.exe returned exit code $LASTEXITCODE"}; $out=Join-Path $script:BackupDir ("HKCU_Backup_{0}.reg" -f $stamp); break }
    'HKCU' { & reg.exe export HKCU $out.Replace('.txt','.reg') /y | Out-Null; if($LASTEXITCODE -ne 0){throw "reg.exe returned exit code $LASTEXITCODE"}; $out=$out.Replace('.txt','.reg'); break }
    'HKLMSoftware' { & reg.exe export 'HKLM\SOFTWARE' $out.Replace('.txt','.reg') /y | Out-Null; if($LASTEXITCODE -ne 0){throw "reg.exe returned exit code $LASTEXITCODE"}; $out=$out.Replace('.txt','.reg'); break }
-   'RegHives' { & reg.exe query HKLM | Out-File $out -Encoding UTF8; break }
+   'RegHives' { Invoke-AMRNativeExport -FilePath 'reg.exe' -ArgumentList @('query','HKLM') -OutputPath $out -Operation 'Registry hive inventory'; break }
    'Programs' { Get-ItemProperty HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*,HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*,HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\* -ErrorAction SilentlyContinue | Select-Object DisplayName,DisplayVersion,Publisher,InstallDate | Sort-Object DisplayName | Export-Csv $out -NoTypeInformation -Encoding UTF8; break }
    'Features' { Get-WindowsOptionalFeature -Online | Select-Object FeatureName,State | Export-Csv $out -NoTypeInformation -Encoding UTF8; break }
    'OptionalFeatures' { Get-WindowsOptionalFeature -Online | Format-Table -AutoSize | Out-String | Set-Content $out -Encoding UTF8; break }
    'DriversList' { Get-CimInstance Win32_PnPSignedDriver | Select-Object DeviceName,Manufacturer,DriverVersion,DriverDate,InfName | Export-Csv $out -NoTypeInformation -Encoding UTF8; break }
-   'DriverExport' { $dest=Join-Path $script:BackupDir ("Drivers_{0}" -f $stamp); New-Item -ItemType Directory -Path $dest -Force | Out-Null; & pnputil.exe /export-driver '*' $dest 2>&1 | Out-File $out -Encoding UTF8; break }
-   'IPConfig' { & ipconfig.exe /all | Out-File $out -Encoding UTF8; break }
-   'Routes' { & route.exe print | Out-File $out -Encoding UTF8; break }
-   'DNSCache' { & ipconfig.exe /displaydns | Out-File $out -Encoding UTF8; break }
-   'WifiProfiles' { & netsh.exe wlan show profiles | Out-File $out -Encoding UTF8; break }
-   'WifiXml' { $dest=Join-Path $script:BackupDir ("WiFiProfiles_{0}" -f $stamp); New-Item -ItemType Directory -Path $dest -Force | Out-Null; & netsh.exe wlan export profile folder="$dest" 2>&1 | Out-File $out -Encoding UTF8; break }
-   'Firewall' { & netsh.exe advfirewall export (Join-Path $script:BackupDir ("Firewall_{0}.wfw" -f $stamp)) | Out-File $out -Encoding UTF8; break }
+   'DriverExport' { $dest=Join-Path $script:BackupDir ("Drivers_{0}" -f $stamp); New-Item -ItemType Directory -Path $dest -Force -ErrorAction Stop | Out-Null; Invoke-AMRNativeExport -FilePath 'pnputil.exe' -ArgumentList @('/export-driver','*',$dest) -OutputPath $out -Operation 'Driver export'; break }
+   'IPConfig' { Invoke-AMRNativeExport -FilePath 'ipconfig.exe' -ArgumentList @('/all') -OutputPath $out -Operation 'IP configuration export'; break }
+   'Routes' { Invoke-AMRNativeExport -FilePath 'route.exe' -ArgumentList @('print') -OutputPath $out -Operation 'Routing table export'; break }
+   'DNSCache' { Invoke-AMRNativeExport -FilePath 'ipconfig.exe' -ArgumentList @('/displaydns') -OutputPath $out -Operation 'DNS cache export'; break }
+   'WifiProfiles' { Invoke-AMRNativeExport -FilePath 'netsh.exe' -ArgumentList @('wlan','show','profiles') -OutputPath $out -Operation 'Wi-Fi profile inventory'; break }
+   'WifiXml' { $dest=Join-Path $script:BackupDir ("WiFiProfiles_{0}" -f $stamp); New-Item -ItemType Directory -Path $dest -Force -ErrorAction Stop | Out-Null; Invoke-AMRNativeExport -FilePath 'netsh.exe' -ArgumentList @('wlan','export','profile',('folder=' + $dest)) -OutputPath $out -Operation 'Wi-Fi profile export'; break }
+   'Firewall' { $firewallFile=Join-Path $script:BackupDir ("Firewall_{0}.wfw" -f $stamp); Invoke-AMRNativeExport -FilePath 'netsh.exe' -ArgumentList @('advfirewall','export',$firewallFile) -OutputPath $out -Operation 'Firewall policy export' | Out-Null; if (-not (Test-Path -LiteralPath $firewallFile -PathType Leaf -ErrorAction Stop)) { throw 'netsh reported success but the firewall export file was not created.' }; break }
    'FirewallCfg' { Get-NetFirewallProfile | Format-List * | Out-File $out -Encoding UTF8; break }
    'Users' { Get-LocalUser | Select-Object Name,Enabled,LastLogon,PasswordRequired,Description | Export-Csv $out -NoTypeInformation -Encoding UTF8; break }
    'Groups' { Get-LocalGroup | Select-Object Name,Description | Export-Csv $out -NoTypeInformation -Encoding UTF8; break }
@@ -4296,9 +6143,9 @@ function Invoke-AMRBackupAction {
    'Tasks' { Get-ScheduledTask | Select-Object TaskPath,TaskName,State,Description | Export-Csv $out -NoTypeInformation -Encoding UTF8; break }
    'Startup' { Get-CimInstance Win32_StartupCommand | Select-Object Name,Command,Location,User | Export-Csv $out -NoTypeInformation -Encoding UTF8; break }
    'Environment' { Get-ChildItem Env: | Sort-Object Name | Format-Table -AutoSize | Out-String | Set-Content $out -Encoding UTF8; break }
-   'SystemInfo' { & systeminfo.exe | Out-File $out -Encoding UTF8; break }
+   'SystemInfo' { Invoke-AMRNativeExport -FilePath 'systeminfo.exe' -ArgumentList @() -OutputPath $out -Operation 'System information export'; break }
    'WindowsVersion' { Get-ComputerInfo | Select-Object WindowsProductName,WindowsVersion,OsBuildNumber,OsArchitecture,WindowsInstallationType | Format-List | Out-File $out -Encoding UTF8; break }
-   'BCD' { & bcdedit.exe /enum all | Out-File $out -Encoding UTF8; break }
+   'BCD' { Invoke-AMRNativeExport -FilePath 'bcdedit.exe' -ArgumentList @('/enum','all') -OutputPath $out -Operation 'Boot configuration export'; break }
    'Disks' { Get-Disk | Select-Object Number,FriendlyName,SerialNumber,PartitionStyle,OperationalStatus,Size | Export-Csv $out -NoTypeInformation -Encoding UTF8; break }
    'Volumes' { Get-Volume | Select-Object DriveLetter,FileSystemLabel,FileSystem,HealthStatus,Size,SizeRemaining | Export-Csv $out -NoTypeInformation -Encoding UTF8; break }
    'BitLocker' { Get-BitLockerVolume | Select-Object MountPoint,VolumeType,VolumeStatus,ProtectionStatus,EncryptionMethod,EncryptionPercentage | Export-Csv $out -NoTypeInformation -Encoding UTF8; break }
@@ -4308,10 +6155,10 @@ function Invoke-AMRBackupAction {
    'Proxy' { Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' | Select-Object ProxyEnable,ProxyServer,ProxyOverride,AutoConfigURL | Format-List | Out-File $out -Encoding UTF8; break }
    'Updates' { Get-HotFix | Select-Object HotFixID,Description,InstalledBy,InstalledOn | Sort-Object InstalledOn -Descending | Export-Csv $out -NoTypeInformation -Encoding UTF8; break }
    'RestoreInventory' { Get-ComputerRestorePoint -ErrorAction Stop | Select-Object SequenceNumber,Description,CreationTime,RestorePointType,EventType | Export-Csv $out -NoTypeInformation -Encoding UTF8; break }
-   'ShadowStorage' { & vssadmin.exe list shadowstorage | Out-File $out -Encoding UTF8; break }
+   'ShadowStorage' { Invoke-AMRNativeExport -FilePath 'vssadmin.exe' -ArgumentList @('list','shadowstorage') -OutputPath $out -Operation 'Volume Shadow Copy storage export'; break }
    'Protection' { & powershell.exe -NoProfile -Command "Get-ComputerRestorePoint | Select-Object SequenceNumber,Description,CreationTime | Format-Table -AutoSize" | Out-File $out -Encoding UTF8; break }
-   'EventLogs' { Get-WinEvent -ListLog * -ErrorAction SilentlyContinue | Select-Object LogName,RecordCount,IsEnabled,MaximumSizeInBytes | Export-Csv $out -NoTypeInformation -Encoding UTF8; break }
-   'SystemErrors' { Get-WinEvent -FilterHashtable @{LogName='System';Level=1,2;StartTime=(Get-Date).AddDays(-7)} -MaxEvents 300 -ErrorAction SilentlyContinue | Select-Object TimeCreated,Id,LevelDisplayName,ProviderName,Message | Export-Csv $out -NoTypeInformation -Encoding UTF8; break }
+   'EventLogs' { Get-WinEvent -ListLog * -ErrorAction Stop | Select-Object LogName,RecordCount,IsEnabled,MaximumSizeInBytes | Export-Csv $out -NoTypeInformation -Encoding UTF8; break }
+   'SystemErrors' { Get-WinEvent -FilterHashtable @{LogName='System';Level=1,2;StartTime=(Get-Date).AddDays(-7)} -MaxEvents 300 -ErrorAction Stop | Select-Object TimeCreated,Id,LevelDisplayName,ProviderName,Message | Export-Csv $out -NoTypeInformation -Encoding UTF8; break }
    'DiskHealth' { Get-PhysicalDisk | Select-Object FriendlyName,MediaType,HealthStatus,OperationalStatus,Size | Export-Csv $out -NoTypeInformation -Encoding UTF8; break }
    'Devices' { Get-PnpDevice -PresentOnly | Select-Object Class,FriendlyName,Status,InstanceId | Export-Csv $out -NoTypeInformation -Encoding UTF8; break }
    'Audio' { Get-CimInstance Win32_SoundDevice | Select-Object Name,Manufacturer,Status,PNPDeviceID | Export-Csv $out -NoTypeInformation -Encoding UTF8; break }
@@ -4320,7 +6167,7 @@ function Invoke-AMRBackupAction {
    'NetProfiles' { Get-NetConnectionProfile | Select-Object Name,InterfaceAlias,NetworkCategory,IPv4Connectivity,IPv6Connectivity | Export-Csv $out -NoTypeInformation -Encoding UTF8; break }
    'Defender' { Get-MpComputerStatus | Select-Object AMServiceEnabled,AntivirusEnabled,RealTimeProtectionEnabled,AntivirusSignatureLastUpdated,QuickScanAge,FullScanAge | Format-List | Out-File $out -Encoding UTF8; break }
    'Threats' { Get-MpThreatDetection | Select-Object InitialDetectionTime,ThreatID,ThreatStatusID,ActionSuccess,Resources | Export-Csv $out -NoTypeInformation -Encoding UTF8; break }
-   'PowerPlans' { & powercfg.exe /list | Out-File $out -Encoding UTF8; break }
+   'PowerPlans' { Invoke-AMRNativeExport -FilePath 'powercfg.exe' -ArgumentList @('/list') -OutputPath $out -Operation 'Power plan inventory'; break }
    'OpenFolder' { Start-Process explorer.exe -ArgumentList $script:BackupDir; return }
    default { throw 'Unknown backup action.' }
   }
@@ -4334,12 +6181,12 @@ function Invoke-AMRBackupAction {
 
 function Update-AMRBackupView {
  $grid=C 'BackupActionsGrid'; $grid.Children.Clear(); $search=[string](C 'BackupSearchBox').Text
- $selected=(C 'BackupCategoryFilter').SelectedItem; $category='All Categories'; if($selected){$category=([string]$selected.Content -replace '^⚙️\s*','')}
+ $selected=(C 'BackupCategoryFilter').SelectedItem; $category='All Categories'; if($selected){$category=([string]$selected.Content -replace '^[^A-Za-z0-9]+\s*','')}
  $visible=0
  foreach($a in $script:BackupActions){
   if($category -ne 'All Categories' -and $a.Category -ne $category){continue}
   if(-not [string]::IsNullOrWhiteSpace($search) -and ($a.Name -notlike "*$search*" -and $a.Category -notlike "*$search*")){continue}
-  $b=New-Object System.Windows.Controls.Button; $b.Content=$a.Name; $b.Tag=$a.Key; $b.Margin='0,0,10,10'; $b.Padding='12,10'; $b.MinHeight=48; $b.HorizontalContentAlignment='Left'; $b.ToolTip=("Category: {0}" -f $a.Category)
+  $b=New-Object System.Windows.Controls.Button; $b.Content=('💾  ' + $a.Name); $b.Tag=$a.Key; $b.Margin='0,0,10,10'; $b.Padding='12,10'; $b.MinHeight=48; $b.HorizontalContentAlignment='Left'; $b.ToolTip=("Category: {0}" -f $a.Category)
   $b.Add_Click({ Invoke-AMRBackupAction -Key ([string]$this.Tag) }.GetNewClosure()); [void]$grid.Children.Add($b); $visible++
  }
  (C 'BackupResultsCount').Text=('{0} backup actions shown' -f $visible)
@@ -4440,7 +6287,7 @@ function Update-AMRUtilitiesView {
 Update-AMRUtilitiesView
 
 # --- 9. Launch Suite ---
-Write-AMRLog 'Amr | windows_utility V0.1 initialized.' INFO System
+Write-AMRLog ('Amr | windows_utility initialized. ' + $script:AMRReliabilityPhase) INFO System
 Refresh-AMROverview
 Write-AMRLog 'Utility Ready.' SUCCESS System
 [void]$script:Window.ShowDialog()
