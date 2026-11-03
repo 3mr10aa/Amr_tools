@@ -1257,7 +1257,7 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
        </StackPanel>
        <StackPanel Grid.Column="1" VerticalAlignment="Center" MinWidth="112">
         <Button Name="ApplyCustomizeBtn" Content="⚡ Apply Tweaks" Background="#10B981" Foreground="#FFFFFF" BorderThickness="0" FontSize="9" FontWeight="Bold" Padding="7,5"/>
-        <Button Name="CancelCustomizeBtn" Content="✕ Cancel Tweaks" Background="#3F1D1D" Foreground="#FECACA" BorderBrush="#7F1D1D" FontSize="9" Padding="7,5" Margin="0,4,0,0" ToolTip="Clear all selections on both sides"/>
+        <Button Name="CancelCustomizeBtn" Content="✕ Cancel Tweaks" Background="#3F1D1D" Foreground="#FECACA" BorderBrush="#7F1D1D" FontSize="9" Padding="7,5" Margin="0,4,0,0" ToolTip="Clear selections in the left panel only"/>
         <TextBlock Name="CustomizeSelectionCount" Text="0 selected on left" Foreground="#A1A1AA" FontSize="9" TextAlignment="Center" Margin="0,4,0,0"/>
        </StackPanel>
       </Grid>
@@ -3078,12 +3078,13 @@ $script:AMRBasicPresetMap = @{
 $script:AMRBasicCheckboxNames = @('btTempFiles','btEmptyRecycleBin','btClearRecent','btDisableTips','btDisableTransparency','btDisableAnimations','btPowerHigh','btGameMode','btShowExtensions','btShowHidden','btThisPC','btDisableRecent','btDisableAds','btDisableFeedback','btDisableBackground','btDisableCortana','btActivityHistory','btConsumerFeatures','btDeliveryOptimization','btTailoredExperiences','btInputPersonalization','btLockScreenTips','btDisableTelemetryService','btDisableGameDVR','btDisableWebSearch','btDisableAppLaunchTracking','btDisableWidgets','btDisableHibernation','btDisableStartAppSuggestions','btDisableSilentInstalls','btDisableSoftLanding','btDisableSettingsSuggestions','btDisableSyncNotifications','btDisableOnlineSpeech','btDisableHandwritingData','btShowFullPath','btDisableAutoPlay','btDisableRecentDocsTracking','btDisableSearchHighlights','btUseCompactExplorer','btDisableLockScreenCamera','btDisableLockScreenSlideShow')
 $script:AMRCustomizeCheckboxNames = @('chkDarkMode','chkDisableTransparency','chkDisableAccentColor','chkClassicVolume','chkDisableAnimations','chkShowSeconds','chkDisableBingSearch','chkTaskbarLeft','chkHideWidgets','chkHideTaskView','chkHiddenFiles','chkOpenThisPC','chkClassicContextMenu','chkHideRecentFiles','chkSeparateFolderProcess','chkDisableStickyKeys','chkDisableAutoRebootUpdate','chkShowBSODDetails','chkDisableShortcutSuffix','chkDisableAdvertisingID','chkDisableLocationTracking','chkDisableFeedbackPrompts','chkDisableTailoredExperiences','chkEnableGameMode','chkDisableSearchIndexing','chkAddTakeOwnership','chkDisableHibernation')
 function Update-AMRTweakSelectionCounts {
+    # Each panel displays only its own selection count.
     $left = @($script:AMRCustomizeCheckboxNames | Where-Object { (C $_).IsChecked -eq $true }).Count
     $right = @($script:AMRBasicCheckboxNames | Where-Object { (C $_).IsChecked -eq $true }).Count
     $leftCounter = C 'CustomizeSelectionCount'
     if ($leftCounter -and ($leftCounter -is [System.Windows.Controls.TextBlock])) { $leftCounter.Text = "$left selected on left" }
     $rightCounter = C 'BasicSelectionCount'
-    if ($rightCounter -and ($rightCounter -is [System.Windows.Controls.TextBlock])) { $rightCounter.Text = "$right selected on right | $($left + $right) selected total" }
+    if ($rightCounter -and ($rightCounter -is [System.Windows.Controls.TextBlock])) { $rightCounter.Text = "$right selected on right" }
 }
 function Set-AMRBasicPreset {
     param([ValidateSet('Essential','Minimal','Medium','Advanced')][string]$Preset)
@@ -3093,23 +3094,31 @@ function Set-AMRBasicPreset {
     Update-AMRTweakSelectionCounts
     Write-AMRLog "Selected $Preset local preset; no changes applied yet." INFO Customize
 }
-# Keep both sides' counters live as the user checks or unchecks any option.
-foreach ($name in ($script:AMRBasicCheckboxNames + $script:AMRCustomizeCheckboxNames)) {
+# Keep counters live without linking checkbox state between panels.
+foreach ($name in $script:AMRCustomizeCheckboxNames) {
     $cb = C $name
     $cb.Add_Checked({ Update-AMRTweakSelectionCounts })
     $cb.Add_Unchecked({ Update-AMRTweakSelectionCounts })
 }
+foreach ($name in $script:AMRBasicCheckboxNames) {
+    $cb = C $name
+    $cb.Add_Checked({ Update-AMRTweakSelectionCounts })
+    $cb.Add_Unchecked({ Update-AMRTweakSelectionCounts })
+}
+
+# LEFT panel: clear only the legacy Customize selections.
 (C 'CancelCustomizeBtn').Add_Click({
-    foreach ($name in ($script:AMRBasicCheckboxNames + $script:AMRCustomizeCheckboxNames)) { (C $name).IsChecked = $false }
-    (C 'BasicPresetStatus').Text = 'All selections cleared. Choose a preset or select options manually.'
+    foreach ($name in $script:AMRCustomizeCheckboxNames) { (C $name).IsChecked = $false }
     Update-AMRTweakSelectionCounts
-    Write-AMRLog 'Cleared all selected tweaks on both Customize panels.' INFO Customize
+    Write-AMRLog 'Cleared selected tweaks in the left Customize panel.' INFO Customize
 })
+
+# RIGHT panel: clear only the Basic Tweaks selections.
 (C 'CancelAllTweaksBtn').Add_Click({
-    foreach ($name in ($script:AMRBasicCheckboxNames + $script:AMRCustomizeCheckboxNames)) { (C $name).IsChecked = $false }
-    (C 'BasicPresetStatus').Text = 'All selections cleared. Choose a preset or select options manually.'
+    foreach ($name in $script:AMRBasicCheckboxNames) { (C $name).IsChecked = $false }
+    (C 'BasicPresetStatus').Text = 'All right-side selections cleared. Choose a preset or select options manually.'
     Update-AMRTweakSelectionCounts
-    Write-AMRLog 'Cleared all selected tweaks on both Customize panels.' INFO Customize
+    Write-AMRLog 'Cleared selected tweaks in the right Basic Tweaks panel.' INFO Customize
 })
 (C 'BasicPresetEssentialBtn').Add_Click({ Set-AMRBasicPreset -Preset Essential })
 (C 'BasicPresetMinimalBtn').Add_Click({ Set-AMRBasicPreset -Preset Minimal })
