@@ -1,6 +1,6 @@
 #requires -Version 5.1
 <#
-Amr | windows_utility - Phase 7 Error Handling & Stability
+Amr | windows_utility - Phase 9 Advanced Software Installation Architecture
 Windows 10/11 | Windows PowerShell 5.1 | WPF | Administrator
 Developer: عمرو أحمد عبد الفتاح | Phone: 01014716301 | Email: 3mr10aa@gmail.com
 #>
@@ -928,7 +928,7 @@ $RawApps = @(
     [pscustomobject]@{ Name='CrystalDiskInfo'; Category='05. System Utilities'; Id='CrystalDewWorld.CrystalDiskInfo'; ChocoId='crystaldiskinfo'; DirectUrl=''; DirectArgs=''; Publisher='Crystal Dew World' },
     [pscustomobject]@{ Name='CrystalDiskMark'; Category='05. System Utilities'; Id='CrystalDewWorld.CrystalDiskMark'; ChocoId='crystaldiskmark'; DirectUrl=''; DirectArgs=''; Publisher='Crystal Dew World' },
     [pscustomobject]@{ Name='Revo Uninstaller'; Category='05. System Utilities'; Id='VSRevoGroup.RevoUninstaller'; ChocoId='revo-uninstaller'; DirectUrl=''; DirectArgs=''; Publisher='VS Revo Group' },
-    [pscustomobject]@{ Name='System Informer'; Category='05. System Utilities'; Id='SystemInformer.SystemInformer'; ChocoId='system-informer'; DirectUrl=''; DirectArgs=''; Publisher='System Informer' },
+    [pscustomobject]@{ Name='System Informer'; Category='05. System Utilities'; Id='WinsiderSS.SystemInformer'; ChocoId='systeminformer'; IconAliases=@('SystemInformer.SystemInformer','systeminformer','System Informer','system-informer','ProcessHacker','processhacker'); IconUrl='https://rawcdn.githack.com/wanwanvxt/chocolatey-packages/main/icons/systeminformer.png'; DirectUrl=''; DirectArgs=''; Publisher='System Informer' },
     [pscustomobject]@{ Name='Sysinternals Suite'; Category='05. System Utilities'; Id='Microsoft.Sysinternals.SysinternalsSuite'; ChocoId='sysinternals'; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
     [pscustomobject]@{ Name='Speccy'; Category='05. System Utilities'; Id='Piriform.Speccy'; ChocoId='speccy'; DirectUrl=''; DirectArgs=''; Publisher='Piriform' },
     [pscustomobject]@{ Name='HWMonitor'; Category='05. System Utilities'; Id='CPUID.HWMonitor'; ChocoId='hwmonitor'; DirectUrl=''; DirectArgs=''; Publisher='CPUID' },
@@ -966,7 +966,7 @@ $RawApps = @(
     [pscustomobject]@{ Name='PHP'; Category='06. Development'; Id='PHP.PHP'; ChocoId='php'; DirectUrl=''; DirectArgs=''; Publisher='PHP Group' },
     [pscustomobject]@{ Name='CMake'; Category='06. Development'; Id='Kitware.CMake'; ChocoId='cmake'; DirectUrl=''; DirectArgs=''; Publisher='Kitware' },
     [pscustomobject]@{ Name='Postman'; Category='06. Development'; Id='Postman.Postman'; ChocoId='postman'; DirectUrl=''; DirectArgs=''; Publisher='Postman Inc.' },
-    [pscustomobject]@{ Name='Insomnia API Client'; Category='06. Development'; Id='Insomnia.Insomnia'; ChocoId='insomnia-rest-client'; DirectUrl=''; DirectArgs=''; Publisher='Kong Inc.' },
+    [pscustomobject]@{ Name='Insomnia API Client'; Category='06. Development'; Id='Insomnia.Insomnia'; ChocoId='insomnia-rest-api-client'; DirectUrl=''; DirectArgs=''; Publisher='Kong Inc.' },
 
     # 07. Communication & Social (15 Apps)
     [pscustomobject]@{ Name='Discord'; Category='07. Communication'; Id='Discord.Discord'; ChocoId='discord'; DirectUrl=''; DirectArgs=''; Publisher='Discord Inc.' },
@@ -1418,10 +1418,21 @@ function Initialize-AMRSoftwareIcons {
 
     # Avoid network and extraction work when all catalog icons are already cached.
     $missingIcons = @($Apps | Where-Object {
-        $id = [string]$_.Id
-        -not (Test-Path -LiteralPath (Join-Path $script:IconDir "$id.png") -PathType Leaf) -and
-        -not (Test-Path -LiteralPath (Join-Path $script:IconDir "$id.jpg") -PathType Leaf) -and
-        -not (Test-Path -LiteralPath (Join-Path $script:IconDir "$id.jpeg") -PathType Leaf)
+        $candidateIds = @([string]$_.Id)
+        if ($_.PSObject.Properties['IconAliases'] -and $_.IconAliases) {
+            $candidateIds += @($_.IconAliases | ForEach-Object { [string]$_ })
+        }
+        $hasCachedIcon = $false
+        foreach ($candidateId in $candidateIds) {
+            foreach ($extension in @('.png', '.jpg', '.jpeg')) {
+                if (Test-Path -LiteralPath (Join-Path $script:IconDir ($candidateId + $extension)) -PathType Leaf) {
+                    $hasCachedIcon = $true
+                    break
+                }
+            }
+            if ($hasCachedIcon) { break }
+        }
+        -not $hasCachedIcon
     }).Count
     if ($missingIcons -eq 0) {
         Write-AMRLog "All $($Apps.Count) software icons are already cached; skipping icon download." INFO Software
@@ -1470,15 +1481,28 @@ function Initialize-AMRSoftwareIcons {
         foreach ($app in $Apps) {
             $appId = [string]$app.Id
             $sourceIcon = $null
-            $exactKey = $appId.ToLowerInvariant()
-            if ($byBaseName.ContainsKey($exactKey)) {
-                $sourceIcon = $byBaseName[$exactKey]
-            } else {
-                # Be tolerant of filenames where punctuation in the ID was normalized.
-                $normalizedId = ($appId -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
-                foreach ($file in $imageFiles) {
-                    $normalizedBase = ([System.IO.Path]::GetFileNameWithoutExtension($file.Name) -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
-                    if ($normalizedBase -eq $normalizedId) { $sourceIcon = $file; break }
+            $candidateIds = @($appId)
+            if ($app.PSObject.Properties['IconAliases'] -and $app.IconAliases) {
+                $candidateIds += @($app.IconAliases | ForEach-Object { [string]$_ })
+            }
+
+            # Resolve the current package ID first, then legacy icon filenames.
+            foreach ($candidateId in $candidateIds) {
+                $exactKey = $candidateId.ToLowerInvariant()
+                if ($byBaseName.ContainsKey($exactKey)) {
+                    $sourceIcon = $byBaseName[$exactKey]
+                    break
+                }
+            }
+            if ($null -eq $sourceIcon) {
+                # Be tolerant of filenames where punctuation in either current or legacy IDs was normalized.
+                foreach ($candidateId in $candidateIds) {
+                    $normalizedId = ($candidateId -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
+                    foreach ($file in $imageFiles) {
+                        $normalizedBase = ([System.IO.Path]::GetFileNameWithoutExtension($file.Name) -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
+                        if ($normalizedBase -eq $normalizedId) { $sourceIcon = $file; break }
+                    }
+                    if ($null -ne $sourceIcon) { break }
                 }
             }
 
@@ -1487,6 +1511,26 @@ function Initialize-AMRSoftwareIcons {
                 $targetPath = Join-Path $script:IconDir ($appId + $targetExtension)
                 Copy-Item -LiteralPath $sourceIcon.FullName -Destination $targetPath -Force -ErrorAction Stop
                 $copied++
+            }
+            elseif ($app.PSObject.Properties['IconUrl'] -and -not [string]::IsNullOrWhiteSpace([string]$app.IconUrl)) {
+                # Per-app fallback for catalog entries whose published icon filename differs
+                # from every package-ID alias in the shared icon archive.
+                $fallbackPath = Join-Path $stagingDir (([Guid]::NewGuid().ToString('N')) + '.png')
+                try {
+                    Invoke-WebRequest -Uri ([string]$app.IconUrl) -OutFile $fallbackPath -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+                    if ((Test-Path -LiteralPath $fallbackPath -PathType Leaf) -and (Get-Item -LiteralPath $fallbackPath).Length -gt 128) {
+                        $targetPath = Join-Path $script:IconDir ($appId + '.png')
+                        Copy-Item -LiteralPath $fallbackPath -Destination $targetPath -Force -ErrorAction Stop
+                        $copied++
+                        Write-AMRLog "Downloaded dedicated icon fallback for $($app.Name)." SUCCESS Software
+                    }
+                }
+                catch {
+                    Write-AMRLog "Dedicated icon fallback failed for $($app.Name): $($_.Exception.Message)" WARNING Software
+                }
+                finally {
+                    if (Test-Path -LiteralPath $fallbackPath) { Remove-Item -LiteralPath $fallbackPath -Force -ErrorAction SilentlyContinue }
+                }
             }
         }
         Write-AMRLog "Icon pack processed: matched and cached $copied of $($Apps.Count) catalog applications." $(if ($copied -gt 0) { 'SUCCESS' } else { 'WARNING' }) Software
@@ -1546,34 +1590,59 @@ $script:SoftwareCatalog = New-Object 'System.Collections.ObjectModel.ObservableC
 
 $RawApps | ForEach-Object {
     $initial  = if ($_.Name.Length -gt 0) { $_.Name.Substring(0,1).ToUpper() } else { 'A' }
-    $iconPath = Join-Path $script:IconDir "$($_.Id).png"
-    $jpgPath  = Join-Path $script:IconDir "$($_.Id).jpg"
-    $jpegPath = Join-Path $script:IconDir "$($_.Id).jpeg"
     $iconSource = $null
-
-    if (Test-Path -LiteralPath $iconPath -PathType Leaf) {
-        $iconSource = Get-AMRIconImageSource -Path $iconPath
+    $iconCandidateIds = @([string]$_.Id)
+    if ($_.PSObject.Properties['IconAliases'] -and $_.IconAliases) {
+        $iconCandidateIds += @($_.IconAliases | ForEach-Object { [string]$_ })
     }
 
-    if ($null -eq $iconSource -and
-        (Test-Path -LiteralPath $jpgPath -PathType Leaf)) {
-        $iconSource = Get-AMRIconImageSource -Path $jpgPath
+    # Prefer the current catalog ID, but retain compatibility with cached legacy icon filenames.
+    foreach ($iconCandidateId in $iconCandidateIds) {
+        foreach ($extension in @('.png', '.jpg', '.jpeg')) {
+            $candidateIconPath = Join-Path $script:IconDir ($iconCandidateId + $extension)
+            if (Test-Path -LiteralPath $candidateIconPath -PathType Leaf) {
+                $iconSource = Get-AMRIconImageSource -Path $candidateIconPath
+                if ($null -ne $iconSource) { break }
+            }
+        }
+        if ($null -ne $iconSource) { break }
     }
 
-    if ($null -eq $iconSource -and
-        (Test-Path -LiteralPath $jpegPath -PathType Leaf)) {
-        $iconSource = Get-AMRIconImageSource -Path $jpegPath
+    # Last-resort runtime fallback: also cover a stale/corrupt archive image that
+    # matched by filename but could not be decoded by WPF.
+    if ($null -eq $iconSource -and $_.PSObject.Properties['IconUrl'] -and -not [string]::IsNullOrWhiteSpace([string]$_.IconUrl)) {
+        $fallbackAppName = [string]$_.Name
+        $fallbackIconPath = Join-Path $script:IconDir ([string]$_.Id + '.png')
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            Invoke-WebRequest -Uri ([string]$_.IconUrl) -OutFile $fallbackIconPath -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+            if ((Test-Path -LiteralPath $fallbackIconPath -PathType Leaf) -and (Get-Item -LiteralPath $fallbackIconPath).Length -gt 128) {
+                $iconSource = Get-AMRIconImageSource -Path $fallbackIconPath
+            }
+        }
+        catch {
+            Write-AMRLog "Runtime icon fallback failed for ${fallbackAppName}: $($_.Exception.Message)" WARNING Software
+        }
     }
 
     $script:SoftwareCatalog.Add([pscustomobject]@{
         IsSelected    = $false
+        IsInstalled   = $false
         Name          = $_.Name
         Category      = $_.Category
         Id            = $_.Id
+        IconAliases   = if ($_.PSObject.Properties['IconAliases'] -and $_.IconAliases) { @($_.IconAliases) } else { @() }
         ChocoId       = $_.ChocoId
         DirectUrl     = $_.DirectUrl
         DirectArgs    = $_.DirectArgs
         Publisher     = $_.Publisher
+        # These fields are optional catalog metadata. Access them through
+        # PSObject.Properties so StrictMode does not throw for legacy entries.
+        Sha256        = if ($_.PSObject.Properties['Sha256']) { [string]$_.PSObject.Properties['Sha256'].Value } else { '' }
+        InstallerType = if ($_.PSObject.Properties['InstallerType']) { [string]$_.PSObject.Properties['InstallerType'].Value } else { '' }
+        InteractiveArgs = if ($_.PSObject.Properties['InteractiveArgs']) { [string]$_.PSObject.Properties['InteractiveArgs'].Value } else { '' }
+        AllowedHosts  = if ($_.PSObject.Properties['AllowedHosts'] -and $null -ne $_.PSObject.Properties['AllowedHosts'].Value) { @($_.PSObject.Properties['AllowedHosts'].Value) } else { @() }
+        InstallTimeoutSeconds = if ($_.PSObject.Properties['InstallTimeoutSeconds'] -and $_.PSObject.Properties['InstallTimeoutSeconds'].Value) { [int]$_.PSObject.Properties['InstallTimeoutSeconds'].Value } else { 1800 }
         Initials      = $initial
         Icon          = [System.Windows.Media.ImageSource]$iconSource
     })
@@ -1842,26 +1911,33 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
       <Grid Grid.Row="0" Margin="0,10,0,20">
        <Grid.ColumnDefinitions>
         <ColumnDefinition Width="*"/>
-        <ColumnDefinition Width="350"/>
+        <ColumnDefinition Width="470"/>
        </Grid.ColumnDefinitions>
        <StackPanel Grid.Column="0" VerticalAlignment="Center">
         <TextBlock Text="Software Catalog" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF"/>
         <TextBlock Text="Smart Multi-Tier Engine (Winget ➔ Chocolatey ➔ Strict Verified Direct Download)." Foreground="#A1A1AA" FontSize="11" TextWrapping="Wrap" Margin="0,3,0,0"/>
        </StackPanel>
-       
-       <TextBox Name="SearchBox" Grid.Column="1" Height="42" VerticalAlignment="Center" FontSize="15" ToolTip="Search by name or ID..."/>
-       <TextBlock Grid.Column="1" Text="🔍 Search name or ID..." IsHitTestVisible="False" VerticalAlignment="Center" Margin="15,0,0,0" Foreground="#71717A" FontSize="14">
-        <TextBlock.Style>
-         <Style TargetType="TextBlock">
-          <Setter Property="Visibility" Value="Hidden"/>
-          <Style.Triggers>
-           <DataTrigger Binding="{Binding Text.Length, ElementName=SearchBox}" Value="0">
-            <Setter Property="Visibility" Value="Visible"/>
-           </DataTrigger>
-          </Style.Triggers>
-         </Style>
-        </TextBlock.Style>
-       </TextBlock>
+
+       <Grid Grid.Column="1" VerticalAlignment="Center">
+        <Grid.ColumnDefinitions>
+         <ColumnDefinition Width="*"/>
+         <ColumnDefinition Width="145"/>
+        </Grid.ColumnDefinitions>
+        <TextBox Name="SearchBox" Grid.Column="0" Height="42" Margin="0,0,8,0" VerticalAlignment="Center" FontSize="15" ToolTip="Search by name or ID..."/>
+        <TextBlock Grid.Column="0" Text="🔍 Search name or ID..." IsHitTestVisible="False" VerticalAlignment="Center" Margin="15,0,0,0" Foreground="#71717A" FontSize="14">
+         <TextBlock.Style>
+          <Style TargetType="TextBlock">
+           <Setter Property="Visibility" Value="Hidden"/>
+           <Style.Triggers>
+            <DataTrigger Binding="{Binding Text.Length, ElementName=SearchBox}" Value="0">
+             <Setter Property="Visibility" Value="Visible"/>
+            </DataTrigger>
+           </Style.Triggers>
+          </Style>
+         </TextBlock.Style>
+        </TextBlock>
+        <Button Name="ShowInstalledBtn" Grid.Column="1" Height="38" VerticalAlignment="Center" Padding="9,0" FontSize="12" FontWeight="SemiBold" Cursor="Hand" Content="Show Installed" ToolTip="Show only applications detected as installed on this PC." Background="#263B3A" Foreground="#A7D8CE" BorderBrush="#456B65" BorderThickness="1"/>
+       </Grid>
       </Grid>
       
       <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
@@ -3135,8 +3211,106 @@ function Refresh-AMROverview {
 $script:AppsView = [System.Windows.Data.CollectionViewSource]::GetDefaultView($script:SoftwareCatalog)
 $script:AppsView.GroupDescriptions.Add((New-Object System.Windows.Data.PropertyGroupDescription("Category")))
 
+$script:ShowInstalledOnly = $false
+
+function Update-AMRInstalledCatalogState {
+    # Build one local inventory snapshot, then compare it against the 500-app catalog.
+    # Exact normalized identities avoid broad/unsafe partial-name matches.
+    $installedIdentities = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $uninstallPaths = @(
+        'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKCU:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+
+    foreach ($registryPath in $uninstallPaths) {
+        try {
+            foreach ($entry in @(Get-ItemProperty -Path $registryPath -ErrorAction SilentlyContinue)) {
+                $displayNameProperty = $entry.PSObject.Properties['DisplayName']
+                $childNameProperty = $entry.PSObject.Properties['PSChildName']
+                # Only product identity fields are valid evidence. Publisher and
+                # UninstallString are deliberately excluded: they can create false
+                # positives for unrelated catalog entries.
+                $displayNameValue = if ($displayNameProperty -and $null -ne $displayNameProperty.Value) { [string]$displayNameProperty.Value } else { '' }
+                $childNameValue = if ($childNameProperty -and $null -ne $childNameProperty.Value) { [string]$childNameProperty.Value } else { '' }
+                foreach ($identity in @($displayNameValue, $childNameValue)) {
+                    if (-not [string]::IsNullOrWhiteSpace($identity)) {
+                        $normalized = ($identity -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
+                        if ($normalized.Length -ge 3) { [void]$installedIdentities.Add($normalized) }
+                    }
+                }
+            }
+        } catch {
+            Write-AMRLog "Could not read installed software inventory from '$registryPath': $($_.Exception.Message)" WARNING Software
+        }
+    }
+
+    try {
+        foreach ($package in @(Get-AppxPackage -ErrorAction SilentlyContinue)) {
+            foreach ($identity in @([string]$package.Name, [string]$package.PackageFamilyName)) {
+                if (-not [string]::IsNullOrWhiteSpace($identity)) {
+                    $normalized = ($identity -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
+                    if ($normalized.Length -ge 3) { [void]$installedIdentities.Add($normalized) }
+                }
+            }
+        }
+    } catch {
+        Write-AMRLog "Could not read AppX package inventory: $($_.Exception.Message)" WARNING Software
+    }
+
+    # Canonical aliases for common display-name differences between the catalog and
+    # Windows uninstall entries (for example, Everything is registered without 'Search').
+    $identityAliases = @{
+        'everythingsearch' = @('everything')
+        'visualstudiocode' = @('vscode')
+        'microsoftedgewebview2runtime' = @('webview2runtime','microsoftedgewebview2')
+        'discord' = @('discord')
+        '7zip' = @('7zip')
+        'vlcmediaplayer' = @('vlc')
+        'sumatrapdf' = @('sumatrapdf')
+        'sharex' = @('sharex')
+    }
+
+    $installedCount = 0
+    foreach ($app in $script:SoftwareCatalog) {
+        $isInstalled = $false
+        $candidateIdentities = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($identity in @([string]$app.Name, [string]$app.Id, [string]$app.ChocoId)) {
+            if ([string]::IsNullOrWhiteSpace($identity)) { continue }
+            $normalized = ($identity -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
+            if ($normalized.Length -ge 3) { $candidateIdentities.Add($normalized) }
+        }
+        foreach ($baseIdentity in @($candidateIdentities.ToArray())) {
+            if ($identityAliases.ContainsKey($baseIdentity)) {
+                foreach ($alias in $identityAliases[$baseIdentity]) {
+                    $normalizedAlias = ($alias -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
+                    if ($normalizedAlias.Length -ge 3) { $candidateIdentities.Add($normalizedAlias) }
+                }
+            }
+        }
+        foreach ($normalized in $candidateIdentities) {
+            if ($installedIdentities.Contains($normalized)) { $isInstalled = $true; break }
+            # Versioned display names such as 'Everything 1.4.1.x' normalize to
+            # 'everything141x'. Accept only a numeric/version suffix after a full alias.
+            foreach ($observed in $installedIdentities) {
+                if ($observed.Length -gt $normalized.Length -and $observed.StartsWith($normalized, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $suffix = $observed.Substring($normalized.Length)
+                    if ($suffix -match '^\d+(x64|x86|64bit|32bit)?$') { $isInstalled = $true; break }
+                }
+            }
+            if ($isInstalled) { break }
+        }
+        $app.IsInstalled = $isInstalled
+        if ($isInstalled) { $installedCount++ }
+    }
+
+    return $installedCount
+}
+
 $script:AppsView.Filter = [System.Predicate[object]]{
     param($item)
+    if ($script:ShowInstalledOnly -and -not $item.IsInstalled) { return $false }
     $searchText = (C 'SearchBox').Text
     if ([string]::IsNullOrWhiteSpace($searchText)) { return $true }
     $escaped = [regex]::Escape($searchText)
@@ -3144,6 +3318,22 @@ $script:AppsView.Filter = [System.Predicate[object]]{
 }
 
 (C 'SearchBox').Add_TextChanged({ $script:AppsView.Refresh() })
+(C 'ShowInstalledBtn').Add_Click({
+    if (-not $script:ShowInstalledOnly) {
+        $installedCount = Update-AMRInstalledCatalogState
+        $script:ShowInstalledOnly = $true
+        (C 'ShowInstalledBtn').Content = "Show All ($installedCount)"
+        (C 'ShowInstalledBtn').ToolTip = 'Return to the full software catalog.'
+        $script:AppsView.Refresh()
+        Write-AMRLog "Installed-app filter enabled: $installedCount catalog application(s) detected." INFO Software
+    } else {
+        $script:ShowInstalledOnly = $false
+        (C 'ShowInstalledBtn').Content = 'Show Installed'
+        (C 'ShowInstalledBtn').ToolTip = 'Show only applications detected as installed on this PC.'
+        $script:AppsView.Refresh()
+        Write-AMRLog 'Installed-app filter disabled; showing the full software catalog.' INFO Software
+    }
+})
 (C 'SoftwareGrid').ItemsSource = $script:AppsView
 
 (C 'DeselectAllBtn').Add_Click({
@@ -3163,6 +3353,7 @@ $script:InstallRunspace = $null
 $script:InstallAsyncResult = $null
 $script:InstallOutput = $null
 $script:InstallResultQueue = $null
+$script:InstallCompletionFile = $null
 $script:InstallLogQueue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'
 $script:InstallTimer = $null
 $script:InstallActionName = ''
@@ -3177,7 +3368,7 @@ param(
     [bool]$Interactive,
     [string]$DownloadDir,
     [System.Collections.Concurrent.ConcurrentQueue[string]]$LogQueue,
-    [System.Collections.Concurrent.ConcurrentQueue[object]]$ResultQueue
+    [string]$CompletionFilePath
 )
 
 $ErrorActionPreference = "Stop"
@@ -3190,57 +3381,187 @@ function Write-WorkerLog {
     [void]$LogQueue.Enqueue("${pctPrefix}[$stamp] [$Level] [Software] $Message")
 }
 
+# Last-resort worker trap: preserve the original terminating error and publish a
+# diagnostic completion record instead of losing the runspace failure silently.
+trap {
+    $fatalRecord = $_
+    $fatalMessage = [string]$fatalRecord.Exception.Message
+    $fatalType = [string]$fatalRecord.Exception.GetType().FullName
+    $fatalStack = [string]$fatalRecord.ScriptStackTrace
+    if ([string]::IsNullOrWhiteSpace($fatalMessage)) { $fatalMessage = [string]$fatalRecord }
+    try { Write-WorkerLog ("WORKER-FATAL | Type={0} | Error={1} | Stack={2}" -f $fatalType,$fatalMessage,$fatalStack) 'ERROR' } catch {}
+    try {
+        $fatalResults = @()
+        if (Get-Variable -Name results -Scope 0 -ErrorAction SilentlyContinue) { $fatalResults = $results.ToArray() }
+        $fatalSummary = [pscustomobject]@{
+            ActionName = [string]$ActionName
+            SuccessCount = if (Get-Variable successCount -Scope 0 -ErrorAction SilentlyContinue) { [int]$successCount } else { 0 }
+            UnverifiedCount = if (Get-Variable unverifiedCount -Scope 0 -ErrorAction SilentlyContinue) { [int]$unverifiedCount } else { 0 }
+            CancelledCount = if (Get-Variable cancelledCount -Scope 0 -ErrorAction SilentlyContinue) { [int]$cancelledCount } else { 0 }
+            FailedCount = if (Get-Variable failedCount -Scope 0 -ErrorAction SilentlyContinue) { [int]$failedCount } else { 1 }
+            SkippedCount = if (Get-Variable skippedCount -Scope 0 -ErrorAction SilentlyContinue) { [int]$skippedCount } else { 0 }
+            RebootNeeded = $false
+            Results = $fatalResults
+            WorkerError = $fatalMessage
+            WorkerErrorType = $fatalType
+            WorkerStackTrace = $fatalStack
+        }
+        $fatalJson = ConvertTo-Json -InputObject $fatalSummary -Depth 8 -Compress
+        if (-not [string]::IsNullOrWhiteSpace($CompletionFilePath)) {
+            $fatalTemp = $CompletionFilePath + '.fatal.' + [guid]::NewGuid().ToString('N')
+            $fatalEncoding = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText($fatalTemp, [string]$fatalJson, $fatalEncoding)
+            if ([System.IO.File]::Exists($CompletionFilePath)) { [System.IO.File]::Delete($CompletionFilePath) }
+            [System.IO.File]::Move($fatalTemp, $CompletionFilePath)
+        }
+    } catch {
+        try { Write-WorkerLog ("WORKER-FATAL-PUBLISH-ERROR | {0}" -f $_.Exception.Message) 'ERROR' } catch {}
+    }
+    break
+}
+
+function Normalize-WorkerIdentity {
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return '' }
+    return (($Value -replace '[^a-zA-Z0-9]', '').ToLowerInvariant())
+}
+
+function Invoke-WorkerCapture {
+    param([string]$FilePath,[string[]]$ArgumentList,[ValidateRange(1,7200)][int]$TimeoutSeconds=15)
+    $token=[guid]::NewGuid().ToString('N')
+    $stdoutPath=Join-Path ([IO.Path]::GetTempPath()) ("AMR_SW_{0}.out" -f $token)
+    $stderrPath=Join-Path ([IO.Path]::GetTempPath()) ("AMR_SW_{0}.err" -f $token)
+    $process=$null; $startedAt=Get-Date
+    try {
+        $quotedArguments = foreach ($argument in $ArgumentList) {
+            $argument = [string]$argument
+            if ($argument.Length -eq 0 -or $argument -match '[\s"]') {
+                $escaped = [regex]::Replace($argument, '(\\*)"', '$1$1\"')
+                $escaped = [regex]::Replace($escaped, '(\\+)$', '$1$1')
+                '"' + $escaped + '"'
+            } else { $argument }
+        }
+        $argumentLine = ($quotedArguments -join ' ')
+        $params=@{FilePath=$FilePath;ArgumentList=$argumentLine;PassThru=$true;RedirectStandardOutput=$stdoutPath;RedirectStandardError=$stderrPath;WindowStyle='Hidden';ErrorAction='Stop'}
+        $process=Start-Process @params
+        if (-not $process.WaitForExit($TimeoutSeconds*1000)) {
+            Write-WorkerLog ("[Capture] {0} PID={1} timed out after {2}s." -f $FilePath,$process.Id,$TimeoutSeconds) 'WARNING'
+            try { $null = & "$env:SystemRoot\System32\taskkill.exe" /PID $process.Id /T /F 2>&1; $null=$process.WaitForExit(5000) } catch { try {$process.Kill();[void]$process.WaitForExit(3000)}catch{} }
+            return [pscustomobject]@{ExitCode=-2;TimedOut=$true;Output='';Error='Process timed out.';ProcessId=$process.Id;ElapsedSeconds=[math]::Round(((Get-Date)-$startedAt).TotalSeconds,1)}
+        }
+        $process.WaitForExit(); $process.Refresh()
+        $out=if(Test-Path -LiteralPath $stdoutPath){Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue}else{''}
+        $err=if(Test-Path -LiteralPath $stderrPath){Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue}else{''}
+        return [pscustomobject]@{ExitCode=[int]$process.ExitCode;TimedOut=$false;Output=[string]$out;Error=[string]$err;ProcessId=$process.Id;ElapsedSeconds=[math]::Round(((Get-Date)-$startedAt).TotalSeconds,1)}
+    } catch {return [pscustomobject]@{ExitCode=-1;TimedOut=$false;Output='';Error=$_.Exception.Message;ProcessId=-1;ElapsedSeconds=[math]::Round(((Get-Date)-$startedAt).TotalSeconds,1)}}
+    finally {if($process){try{$process.Dispose()}catch{}};foreach($f in @($stdoutPath,$stderrPath)){if(Test-Path -LiteralPath $f){Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue}}}
+}
+
 function Test-WorkerInstalled {
     param(
         [string]$AppName,
         [string]$AppId = '',
-        [string]$ChocoId = ''
+        [string]$ChocoId = '',
+        [switch]$SkipWinget
     )
 
-    if ([string]::IsNullOrWhiteSpace($AppName)) { return $false }
+    if ([string]::IsNullOrWhiteSpace($AppName) -and [string]::IsNullOrWhiteSpace($AppId)) { return $false }
+    $cleanTarget = Normalize-WorkerIdentity $AppName
+    $cleanId = Normalize-WorkerIdentity $AppId
+    $cleanChoco = Normalize-WorkerIdentity $ChocoId
 
-    # 1. Direct Winget Verification (High Precision)
-    if (-not [string]::IsNullOrWhiteSpace($AppId)) {
-        $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
-        if ($winget) {
-            try {
-                $checkCmd = & $winget.Source list --id $AppId --exact --accept-source-agreements 2>$null
-                if ($LASTEXITCODE -eq 0 -and $checkCmd -match [regex]::Escape($AppId)) {
-                    return $true
+    # Keep worker-side identity matching consistent with the Show Installed catalog
+    # filter. Registry display names frequently differ from catalog labels (for
+    # example, catalog "Everything Search" vs. uninstall entry "Everything 1.4.x").
+    $identityCandidates = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($identity in @($cleanTarget, $cleanId, $cleanChoco)) {
+        if (-not [string]::IsNullOrWhiteSpace($identity) -and -not $identityCandidates.Contains($identity)) {
+            $identityCandidates.Add($identity)
+        }
+    }
+    $workerIdentityAliases = @{
+        'everythingsearch' = @('everything')
+        'visualstudiocode' = @('vscode')
+        'microsoftedgewebview2runtime' = @('webview2runtime','microsoftedgewebview2')
+        'vlcmediaplayer' = @('vlc')
+        'sumatrapdf' = @('sumatrapdf')
+        'sharex' = @('sharex')
+    }
+    foreach ($baseIdentity in @($identityCandidates.ToArray())) {
+        if ($workerIdentityAliases.ContainsKey($baseIdentity)) {
+            foreach ($alias in $workerIdentityAliases[$baseIdentity]) {
+                $normalizedAlias = Normalize-WorkerIdentity ([string]$alias)
+                if ($normalizedAlias -and -not $identityCandidates.Contains($normalizedAlias)) {
+                    $identityCandidates.Add($normalizedAlias)
                 }
-            } catch {}
+            }
         }
     }
 
-    # 2. Strict Windows Registry Verification
-    $paths = @(
-        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
-        "HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
-        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*"
-    )
-
-    try {
-        $cleanTarget = ($AppName -replace "[^a-zA-Z0-9]", "").ToLowerInvariant()
-        $cleanId     = if ($AppId) { ($AppId -replace "[^a-zA-Z0-9]", "").ToLowerInvariant() } else { '' }
-        $cleanChoco  = if ($ChocoId) { ($ChocoId -replace "[^a-zA-Z0-9]", "").ToLowerInvariant() } else { '' }
-
-        foreach ($item in @(Get-ItemProperty -Path $paths -ErrorAction SilentlyContinue)) {
-            $displayName = [string]$item.DisplayName
-            $childName   = [string]$item.PSChildName
-            if ([string]::IsNullOrWhiteSpace($displayName)) { continue }
-
-            $candidate      = ($displayName -replace "[^a-zA-Z0-9]", "").ToLowerInvariant()
-            $candidateChild = ($childName -replace "[^a-zA-Z0-9]", "").ToLowerInvariant()
-
-            # Exact Matches
-            if ($candidate -eq $cleanTarget) { return $true }
-            if ($cleanId -and ($candidate -eq $cleanId -or $candidateChild -eq $cleanId)) { return $true }
-            if ($cleanChoco -and ($candidate -eq $cleanChoco -or $candidateChild -eq $cleanChoco)) { return $true }
-
-            # No prefix matching: similarly named applications must not count as installed.
+    # 1. Exact Winget inventory check with a bounded wait.
+    if (-not $SkipWinget -and -not [string]::IsNullOrWhiteSpace($AppId)) {
+        $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+        if ($winget) {
+            $check = Invoke-WorkerCapture -FilePath $winget.Source -ArgumentList @('list','--id',$AppId,'--exact','--accept-source-agreements') -TimeoutSeconds 12
+            if (-not $check.TimedOut -and $check.ExitCode -eq 0 -and $check.Output -match [regex]::Escape($AppId)) { return $true }
         }
-    } catch {}
+    }
+
+    # 2. AppX/MSIX packages. Compare exact package identity fields only.
+    if (-not [string]::IsNullOrWhiteSpace($AppId)) {
+        try {
+            $appx = @(Get-AppxPackage -ErrorAction SilentlyContinue | Where-Object {
+                $_.Name -ieq $AppId -or $_.PackageFamilyName -ieq $AppId
+            })
+            if ($appx.Count -gt 0) { return $true }
+        } catch {}
+    }
+
+    # 3. Both registry views and both user/machine uninstall hives.
+    $paths = @(
+        'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKCU:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    foreach ($path in $paths) {
+        try {
+            foreach ($item in @(Get-ItemProperty -Path $path -ErrorAction SilentlyContinue)) {
+                $displayNameProperty = $item.PSObject.Properties['DisplayName']
+                $childNameProperty = $item.PSObject.Properties['PSChildName']
+                $displayName = if ($displayNameProperty) { [string]$displayNameProperty.Value } else { '' }
+                $childName = if ($childNameProperty) { [string]$childNameProperty.Value } else { '' }
+                $candidate = Normalize-WorkerIdentity $displayName
+                $candidateChild = Normalize-WorkerIdentity $childName
+                foreach ($expectedIdentity in $identityCandidates) {
+                    if ([string]::IsNullOrWhiteSpace($expectedIdentity)) { continue }
+                    foreach ($observedIdentity in @($candidate, $candidateChild)) {
+                        if ([string]::IsNullOrWhiteSpace($observedIdentity)) { continue }
+                        if ($observedIdentity -eq $expectedIdentity) { return $true }
+                        # Accept version/architecture suffixes only after a complete
+                        # known identity, never arbitrary partial-name matches.
+                        if ($observedIdentity.Length -gt $expectedIdentity.Length -and
+                            $observedIdentity.StartsWith($expectedIdentity, [StringComparison]::OrdinalIgnoreCase)) {
+                            $suffix = $observedIdentity.Substring($expectedIdentity.Length)
+                            if ($suffix -match '^\d+(x64|x86|64bit|32bit)?$') { return $true }
+                        }
+                    }
+                }
+            }
+        } catch {}
+    }
     return $false
+}
+
+function Wait-WorkerInstalled {
+    param([string]$AppName,[string]$AppId='',[string]$ChocoId='',[int]$TimeoutSeconds=45,[int]$PollSeconds=3)
+    if (Test-WorkerInstalled -AppName $AppName -AppId $AppId -ChocoId $ChocoId) { return $true }
+    $deadline=(Get-Date).AddSeconds([Math]::Max(1,$TimeoutSeconds))
+    do {
+        if (Test-WorkerInstalled -AppName $AppName -AppId $AppId -ChocoId $ChocoId -SkipWinget) { return $true }
+        Start-Sleep -Seconds ([Math]::Max(1,$PollSeconds))
+    } while ((Get-Date) -lt $deadline)
+    return (Test-WorkerInstalled -AppName $AppName -AppId $AppId -ChocoId $ChocoId -SkipWinget)
 }
 
 function Resolve-WorkerWingetId {
@@ -3252,10 +3573,8 @@ function Resolve-WorkerWingetId {
     # First trust the catalog ID when Winget can see that exact installed package.
     if (-not [string]::IsNullOrWhiteSpace($ConfiguredId)) {
         try {
-            $byId = & $winget.Source list --id $ConfiguredId --exact --accept-source-agreements 2>$null
-            if ($LASTEXITCODE -eq 0 -and ($byId -join "`n") -match [regex]::Escape($ConfiguredId)) {
-                return $ConfiguredId
-            }
+            $byId = Invoke-WorkerCapture -FilePath $winget.Source -ArgumentList @('list','--id',$ConfiguredId,'--exact','--accept-source-agreements') -TimeoutSeconds 20
+            if (-not $byId.TimedOut -and $byId.ExitCode -eq 0 -and $byId.Output -match [regex]::Escape($ConfiguredId)) { return $ConfiguredId }
         } catch {}
     }
 
@@ -3263,9 +3582,9 @@ function Resolve-WorkerWingetId {
     # Resolve the exact display name to the installed Winget ID before upgrade/repair.
     if ([string]::IsNullOrWhiteSpace($AppName)) { return $ConfiguredId }
     try {
-        $listed = @(& $winget.Source list --name $AppName --exact --accept-source-agreements 2>$null)
-        if ($LASTEXITCODE -eq 0) {
-            foreach ($line in $listed) {
+        $listedResult = Invoke-WorkerCapture -FilePath $winget.Source -ArgumentList @('list','--name',$AppName,'--exact','--accept-source-agreements') -TimeoutSeconds 20
+        if (-not $listedResult.TimedOut -and $listedResult.ExitCode -eq 0) {
+            foreach ($line in @($listedResult.Output -split "`r?`n")) {
                 $text = ([string]$line).Trim()
                 # Winget table columns can be separated by only one space when a name fills its column.
                 # Since --name --exact was used, parse the ID immediately after the exact display name.
@@ -3284,7 +3603,7 @@ function Resolve-WorkerWingetId {
 }
 
 function Invoke-WorkerMsiRepair {
-    param([string]$AppName, [bool]$Interactive, [int]$BasePercent)
+    param([string]$AppName, [bool]$Interactive, [int]$BasePercent, [ValidateRange(30,7200)][int]$TimeoutSeconds = 1800)
 
     $paths = @(
         "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
@@ -3294,7 +3613,15 @@ function Invoke-WorkerMsiRepair {
     $entry = $null
     try {
         $entry = Get-ItemProperty -Path $paths -ErrorAction SilentlyContinue |
-            Where-Object { $_.DisplayName -and ([string]$_.DisplayName).Trim() -ieq $AppName.Trim() -and $_.WindowsInstaller -eq 1 } |
+            Where-Object {
+                $nameProperty = $_.PSObject.Properties['DisplayName']
+                $installerProperty = $_.PSObject.Properties['WindowsInstaller']
+                $nameValue = if ($nameProperty) { [string]$nameProperty.Value } else { '' }
+                $installerValue = if ($installerProperty) { $installerProperty.Value } else { 0 }
+                (-not [string]::IsNullOrWhiteSpace($nameValue)) -and
+                ($nameValue.Trim() -ieq $AppName.Trim()) -and
+                ([int]$installerValue -eq 1)
+            } |
             Select-Object -First 1
     } catch {}
 
@@ -3312,7 +3639,7 @@ function Invoke-WorkerMsiRepair {
     if (-not $Interactive) { $args += @('/qn', '/norestart') }
     Write-WorkerLog "[MSI Repair] Running native Windows Installer repair for $AppName ($productCode)." "INFO" -Percent ($BasePercent + 10)
     try {
-        $proc = Invoke-ProcessResult -FilePath 'msiexec.exe' -ArgumentList $args -ShowWindow:$Interactive
+        $proc = Invoke-ProcessResult -FilePath 'msiexec.exe' -ArgumentList $args -ShowWindow:$Interactive -TimeoutSeconds $TimeoutSeconds
         $ok = Test-ExitSuccess -ExitCode $proc.ExitCode
         return [pscustomobject]@{ Success=$ok; ExitCode=$proc.ExitCode; Started=$true; Reboot=($proc.ExitCode -in @(1641,3010)) }
     } catch {
@@ -3358,21 +3685,23 @@ function Ensure-Chocolatey {
             throw "Chocolatey bootstrap script is missing or incomplete."
         }
 
-        $process = Start-Process -FilePath "powershell.exe" `
-            -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$setupFile`"") `
-            -Wait -PassThru -NoNewWindow
+        Write-WorkerLog '[Chocolatey] Running official bootstrap with a 15-minute execution limit.' 'INFO'
+        $process = Invoke-ProcessResult -FilePath 'powershell.exe' `
+            -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$setupFile`"") `
+            -ShowWindow:$false -TimeoutSeconds 900
 
-        $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
-        $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+        $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
         $env:Path = "$machinePath;$userPath"
 
         $found = Get-ChocoPath
-        if ($process.ExitCode -eq 0 -and $found) {
+        if (-not $process.TimedOut -and $process.ExitCode -eq 0 -and $found) {
             Write-WorkerLog "Chocolatey initialized successfully." "SUCCESS"
             return $found
         }
 
-        throw "Chocolatey setup failed (exit code $($process.ExitCode)); choco.exe was not verified."
+        $failureReason = if ($process.TimedOut) { 'timed out after 900 seconds' } else { "exit code $($process.ExitCode)" }
+        throw "Chocolatey setup failed ($failureReason); choco.exe was not verified."
     }
     catch {
         Write-WorkerLog "Chocolatey initialization error: $_" "ERROR"
@@ -3389,19 +3718,51 @@ function Invoke-ProcessResult {
     param(
         [string]$FilePath,
         [string[]]$ArgumentList,
-        [bool]$ShowWindow
+        [bool]$ShowWindow,
+        [ValidateRange(30,7200)][int]$TimeoutSeconds = 1800
     )
 
-    $startParams = @{
-        FilePath = $FilePath
-        ArgumentList = $ArgumentList
-        Wait = $true
-        PassThru = $true
-        ErrorAction = "Stop"
+    $process = $null
+    $startedAt = Get-Date
+    try {
+        $startParams = @{
+            FilePath = $FilePath
+            ArgumentList = $ArgumentList
+            PassThru = $true
+            ErrorAction = 'Stop'
+        }
+        if (-not $ShowWindow) { $startParams['WindowStyle'] = 'Hidden' }
+        $process = Start-Process @startParams
+        Write-WorkerLog ("[Process] Started PID={0}; File={1}; Timeout={2}s." -f $process.Id,$FilePath,$TimeoutSeconds) 'INFO'
+        $exited = $process.WaitForExit($TimeoutSeconds * 1000)
+        if (-not $exited) {
+            Write-WorkerLog ("[Process] PID={0} exceeded {1}s; attempting process-tree termination." -f $process.Id,$TimeoutSeconds) 'ERROR'
+            try {
+                $null = & "$env:SystemRoot\System32\taskkill.exe" /PID $process.Id /T /F 2>&1
+                $null = $process.WaitForExit(10000)
+                if (-not $process.HasExited) { $process.Kill(); [void]$process.WaitForExit(5000) }
+            } catch {
+                try { if (-not $process.HasExited) { $process.Kill(); [void]$process.WaitForExit(5000) } } catch {}
+            }
+            return [pscustomobject]@{
+                ExitCode = -2; TimedOut = $true; ProcessId = $process.Id
+                FilePath = $FilePath; ElapsedSeconds = [math]::Round(((Get-Date)-$startedAt).TotalSeconds,1)
+            }
+        }
+        $process.Refresh()
+        return [pscustomobject]@{
+            ExitCode = [int]$process.ExitCode; TimedOut = $false; ProcessId = $process.Id
+            FilePath = $FilePath; ElapsedSeconds = [math]::Round(((Get-Date)-$startedAt).TotalSeconds,1)
+        }
+    } catch {
+        Write-WorkerLog ("[Process] Could not execute '{0}': {1}" -f $FilePath,$_.Exception.Message) 'ERROR'
+        return [pscustomobject]@{
+            ExitCode = -1; TimedOut = $false; ProcessId = $(if ($process) {$process.Id} else {-1})
+            FilePath = $FilePath; ElapsedSeconds = [math]::Round(((Get-Date)-$startedAt).TotalSeconds,1)
+        }
+    } finally {
+        if ($process) { try { $process.Dispose() } catch {} }
     }
-    if (-not $ShowWindow) { $startParams["WindowStyle"] = "Hidden" }
-
-    return (Start-Process @startParams)
 }
 
 function Test-ExitSuccess {
@@ -3422,14 +3783,16 @@ function Invoke-WingetUnelevated {
     $helperPath = Join-Path $tempRoot ("AMR_Winget_UserContext_{0}.ps1" -f $jobId)
     $payloadPath = Join-Path $tempRoot ("AMR_Winget_UserContext_{0}.json" -f $jobId)
     $resultPath = Join-Path $tempRoot ("AMR_Winget_UserContext_{0}.exit" -f $jobId)
+    $pidPath = Join-Path $tempRoot ("AMR_Winget_UserContext_{0}.pid" -f $jobId)
     $helperCode = @"
-param([Parameter(Mandatory=`$true)][string]`$PayloadPath, [Parameter(Mandatory=`$true)][string]`$ResultPath)
+param([Parameter(Mandatory=`$true)][string]`$PayloadPath, [Parameter(Mandatory=`$true)][string]`$ResultPath, [Parameter(Mandatory=`$true)][string]`$PidPath)
 `$exitCode = -1
 try {
     `$payload = Get-Content -LiteralPath `$PayloadPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     `$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     `$principal = New-Object -TypeName Security.Principal.WindowsPrincipal -ArgumentList `$identity
     if (`$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Explorer helper is still elevated; refusing to run an elevation-prohibited installer.' }
+    [IO.File]::WriteAllText(`$PidPath, [string]`$PID)
     `$proc = Start-Process -FilePath ([string]`$payload.WingetPath) -ArgumentList ([string[]]`$payload.Arguments) -Wait -PassThru -NoNewWindow -ErrorAction Stop
     `$exitCode = [int]`$proc.ExitCode
 } catch {
@@ -3447,7 +3810,7 @@ try { [IO.File]::WriteAllText(`$ResultPath, [string]`$exitCode) } catch {}
         $payload | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $payloadPath -Encoding UTF8 -ErrorAction Stop
         $powerShellExe = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
         if (-not (Test-Path -LiteralPath $powerShellExe)) { throw 'Windows PowerShell executable was not found.' }
-        $parameters = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -PayloadPath "{1}" -ResultPath "{2}"' -f $helperPath, $payloadPath, $resultPath
+        $parameters = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -PayloadPath "{1}" -ResultPath "{2}" -PidPath "{3}"' -f $helperPath, $payloadPath, $resultPath, $pidPath
         $show = if ($ShowWindow) { 1 } else { 0 }
 
         # Use Explorer's shell process to launch a standard-user helper from this elevated worker.
@@ -3466,6 +3829,14 @@ try { [IO.File]::WriteAllText(`$ResultPath, [string]`$exitCode) } catch {}
         $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
         while (-not (Test-Path -LiteralPath $resultPath) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
         if (-not (Test-Path -LiteralPath $resultPath)) {
+            if (Test-Path -LiteralPath $pidPath) {
+                $helperPid=0
+                $pidText=(Get-Content -LiteralPath $pidPath -Raw -ErrorAction SilentlyContinue).Trim()
+                if ([int]::TryParse($pidText,[ref]$helperPid) -and $helperPid -gt 0) {
+                    Write-WorkerLog "[Winget/User] Timeout reached; terminating helper process tree PID $helperPid." 'ERROR'
+                    try { $null = & "$env:SystemRoot\System32\taskkill.exe" /PID $helperPid /T /F 2>&1 } catch {}
+                }
+            }
             return [pscustomobject]@{ Started=$true; Success=$false; ExitCode=-1; TimedOut=$true }
         }
         $rawResult = (Get-Content -LiteralPath $resultPath -Raw -ErrorAction Stop).Trim()
@@ -3482,7 +3853,7 @@ try { [IO.File]::WriteAllText(`$ResultPath, [string]`$exitCode) } catch {}
     } finally {
         if ($shellWindow) { try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shellWindow) } catch {} }
         if ($shell) { try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell) } catch {} }
-        foreach ($file in @($helperPath,$payloadPath,$resultPath)) {
+        foreach ($file in @($helperPath,$payloadPath,$resultPath,$pidPath)) {
             if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }
         }
     }
@@ -3494,13 +3865,14 @@ function Install-ViaWinget {
         [string]$ActionCommand,
         [string]$ExtraFlags = "",
         [bool]$Interactive = $false,
-        [int]$BasePercent = 0
+        [int]$BasePercent = 0,
+        [ValidateRange(30,7200)][int]$TimeoutSeconds = 1800
     )
 
     $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
     if (-not $winget) {
         Write-WorkerLog "Winget is unavailable." "WARNING" -Percent $BasePercent
-        return [pscustomobject]@{ Success = $false; ExitCode = -1; Started = $false; Reboot = $false }
+        return [pscustomobject]@{ Success = $false; ExitCode = -1; Started = $false; Reboot = $false; FallbackSafe = $true }
     }
 
     $cmd = if ($ActionCommand -eq "repair") { "install" } else { $ActionCommand }
@@ -3527,44 +3899,45 @@ function Install-ViaWinget {
     # so launch Spotify directly through Explorer's standard-user token for every action.
     if ($TargetId -eq 'Spotify.Spotify') {
         Write-WorkerLog "[Winget/User] Spotify requires a non-elevated context; launching directly as the signed-in user." "INFO" -Percent ($BasePercent + 5)
-        $userResult = Invoke-WingetUnelevated -WingetPath $winget.Source -Arguments $argumentList -ShowWindow:$Interactive
+        $userResult = Invoke-WingetUnelevated -WingetPath $winget.Source -Arguments $argumentList -ShowWindow:$Interactive -TimeoutSeconds $TimeoutSeconds
         if ($userResult.Success) {
             Write-WorkerLog "[Winget/User] Spotify completed in the standard-user context (exit $($userResult.ExitCode))." "SUCCESS" -Percent ($BasePercent + 20)
-            return [pscustomobject]@{ Success=$true; ExitCode=$userResult.ExitCode; Started=$true; Reboot=($userResult.ExitCode -in @(1641,3010)) }
+            return [pscustomobject]@{ Success=$true; ExitCode=$userResult.ExitCode; Started=$true; Reboot=($userResult.ExitCode -in @(1641,3010)); FallbackSafe=$false }
         }
-        $reason = if ($userResult.TimedOut) { 'timed out after 1800 seconds' } else { "failed (exit $($userResult.ExitCode))" }
+        $reason = if ($userResult.TimedOut) { ('timed out after {0} seconds' -f $TimeoutSeconds) } else { "failed (exit $($userResult.ExitCode))" }
         Write-WorkerLog "[Winget/User] Spotify $reason; no elevated retry or concurrent fallback will be launched." "ERROR" -Percent $BasePercent
-        return [pscustomobject]@{ Success=$false; ExitCode=$userResult.ExitCode; Started=[bool]$userResult.Started; Reboot=$false }
+        return [pscustomobject]@{ Success=$false; ExitCode=$userResult.ExitCode; Started=[bool]$userResult.Started; Reboot=$false; FallbackSafe=$false }
     }
 
     try {
         Write-WorkerLog "[Winget] Executing $cmd $TargetId" "INFO" -Percent ($BasePercent + 5)
-        $proc = Invoke-ProcessResult -FilePath $winget.Source -ArgumentList $argumentList -ShowWindow:$Interactive
+        $proc = Invoke-ProcessResult -FilePath $winget.Source -ArgumentList $argumentList -ShowWindow:$Interactive -TimeoutSeconds $TimeoutSeconds
         $ok = Test-ExitSuccess -ExitCode $proc.ExitCode
         $reboot = ($proc.ExitCode -in @(1641, 3010))
         if ($ok) {
             Write-WorkerLog "[Winget] Completed $TargetId (exit $($proc.ExitCode))." "SUCCESS" -Percent ($BasePercent + 20)
         } elseif ($proc.ExitCode -eq -1978335146) {
             Write-WorkerLog "[Winget] $TargetId prohibits elevated execution (0x8A150056); retrying once through the user's Explorer shell." "WARNING" -Percent $BasePercent
-            $userResult = Invoke-WingetUnelevated -WingetPath $winget.Source -Arguments $argumentList -ShowWindow:$Interactive
+            $userResult = Invoke-WingetUnelevated -WingetPath $winget.Source -Arguments $argumentList -ShowWindow:$Interactive -TimeoutSeconds $TimeoutSeconds
             if ($userResult.Success) {
                 Write-WorkerLog "[Winget/User] Completed $TargetId in the non-elevated user context (exit $($userResult.ExitCode))." "SUCCESS" -Percent ($BasePercent + 20)
-                return [pscustomobject]@{ Success=$true; ExitCode=$userResult.ExitCode; Started=$true; Reboot=($userResult.ExitCode -in @(1641,3010)) }
+                return [pscustomobject]@{ Success=$true; ExitCode=$userResult.ExitCode; Started=$true; Reboot=($userResult.ExitCode -in @(1641,3010)); FallbackSafe=$false }
             }
             if ($userResult.TimedOut) {
-                Write-WorkerLog "[Winget/User] $TargetId exceeded the 1800 second wait window; no fallback will be launched." "ERROR" -Percent $BasePercent
+                Write-WorkerLog ("[Winget/User] $TargetId exceeded the configured {0} second wait window; no fallback will be launched." -f $TimeoutSeconds) "ERROR" -Percent $BasePercent
             } else {
                 Write-WorkerLog "[Winget/User] $TargetId failed in the non-elevated context (exit $($userResult.ExitCode)); no concurrent fallback will be launched." "ERROR" -Percent $BasePercent
             }
-            return [pscustomobject]@{ Success=$false; ExitCode=$userResult.ExitCode; Started=$true; Reboot=$false }
+            return [pscustomobject]@{ Success=$false; ExitCode=$userResult.ExitCode; Started=$true; Reboot=$false; FallbackSafe=$false }
         } else {
             Write-WorkerLog "[Winget] Returned code $($proc.ExitCode) for $TargetId." "WARNING" -Percent $BasePercent
         }
-        return [pscustomobject]@{ Success = $ok; ExitCode = $proc.ExitCode; Started = $true; Reboot = $reboot }
+        $fallbackSafe = (-not $proc.TimedOut) -and ($proc.ExitCode -in $wingetNotFoundOrFetchErrors)
+        return [pscustomobject]@{ Success = $ok; ExitCode = $proc.ExitCode; Started = $true; Reboot = $reboot; FallbackSafe = $fallbackSafe }
     }
     catch {
         Write-WorkerLog "[Winget] Error for $TargetId : $_" "WARNING" -Percent $BasePercent
-        return [pscustomobject]@{ Success = $false; ExitCode = -1; Started = $false; Reboot = $false }
+        return [pscustomobject]@{ Success = $false; ExitCode = -1; Started = $false; Reboot = $false; FallbackSafe = $true }
     }
 }
 
@@ -3573,16 +3946,17 @@ function Install-ViaChocolatey {
         [string]$ChocoId,
         [ValidateSet("install", "upgrade")][string]$Action = "install",
         [bool]$Interactive = $false,
-        [int]$BasePercent = 0
+        [int]$BasePercent = 0,
+        [ValidateRange(30,7200)][int]$TimeoutSeconds = 1800
     )
 
     if ([string]::IsNullOrWhiteSpace($ChocoId)) {
-        return [pscustomobject]@{ Success = $false; ExitCode = -1; Reboot = $false; Started = $false }
+        return [pscustomobject]@{ Success = $false; ExitCode = -1; Reboot = $false; Started = $false; FallbackSafe = $true }
     }
 
     $choco = Ensure-Chocolatey
     if (-not $choco) {
-        return [pscustomobject]@{ Success = $false; ExitCode = -1; Reboot = $false; Started = $false }
+        return [pscustomobject]@{ Success = $false; ExitCode = -1; Reboot = $false; Started = $false; FallbackSafe = $true }
     }
 
     $argumentList = @($Action, $ChocoId, "-y", "--no-progress")
@@ -3590,19 +3964,23 @@ function Install-ViaChocolatey {
 
     try {
         Write-WorkerLog "[Chocolatey] Executing $Action $ChocoId" "INFO" -Percent ($BasePercent + 10)
-        $proc = Invoke-ProcessResult -FilePath $choco -ArgumentList $argumentList -ShowWindow:$Interactive
-        $ok = Test-ExitSuccess -ExitCode $proc.ExitCode
+        $proc = Invoke-WorkerCapture -FilePath $choco -ArgumentList $argumentList -TimeoutSeconds $TimeoutSeconds
+        $ok = (-not $proc.TimedOut) -and (Test-ExitSuccess -ExitCode $proc.ExitCode)
         $reboot = ($proc.ExitCode -in @(1641, 3010))
+        $sourceUnavailable = (-not $proc.TimedOut) -and (($proc.Output + ' ' + $proc.Error) -match '(?im)(unable to find package|could not find package|package.+not found|no package found)')
         if ($ok) {
-            Write-WorkerLog "[Chocolatey] Completed $ChocoId (exit $($proc.ExitCode))." "SUCCESS" -Percent ($BasePercent + 20)
+            Write-WorkerLog "[Chocolatey] Completed $ChocoId (exit $($proc.ExitCode), PID $($proc.ProcessId))." 'SUCCESS' -Percent ($BasePercent + 20)
         } else {
-            Write-WorkerLog "[Chocolatey] Returned code $($proc.ExitCode) for $ChocoId." "WARNING" -Percent $BasePercent
+            $detail = (($proc.Error + ' ' + $proc.Output) -replace '\s+',' ').Trim()
+            $detail = [regex]::Replace($detail,'(?i)(https?://[^\s?]+)\?[^\s]+','$1?[REDACTED]')
+            if ($detail.Length -gt 500) { $detail = $detail.Substring(0,500) }
+            Write-WorkerLog ("[Chocolatey] Returned code {0} for {1}; sourceUnavailable={2}; detail={3}" -f $proc.ExitCode,$ChocoId,$sourceUnavailable,$detail) 'WARNING' -Percent $BasePercent
         }
-        return [pscustomobject]@{ Success = $ok; ExitCode = $proc.ExitCode; Reboot = $reboot; Started = $true }
+        return [pscustomobject]@{ Success = $ok; ExitCode = $proc.ExitCode; Reboot = $reboot; Started = $true; TimedOut=[bool]$proc.TimedOut; FallbackSafe=[bool]$sourceUnavailable }
     }
     catch {
         Write-WorkerLog "[Chocolatey] Error for $ChocoId : $_" "WARNING" -Percent $BasePercent
-        return [pscustomobject]@{ Success = $false; ExitCode = -1; Reboot = $false; Started = $true }
+        return [pscustomobject]@{ Success = $false; ExitCode = -1; Reboot = $false; Started = $true; FallbackSafe = $false }
     }
 }
 
@@ -3619,12 +3997,37 @@ function Test-InstallerSignature {
     }
 }
 
+function Test-WorkerAppxPublisher {
+    param([string]$PackagePath,[string]$ExpectedPublisher)
+    $archive=$null; $reader=$null
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+        $archive=[System.IO.Compression.ZipFile]::OpenRead($PackagePath)
+        $entry=$archive.GetEntry('AppxManifest.xml')
+        if(-not $entry){throw 'AppxManifest.xml was not found in the package.'}
+        $entryStream=$entry.Open(); $reader=New-Object -TypeName System.IO.StreamReader -ArgumentList $entryStream
+        $xml=New-Object System.Xml.XmlDocument; $xml.XmlResolver=$null; $xml.LoadXml($reader.ReadToEnd())
+        $identity=$xml.SelectSingleNode("//*[local-name()='Identity']")
+        if(-not $identity){throw 'Package Identity element is missing.'}
+        $publisher=[string]$identity.GetAttribute('Publisher')
+        if([string]::IsNullOrWhiteSpace($publisher)){throw 'Package manifest has no Publisher.'}
+        if($ExpectedPublisher -and $publisher -notlike ("*{0}*" -f $ExpectedPublisher)){throw ("Publisher '{0}' does not match expected '{1}'." -f $publisher,$ExpectedPublisher)}
+        return $true
+    } catch {Write-WorkerLog ("[Direct] AppX/MSIX manifest validation failed: {0}" -f $_.Exception.Message) 'ERROR';return $false}
+    finally {if($reader){try{$reader.Dispose()}catch{}};if($archive){try{$archive.Dispose()}catch{}}}
+}
+
 function Install-ViaDirectDownload {
     param(
         [string]$AppName,
         [string]$Url,
         [string]$InstallerArgs,
         [string]$ExpectedPublisher,
+        [string]$ExpectedSha256 = '',
+        [string]$ExpectedInstallerType = '',
+        [string]$InteractiveInstallerArgs = '',
+        [string[]]$AllowedHosts = @(),
+        [ValidateRange(30,7200)][int]$InstallerTimeoutSeconds = 1800,
         [bool]$Interactive = $false,
         [int]$AppBasePercent = 0,
         [int]$AppStepWeight = 33
@@ -3639,7 +4042,10 @@ function Install-ViaDirectDownload {
     $client = $null
     try {
         $uri = [uri]$Url
-        if ($uri.Scheme -ne "https") { throw "HTTPS is required for direct downloads." }
+        if ($uri.Scheme -ne 'https') { throw 'HTTPS is required for direct downloads.' }
+        if (@($AllowedHosts).Count -gt 0 -and $uri.Host -notin @($AllowedHosts)) {
+            throw ("Download host '{0}' is not in this application's approved host list." -f $uri.Host)
+        }
 
         [Net.ServicePointManager]::SecurityProtocol =
             [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -3653,7 +4059,7 @@ function Install-ViaDirectDownload {
         $client.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
         
         $script:LastReportedPct = -1
-        $client.add_DownloadProgressChanged({
+        $progressHandler = {
             param($sender, $e)
             $downloadPct = $e.ProgressPercentage
             if ($downloadPct -ne $script:LastReportedPct -and ($downloadPct % 5 -eq 0)) {
@@ -3663,16 +4069,43 @@ function Install-ViaDirectDownload {
                 $totalMB = [math]::Round($e.TotalBytesToReceive / 1MB, 1)
                 Write-WorkerLog "[Direct] $AppName Downloading ($downloadPct% - $bytesMB MB / $totalMB MB)..." "INFO" -Percent $calculatedGlobalPct
             }
-        })
+        }
+        $client.add_DownloadProgressChanged($progressHandler)
         
-        $downloadTask = $client.DownloadFileTaskAsync($Url, $downloadPath)
-        while (-not $downloadTask.IsCompleted) {
-            Start-Sleep -Milliseconds 100
+        $downloadCompleted = $false
+        $downloadLastError = $null
+        for ($downloadAttempt = 1; $downloadAttempt -le 3; $downloadAttempt++) {
+            if ($downloadAttempt -gt 1) {
+                Write-WorkerLog "[Direct] Retry $downloadAttempt/3 for $AppName after a transient download failure." 'WARNING' -Percent ($AppBasePercent + 5)
+                if (Test-Path -LiteralPath $downloadPath) { Remove-Item -LiteralPath $downloadPath -Force -ErrorAction SilentlyContinue }
+                if ($client) { try { $client.Dispose() } catch {} }
+                $client = New-Object System.Net.WebClient
+                $client.Headers.Add('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
+                $client.add_DownloadProgressChanged($progressHandler)
+            }
+            $downloadTask = $client.DownloadFileTaskAsync($Url, $downloadPath)
+            $downloadWaitCompleted = $false
+            try { $downloadWaitCompleted = $downloadTask.Wait([TimeSpan]::FromMinutes(10)) } catch { $downloadWaitCompleted = $true }
+            if (-not $downloadWaitCompleted) {
+                try { $client.CancelAsync() } catch {}
+                try { [void]$downloadTask.Wait(5000) } catch {}
+                $downloadLastError = 'Download timed out after 10 minutes.'
+                Write-WorkerLog "[Direct] Attempt $downloadAttempt timed out for $AppName." 'WARNING' -Percent $AppBasePercent
+            } elseif ($downloadTask.IsFaulted) {
+                $downloadLastError = $downloadTask.Exception.GetBaseException().Message
+                Write-WorkerLog "[Direct] Attempt $downloadAttempt failed: $downloadLastError" 'WARNING' -Percent $AppBasePercent
+            } elseif ($downloadTask.IsCanceled) {
+                $downloadLastError = 'Download was cancelled.'
+                Write-WorkerLog "[Direct] Attempt $downloadAttempt was cancelled." 'WARNING' -Percent $AppBasePercent
+            } elseif ((Test-Path -LiteralPath $downloadPath) -and (Get-Item -LiteralPath $downloadPath).Length -ge 10240) {
+                $downloadCompleted = $true
+                break
+            } else {
+                $downloadLastError = 'Downloaded payload is empty or too small.'
+            }
+            if ($downloadAttempt -lt 3) { Start-Sleep -Seconds ([int](2 * $downloadAttempt)) }
         }
-        if ($downloadTask.IsFaulted) { throw $downloadTask.Exception.InnerException }
-        if (!(Test-Path -LiteralPath $downloadPath) -or (Get-Item -LiteralPath $downloadPath).Length -lt 10240) {
-            throw "Downloaded payload is empty or too small."
-        }
+        if (-not $downloadCompleted) { throw ("Download failed after 3 attempts: {0}" -f $downloadLastError) }
 
         $stream = [IO.File]::OpenRead($downloadPath)
         try {
@@ -3689,38 +4122,73 @@ function Install-ViaDirectDownload {
                   $header[2] -eq 0x11 -and $header[3] -eq 0xE0) {
             $kind = "msi"
         } elseif ($read -ge 8 -and $header[0] -eq 0xD0 -and $header[1] -eq 0xCF) {
-            $kind = "msi"
+            $kind = 'msi'
+        } elseif ($read -ge 4 -and $header[0] -eq 0x50 -and $header[1] -eq 0x4B -and
+                  $ExpectedInstallerType -in @('appx','msix')) {
+            # AppX/MSIX are ZIP-based signed packages. Windows deployment validates
+            # package signature and publisher when Add-AppxPackage stages the package.
+            $kind = $ExpectedInstallerType.ToLowerInvariant()
+        } elseif ($ExpectedInstallerType -in @('appx','msix') -and $uri.AbsolutePath -match '(?i)\.(appx|msix)$') {
+            $kind = $Matches[1].ToLowerInvariant()
         }
 
-        if (-not $kind) { throw "Downloaded file is not recognized as an EXE or MSI installer." }
+        if (-not $kind) { throw 'Downloaded file is not recognized as a supported EXE, MSI, APPX or MSIX installer.' }
 
         $finalPath = [IO.Path]::ChangeExtension($downloadPath, ".$kind")
         Move-Item -LiteralPath $downloadPath -Destination $finalPath -Force
         $downloadPath = $finalPath
 
-        if (-not (Test-InstallerSignature -Path $downloadPath -ExpectedPublisher $ExpectedPublisher)) {
-            throw "Installer signature or publisher verification failed."
+        if ($ExpectedInstallerType -and $ExpectedInstallerType.ToLowerInvariant() -notin @('exe','msi','appx','msix')) {
+            throw "Catalog InstallerType must be 'exe', 'msi', 'appx' or 'msix'; received '$ExpectedInstallerType'."
+        }
+        if ($ExpectedInstallerType -and $kind -ne $ExpectedInstallerType.ToLowerInvariant()) {
+            throw ("Installer type mismatch: catalog expects {0}, downloaded payload is {1}." -f $ExpectedInstallerType,$kind)
+        }
+        if ($ExpectedSha256) {
+            if ($ExpectedSha256 -notmatch '^[A-Fa-f0-9]{64}$') { throw 'Catalog SHA-256 value is malformed.' }
+            $actualHash = (Get-FileHash -LiteralPath $downloadPath -Algorithm SHA256 -ErrorAction Stop).Hash
+            if ($actualHash -ine $ExpectedSha256) { throw ("SHA-256 mismatch. Expected {0}; received {1}." -f $ExpectedSha256,$actualHash) }
+            Write-WorkerLog "[Direct] SHA-256 integrity check passed for $AppName." 'SUCCESS' -Percent ($AppBasePercent + 15)
+        }
+        if ($kind -in @('exe','msi')) {
+            if (-not (Test-InstallerSignature -Path $downloadPath -ExpectedPublisher $ExpectedPublisher)) {
+                throw 'Installer signature or publisher verification failed.'
+            }
+        } else {
+            if (-not (Test-WorkerAppxPublisher -PackagePath $downloadPath -ExpectedPublisher $ExpectedPublisher)) { throw 'AppX/MSIX manifest publisher validation failed.' }
+            Write-WorkerLog "[Direct] Manifest publisher matched; Windows AppX Deployment will enforce package signature and trust policy." 'INFO' -Percent ($AppBasePercent + 15)
         }
 
         Write-WorkerLog "[Direct] Executing installer for $AppName..." "INFO" -Percent ($AppBasePercent + [math]::Round($AppStepWeight * 0.8))
 
         # Interactive Install must not inherit silent switches from the catalog's default install recipe.
         $effectiveInstallerArgs = [string]$InstallerArgs
-        if ($Interactive -and $effectiveInstallerArgs) {
+        if ($Interactive -and -not [string]::IsNullOrWhiteSpace($InteractiveInstallerArgs)) {
+            $effectiveInstallerArgs = [string]$InteractiveInstallerArgs
+        } elseif ($Interactive -and $effectiveInstallerArgs) {
             $effectiveInstallerArgs = $effectiveInstallerArgs -replace '(?i)(^|\s)(--silent|/silent|/S|/quiet|--quiet|/verysilent|/qn)(?=\s|$)', ' '
             $effectiveInstallerArgs = ($effectiveInstallerArgs -replace '\s{2,}', ' ').Trim()
         }
 
-        if ($kind -eq "msi") {
+        if ($kind -in @('appx','msix')) {
+            if ($Interactive) { Write-WorkerLog "[Direct] $kind uses native Windows package deployment; no separate wizard is provided by the package format." 'INFO' }
+            $escapedPackagePath = $downloadPath.Replace("'", "''")
+            $deploymentCommand = "try { Add-AppxPackage -Path '$escapedPackagePath' -ErrorAction Stop; exit 0 } catch { [Console]::Error.WriteLine(`$_.Exception.Message); exit 1 }"
+            $encodedDeployment = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($deploymentCommand))
+            $powerShellExe = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            $proc = Invoke-WorkerCapture -FilePath $powerShellExe -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-EncodedCommand',$encodedDeployment) -TimeoutSeconds $InstallerTimeoutSeconds
+            if ($proc.TimedOut) { Write-WorkerLog "[Direct] $kind deployment timed out for $AppName." 'ERROR' }
+            elseif ($proc.ExitCode -ne 0) { Write-WorkerLog ("[Direct] $kind deployment failed: {0}" -f $proc.Error) 'ERROR' }
+        } elseif ($kind -eq "msi") {
             $msiArgs = @("/i", "`"$downloadPath`"")
             if (-not $Interactive) { $msiArgs += @("/qn", "/norestart") }
             if ($effectiveInstallerArgs) { $msiArgs += ($effectiveInstallerArgs -split "\s+" | Where-Object { $_ }) }
-            $proc = Invoke-ProcessResult -FilePath "msiexec.exe" -ArgumentList $msiArgs -ShowWindow:$Interactive
+            $proc = Invoke-ProcessResult -FilePath "msiexec.exe" -ArgumentList $msiArgs -ShowWindow:$Interactive -TimeoutSeconds $InstallerTimeoutSeconds
         } else {
             # Keep the EXE argument string intact so quoted paths (e.g. AnyDesk --install "C:\Program Files...") survive.
             $exeArgs = @()
             if ($effectiveInstallerArgs) { $exeArgs = @($effectiveInstallerArgs) }
-            $proc = Invoke-ProcessResult -FilePath $downloadPath -ArgumentList $exeArgs -ShowWindow:$Interactive
+            $proc = Invoke-ProcessResult -FilePath $downloadPath -ArgumentList $exeArgs -ShowWindow:$Interactive -TimeoutSeconds $InstallerTimeoutSeconds
         }
 
         $ok = Test-ExitSuccess -ExitCode $proc.ExitCode
@@ -3745,6 +4213,8 @@ function Install-ViaDirectDownload {
 }
 
 $successCount = 0
+$unverifiedCount = 0
+$cancelledCount = 0
 $failedCount  = 0
 $skippedCount = 0
 $rebootNeeded = $false
@@ -3755,18 +4225,21 @@ $appIndex = 0
 
 $wingetNotFoundOrFetchErrors = @(
     -1,           # Winget unavailable or process did not start
-    0x80190194,   # HTTP 404 while resolving/downloading source data
+    0x80190194,   # HTTP 404 unsigned HRESULT
+    -2145844844,  # HTTP 404 signed Int32 HRESULT
     -1978335212,  # 0x8A150014 - NO_APPLICATIONS_FOUND
     -1978335209,  # 0x8A150017 - NO_MANIFEST_FOUND
     -1978335214   # 0x8A150012 - SOURCE_NAME_DOES_NOT_EXIST
 )
 
 foreach ($app in $Apps) {
+    $name = [string]$app.Name
+    try {
+    $appStartedAt = Get-Date
     $appIndex++
     $appBasePercent = [math]::Round((($appIndex - 1) / $totalApps) * 100)
     $appStepWeight  = [math]::Round((1 / $totalApps) * 100)
     
-    $name = [string]$app.Name
     $configuredId = [string]$app.Id
     $chocoId = [string]$app.ChocoId
     $wasInstalled = Test-WorkerInstalled -AppName $name -AppId $configuredId -ChocoId $chocoId
@@ -3786,8 +4259,10 @@ foreach ($app in $Apps) {
         continue
     }
 
+    Write-WorkerLog ("APP-BEGIN | Name={0} | Action={1} | WingetId={2} | ChocolateyId={3} | Interactive={4}" -f $name,$ActionCommand,$configuredId,$chocoId,$Interactive) 'INFO' -Percent $appBasePercent
     Write-WorkerLog "Processing $name ($appIndex of $totalApps)..." "INFO" -Percent $appBasePercent
     $done = $false
+    $packageManagerSucceeded = $false
     $appReboot = $false
     $lastExitCode = -1
     $chocoResult = $null
@@ -3795,13 +4270,13 @@ foreach ($app in $Apps) {
     # Tier 1: native MSI repair when the installed product exposes a Windows Installer product code.
     # Other installers use Winget's force-reinstall path as a best-effort repair fallback.
     if ($ActionCommand -eq 'repair') {
-        $wingetResult = Invoke-WorkerMsiRepair -AppName $name -Interactive:$Interactive -BasePercent $appBasePercent
+        $wingetResult = Invoke-WorkerMsiRepair -AppName $name -Interactive:$Interactive -BasePercent $appBasePercent -TimeoutSeconds ([int]$app.InstallTimeoutSeconds)
         if ($null -eq $wingetResult) {
             Write-WorkerLog "[$name] No native MSI repair entry found; attempting Winget force-reinstall as best-effort repair." "INFO" -Percent $appBasePercent
-            $wingetResult = Install-ViaWinget -TargetId $id -ActionCommand $ActionCommand -ExtraFlags "" -Interactive:$Interactive -BasePercent $appBasePercent
+            $wingetResult = Install-ViaWinget -TargetId $id -ActionCommand $ActionCommand -ExtraFlags "" -Interactive:$Interactive -BasePercent $appBasePercent -TimeoutSeconds ([int]$app.InstallTimeoutSeconds)
         }
     } else {
-        $wingetResult = Install-ViaWinget -TargetId $id -ActionCommand $ActionCommand -ExtraFlags "" -Interactive:$Interactive -BasePercent $appBasePercent
+        $wingetResult = Install-ViaWinget -TargetId $id -ActionCommand $ActionCommand -ExtraFlags "" -Interactive:$Interactive -BasePercent $appBasePercent -TimeoutSeconds ([int]$app.InstallTimeoutSeconds)
     }
     $lastExitCode = $wingetResult.ExitCode
     if ($wingetResult.Reboot) { $appReboot = $true }
@@ -3815,12 +4290,27 @@ foreach ($app in $Apps) {
         continue
     }
 
+    if ($ActionCommand -eq "install" -and $wingetResult.ExitCode -eq -1978335189) {
+        # Winget can return UPDATE_NOT_APPLICABLE when the package is already present.
+        # Never count this as skipped unless registry/AppX/Winget inventory confirms it.
+        $confirmedInstalled = Test-WorkerInstalled -AppName $name -AppId $id -ChocoId $chocoId -SkipWinget
+        if ($confirmedInstalled) {
+            Write-WorkerLog "[$name] Winget reported no applicable install action and local inventory confirms it is already installed; skipped." "SUCCESS" -Percent ($appBasePercent + $appStepWeight)
+            $skippedCount++
+            [void]$results.Add([pscustomobject]@{ Name=$name; Status="Skipped"; ExitCode=$wingetResult.ExitCode })
+            continue
+        }
+        Write-WorkerLog "[$name] Winget returned UPDATE_NOT_APPLICABLE, but local installed-state verification did not confirm the app; marking this attempt failed without launching a conflicting fallback." "WARNING" -Percent $appBasePercent
+    }
+
     if ($wingetResult.Success) {
-        # A successful exact-ID package-manager exit is authoritative for all actions.
-        # Registry correlation is advisory only; it must never trigger a second installer.
         $done = $true
-        if ($ActionCommand -eq "install" -and -not (Test-WorkerInstalled -AppName $name -AppId $id -ChocoId $chocoId)) {
-            Write-WorkerLog "[$name] Winget reported success; registry correlation is not yet visible, accepting the verified package-manager result." "WARNING" -Percent $appBasePercent
+        if ($ActionCommand -eq 'install') {
+            $verified = Wait-WorkerInstalled -AppName $name -AppId $id -ChocoId $chocoId -TimeoutSeconds 45
+            if (-not $verified) {
+                $done = $false; $packageManagerSucceeded = $true
+                Write-WorkerLog "[$name] Winget exited successfully, but installed-state verification timed out. Marked SuccessUnverified; no fallback installer will run." 'WARNING' -Percent $appBasePercent
+            }
         }
     } else {
         if ($wingetResult.Started -and ($wingetResult.ExitCode -notin $wingetNotFoundOrFetchErrors)) {
@@ -3833,20 +4323,23 @@ foreach ($app in $Apps) {
 
     # Tier 2: Chocolatey fallback. In Interactive mode it is deliberately skipped because
     # Chocolatey package scripts commonly enforce silent installer switches regardless of console visibility.
-    $allowFallback = ($wingetResult.Success -or -not $wingetResult.Started -or ($wingetResult.ExitCode -in $wingetNotFoundOrFetchErrors))
+    # A package manager that returned success owns the install attempt even when
+    # registry/AppX visibility is delayed; never launch a second installer in that case.
+    $allowFallback = (-not $wingetResult.Success) -and [bool]$wingetResult.FallbackSafe
     if (-not $done -and $allowFallback -and $ActionCommand -ne "repair" -and -not $Interactive -and -not [string]::IsNullOrWhiteSpace($chocoId)) {
         $chocoAction = if ($ActionCommand -eq "install") { "install" } else { "upgrade" }
-        $chocoResult = Install-ViaChocolatey -ChocoId $chocoId -Action $chocoAction -Interactive:$Interactive -BasePercent $appBasePercent
+        $chocoResult = Install-ViaChocolatey -ChocoId $chocoId -Action $chocoAction -Interactive:$Interactive -BasePercent $appBasePercent -TimeoutSeconds ([int]$app.InstallTimeoutSeconds)
         $lastExitCode = $chocoResult.ExitCode
         if ($chocoResult.Reboot) { $appReboot = $true }
 
         if ($chocoResult.Success) {
             $done = $true
-            if ($ActionCommand -eq "install" -and -not (Test-WorkerInstalled -AppName $name -AppId $id -ChocoId $chocoId)) {
-                Write-WorkerLog "[$name] Chocolatey reported success; registry correlation is not yet visible, accepting the package-manager result." "WARNING" -Percent $appBasePercent
+            if ($ActionCommand -eq 'install') {
+                $verified = Wait-WorkerInstalled -AppName $name -AppId $id -ChocoId $chocoId -TimeoutSeconds 45
+                if (-not $verified) { $done = $false; $packageManagerSucceeded = $true; Write-WorkerLog "[$name] Chocolatey exit code was successful, but installed-state verification timed out. Marked SuccessUnverified; no second installer will run." 'WARNING' -Percent $appBasePercent }
             }
         } else {
-            Write-WorkerLog "[$name] Chocolatey failed (exit $($chocoResult.ExitCode)); attempting Direct Download..." "WARNING" -Percent $appBasePercent
+            Write-WorkerLog "[$name] Chocolatey failed (exit $($chocoResult.ExitCode)); direct fallback requires a classified package-source miss." 'WARNING' -Percent $appBasePercent
         }
     }
 
@@ -3856,52 +4349,86 @@ foreach ($app in $Apps) {
 
     # Tier 3: Direct Download. Direct installers are permitted only for fresh installs. An EXE/MSI URL does not
     # guarantee a safe in-place upgrade and must never be used as an implicit upgrade path.
-    $allowDirectFallback = $allowFallback -and ($null -eq $chocoResult -or $chocoResult.Success -or -not $chocoResult.Started)
+    $allowDirectFallback = (-not $packageManagerSucceeded) -and $allowFallback -and ($null -eq $chocoResult -or [bool]$chocoResult.FallbackSafe)
     if (-not $done -and $allowDirectFallback -and $ActionCommand -eq "install") {
 
         $directResult = Install-ViaDirectDownload -AppName $name -Url ([string]$app.DirectUrl) `
             -InstallerArgs ([string]$app.DirectArgs) -ExpectedPublisher ([string]$app.Publisher) `
+            -ExpectedSha256 ([string]$app.Sha256) -ExpectedInstallerType ([string]$app.InstallerType) `
+            -InteractiveInstallerArgs ([string]$app.InteractiveArgs) -AllowedHosts @($app.AllowedHosts) `
+            -InstallerTimeoutSeconds ([int]$app.InstallTimeoutSeconds) `
             -Interactive:$Interactive -AppBasePercent $appBasePercent -AppStepWeight $appStepWeight
         $lastExitCode = $directResult.ExitCode
         if ($directResult.Reboot) { $appReboot = $true }
 
         if ($directResult.Success) {
-            if (Test-WorkerInstalled -AppName $name -AppId $id -ChocoId $chocoId) {
+            if (Wait-WorkerInstalled -AppName $name -AppId $id -ChocoId $chocoId -TimeoutSeconds 45) {
                 $done = $true
             } else {
-                Write-WorkerLog "[$name] Direct Download installer executed, but registry verification failed." "WARNING" -Percent $appBasePercent
+                $packageManagerSucceeded = $true
+                Write-WorkerLog "[$name] Direct installer exited successfully, but installed-state verification timed out. Marked SuccessUnverified." 'WARNING' -Percent $appBasePercent
             }
         }
     }
 
     if ($appReboot) { $rebootNeeded = $true }
 
-    if ($done) {
+    if ($lastExitCode -in @(1602,1223)) {
+        $cancelledCount++
+        Write-WorkerLog "[$name] installation cancelled by user (exit $lastExitCode); no fallback will run." 'WARNING' -Percent ($appBasePercent + $appStepWeight)
+        [void]$results.Add([pscustomobject]@{ Name=$name; Status='Cancelled'; ExitCode=$lastExitCode })
+    } elseif ($done) {
         $successCount++
-        $successDescription = if ($ActionCommand -eq "install") { "completed successfully and verified in the system" } else { "completed successfully (package-manager exit code verified)" }
-        Write-WorkerLog "[$name] $successDescription." "SUCCESS" -Percent ($appBasePercent + $appStepWeight)
-        [void]$results.Add([pscustomobject]@{ Name=$name; Status="Success"; ExitCode=$lastExitCode })
+        $successStatus = if ($appReboot) { 'NeedsReboot' } else { 'SuccessVerified' }
+        Write-WorkerLog "[$name] completed and installed-state verification passed." 'SUCCESS' -Percent ($appBasePercent + $appStepWeight)
+        [void]$results.Add([pscustomobject]@{ Name=$name; Status=$successStatus; ExitCode=$lastExitCode })
+    } elseif ($packageManagerSucceeded) {
+        $unverifiedCount++
+        Write-WorkerLog "[$name] installer/package manager reported success, but verification evidence is unavailable. Review diagnostics; no duplicate install was attempted." 'WARNING' -Percent ($appBasePercent + $appStepWeight)
+        [void]$results.Add([pscustomobject]@{ Name=$name; Status='SuccessUnverified'; ExitCode=$lastExitCode })
     } else {
         $failedCount++
-        Write-WorkerLog "[$name] failed in all applicable tiers or unverified in registry; continuing queue." "ERROR" -Percent ($appBasePercent + $appStepWeight)
-        [void]$results.Add([pscustomobject]@{ Name=$name; Status="Failed"; ExitCode=$lastExitCode })
+        Write-WorkerLog "[$name] failed in all applicable tiers; continuing queue." 'ERROR' -Percent ($appBasePercent + $appStepWeight)
+        [void]$results.Add([pscustomobject]@{ Name=$name; Status='Failed'; ExitCode=$lastExitCode })
+    }
+    $appElapsed = [math]::Round(((Get-Date) - $appStartedAt).TotalSeconds,1)
+    Write-WorkerLog ("APP-END | Name={0} | ElapsedSeconds={1} | ExitCode={2} | Verified={3}" -f $name,$appElapsed,$lastExitCode,$done) 'INFO'
+    } catch {
+        $failedCount++
+        $appError = $_.Exception.Message
+        Write-WorkerLog ("APP-EXCEPTION | Name={0} | Error={1} | Queue will continue." -f $name,$appError) 'ERROR'
+        [void]$results.Add([pscustomobject]@{ Name=$name; Status='FailedException'; ExitCode=-1; Error=$appError })
+        continue
     }
 }
-
-Write-WorkerLog "Queue completed." "SUCCESS" -Percent 100
 
 $workerSummary = [pscustomobject]@{
     ActionName   = $ActionName
     SuccessCount = $successCount
+    UnverifiedCount = $unverifiedCount
+    CancelledCount = $cancelledCount
     FailedCount  = $failedCount
     SkippedCount = $skippedCount
     RebootNeeded = $rebootNeeded
-    Results      = @($results)
+    Results      = $results.ToArray()
 }
-# Publish the summary through a thread-safe side channel before returning it to the pipeline.
-# This keeps the UI completion path reliable even if PowerShell's EndInvoke output binder fails.
-[void]$ResultQueue.Enqueue($workerSummary)
-return
+# Publish completion through an atomic file handoff. This avoids PowerShell 5.1
+# generic-collection marshaling and shared-object visibility edge cases between runspaces.
+try {
+    $workerSummaryJson = ConvertTo-Json -InputObject $workerSummary -Depth 8 -Compress
+    if ([string]::IsNullOrWhiteSpace($workerSummaryJson)) { throw 'Worker summary serialization returned an empty payload.' }
+    if ([string]::IsNullOrWhiteSpace($CompletionFilePath)) { throw 'Completion file path was not supplied to the worker.' }
+    $completionTempPath = $CompletionFilePath + '.tmp.' + [guid]::NewGuid().ToString('N')
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($completionTempPath, [string]$workerSummaryJson, $utf8NoBom)
+    if ([System.IO.File]::Exists($CompletionFilePath)) { [System.IO.File]::Delete($CompletionFilePath) }
+    [System.IO.File]::Move($completionTempPath, $CompletionFilePath)
+    Write-WorkerLog ("WORKER-PUBLISH | Summary payload committed ({0} characters)." -f $workerSummaryJson.Length) 'INFO'
+} catch {
+    Write-WorkerLog ("WORKER-PUBLISH-ERROR | {0}" -f $_.Exception.Message) 'ERROR'
+    throw
+}
+Write-WorkerLog "Queue completed." "SUCCESS" -Percent 100
 '@
 
 function Set-AMRInstallButtonsEnabled {
@@ -3954,6 +4481,7 @@ function Complete-AMRInstallQueue {
     $script:InstallAsyncResult = $null
     $script:InstallOutput = $null
     $script:InstallResultQueue = $null
+    if ($script:InstallCompletionFile) { try { Remove-Item -LiteralPath $script:InstallCompletionFile -Force -ErrorAction SilentlyContinue } catch {}; $script:InstallCompletionFile = $null }
     $script:InstallRunning = $false
 
     foreach ($app in $script:SoftwareCatalog) { $app.IsSelected = $false }
@@ -3974,7 +4502,9 @@ function Complete-AMRInstallQueue {
     }
 
     $summary = "$($Result.ActionName) Summary:`n`n" +
-               "✔ Successfully processed: $($Result.SuccessCount)`n" +
+               "✔ Verified successes: $($Result.SuccessCount)`n" +
+               "⚠ Success, verification pending: $($Result.UnverifiedCount)`n" +
+               "↩ Cancelled: $($Result.CancelledCount)`n" +
                "⏭ Skipped (already installed): $($Result.SkippedCount)`n" +
                "❌ Failed: $($Result.FailedCount)"
 
@@ -3983,8 +4513,8 @@ function Complete-AMRInstallQueue {
     }
 
     $script:ProgressBar.Value = 100
-    $script:ProgressText.Text = "Finished: $($Result.SuccessCount) Succeeded, $($Result.SkippedCount) Skipped, $($Result.FailedCount) Failed."
-    Write-AMRLog "Queue finished. Success: $($Result.SuccessCount), Skipped: $($Result.SkippedCount), Failed: $($Result.FailedCount)." SUCCESS Software
+    $script:ProgressText.Text = "Finished: $($Result.SuccessCount) Verified, $($Result.UnverifiedCount) Unverified, $($Result.CancelledCount) Cancelled, $($Result.SkippedCount) Skipped, $($Result.FailedCount) Failed."
+    Write-AMRLog "Queue finished. Verified: $($Result.SuccessCount), Unverified: $($Result.UnverifiedCount), Cancelled: $($Result.CancelledCount), Skipped: $($Result.SkippedCount), Failed: $($Result.FailedCount)." SUCCESS Software
     Show-AMRMessage $summary "Operation Summary" OK Information | Out-Null
 }
 
@@ -4018,6 +4548,11 @@ function Execute-SmartMultiTierInstallAsync {
                 DirectUrl  = [string]$_.DirectUrl
                 DirectArgs = [string]$_.DirectArgs
                 Publisher  = [string]$_.Publisher
+                Sha256     = [string]$_.Sha256
+                InstallerType = [string]$_.InstallerType
+                InteractiveArgs = [string]$_.InteractiveArgs
+                AllowedHosts = @($_.AllowedHosts)
+                InstallTimeoutSeconds = if ($_.InstallTimeoutSeconds) { [int]$_.InstallTimeoutSeconds } else { 1800 }
             }
         }
     )
@@ -4047,6 +4582,7 @@ function Execute-SmartMultiTierInstallAsync {
         $script:InstallRunspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
         $script:InstallRunspace.Open()
 
+        $script:InstallCompletionFile = Join-Path ([IO.Path]::GetTempPath()) ('AMR_SW_COMPLETION_' + [guid]::NewGuid().ToString('N') + '.json')
         $script:InstallPowerShell = [PowerShell]::Create()
         $script:InstallPowerShell.Runspace = $script:InstallRunspace
 
@@ -4057,12 +4593,9 @@ function Execute-SmartMultiTierInstallAsync {
         [void]$script:InstallPowerShell.AddArgument([bool]$Interactive)
         [void]$script:InstallPowerShell.AddArgument($script:DownloadDir)
         [void]$script:InstallPowerShell.AddArgument($script:InstallLogQueue)
-        $script:InstallResultQueue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
-        [void]$script:InstallPowerShell.AddArgument($script:InstallResultQueue)
-
+        [void]$script:InstallPowerShell.AddArgument([string]$script:InstallCompletionFile)
         $script:InstallOutput = $null
-        # Use the parameterless BeginInvoke overload and consume its result exactly once
-        # with EndInvoke on the UI dispatcher after IsCompleted becomes true.
+        # Start asynchronously; the worker commits one summary to its unique completion file.
         $script:InstallAsyncResult = $script:InstallPowerShell.BeginInvoke()
 
         $script:InstallTimer = New-Object System.Windows.Threading.DispatcherTimer
@@ -4093,37 +4626,65 @@ function Execute-SmartMultiTierInstallAsync {
                 if ($script:InstallTimer) { $script:InstallTimer.Stop() }
                 $resultObject = $null
                 $errorMessage = ''
-                $endInvokeWarning = ''
                 try {
-                    # The worker summary is delivered through InstallResultQueue; no complex
-                    # objects are emitted into the pipeline. EndInvoke only closes the async call.
-                    $asyncHandle = [System.IAsyncResult]$script:InstallAsyncResult
-                    $endInvokeMethod = [System.Management.Automation.PowerShell].GetMethod('EndInvoke', [type[]]@([System.IAsyncResult]))
-                    if (-not $endInvokeMethod) { throw 'PowerShell EndInvoke(IAsyncResult) method was not found.' }
-                    # The worker summary is returned through InstallResultQueue, not pipeline output.
-                    [void]$endInvokeMethod.Invoke($script:InstallPowerShell, [object[]]@($asyncHandle))
-                } catch {
-                    $endInvokeWarning = $_.Exception.Message
-                }
-
-                # Prefer the worker's thread-safe summary queue if EndInvoke could not materialize output.
-                if (-not $resultObject -and $script:InstallResultQueue) {
-                    $queuedSummary = $null
-                    if ($script:InstallResultQueue.TryDequeue([ref]$queuedSummary)) {
-                        $resultObject = $queuedSummary
+                    # Read the atomically committed worker summary from its unique file.
+                    $summaryPayload = [string]::Empty
+                    if ($script:InstallCompletionFile -and [System.IO.File]::Exists($script:InstallCompletionFile)) {
+                        $summaryPayload = [System.IO.File]::ReadAllText($script:InstallCompletionFile)
+                        if ([string]::IsNullOrWhiteSpace($summaryPayload)) {
+                            $errorMessage = 'The installation worker published an empty completion payload.'
+                        } else {
+                            try {
+                                $resultObject = ConvertFrom-Json -InputObject $summaryPayload -ErrorAction Stop
+                                # Normal completion summaries do not contain WorkerError fields.
+                                # Under StrictMode, reading a missing PSCustomObject property throws;
+                                # inspect the property collection before reading optional diagnostics.
+                                if ($null -ne $resultObject) {
+                                    $workerErrorProperty = $resultObject.PSObject.Properties['WorkerError']
+                                    if ($workerErrorProperty -and -not [string]::IsNullOrWhiteSpace([string]$workerErrorProperty.Value)) {
+                                        $workerDiagnostic = "Worker fatal error: $([string]$workerErrorProperty.Value)"
+                                        $workerErrorTypeProperty = $resultObject.PSObject.Properties['WorkerErrorType']
+                                        $workerStackProperty = $resultObject.PSObject.Properties['WorkerStackTrace']
+                                        if ($workerErrorTypeProperty -and $workerErrorTypeProperty.Value) { $workerDiagnostic += " | Type=$([string]$workerErrorTypeProperty.Value)" }
+                                        if ($workerStackProperty -and $workerStackProperty.Value) { $workerDiagnostic += " | Stack=$([string]$workerStackProperty.Value)" }
+                                        $errorMessage = $workerDiagnostic
+                                    }
+                                }
+                            } catch {
+                                $errorMessage = 'The installation worker published an unreadable completion payload: ' + $_.Exception.Message
+                            }
+                        }
+                    } else {
+                        $workerState = 'Unknown'
+                        $workerReason = ''
+                        try {
+                            if ($script:InstallPowerShell -and $script:InstallPowerShell.InvocationStateInfo) {
+                                $workerState = [string]$script:InstallPowerShell.InvocationStateInfo.State
+                                if ($script:InstallPowerShell.InvocationStateInfo.Reason) {
+                                    $workerReason = [string]$script:InstallPowerShell.InvocationStateInfo.Reason.Exception.Message
+                                }
+                            }
+                        } catch {}
+                        $errorMessage = "The installation worker ended without committing its completion file. WorkerState=$workerState. $workerReason Check WORKER-PUBLISH diagnostics and the PowerShell error stream."
                     }
+                } catch {
+                    $errorMessage = $_.Exception.Message
                 }
 
                 if ($script:InstallPowerShell.Streams.Error.Count -gt 0) {
-                    $streamErrors = ($script:InstallPowerShell.Streams.Error | ForEach-Object { $_.ToString() }) -join "`n"
+                    $streamErrors = ($script:InstallPowerShell.Streams.Error | ForEach-Object {
+                        $detail = $_.ToString()
+                        if ($_.InvocationInfo -and $_.InvocationInfo.PositionMessage) { $detail += "`n" + $_.InvocationInfo.PositionMessage }
+                        if ($_.ScriptStackTrace) { $detail += "`nStack: " + $_.ScriptStackTrace }
+                        $detail
+                    }) -join "`n--- Worker Error ---`n"
+                    Write-AMRLog ("WORKER-ERROR-STREAM | " + $streamErrors) ERROR Software
                     if (-not $resultObject) { $errorMessage = $streamErrors }
                     else { Write-AMRLog "Worker reported non-terminating errors: $streamErrors" WARNING Software }
                 }
 
-                if ($resultObject -and $endInvokeWarning) {
-                    Write-AMRLog "EndInvoke output retrieval warning (worker summary was recovered safely): $endInvokeWarning" WARNING Software
-                } elseif (-not $resultObject) {
-                    $errorMessage = if ($endInvokeWarning) { $endInvokeWarning } else { "The worker completed but did not return a valid summary object." }
+                if (-not $resultObject -and -not $errorMessage) {
+                    $errorMessage = "The worker completed but did not return a valid summary object."
                 }
 
                 Complete-AMRInstallQueue -Result $resultObject -ErrorText $errorMessage
