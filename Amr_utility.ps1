@@ -1552,6 +1552,116 @@ function Initialize-AMRSoftwareIcons {
 
 Initialize-AMRSoftwareIcons -Apps @($RawApps)
 
+# --- TARGETED ICON HOTFIX: REFRESH ONLY THE THREE REPLACED FILES FROM GITHUB ---
+# The general 500-icon archive remains unchanged. These three files are published
+# individually in the repository's Icons folder and must override any stale local
+# cache copies (and any older copies contained in the general archive).
+$script:IconFixBaseUrl = 'https://raw.githubusercontent.com/3mr10aa/Amr_tools/main/Icons'
+$script:IconFixVersion = '20261104-v1'
+$script:IconFixMarkerPath = Join-Path $script:DownloadDir ("AMR_IconFix_{0}.stamp" -f $script:IconFixVersion)
+$script:IconFixFiles = @(
+    [pscustomobject]@{ Id='MiniTool.PartitionWizard'; FileName='MiniTool.PartitionWizard.png' },
+    [pscustomobject]@{ Id='KoodoReader.KoodoReader'; FileName='KoodoReader.KoodoReader.png' },
+    [pscustomobject]@{ Id='ventoy.ventoy'; FileName='ventoy.ventoy.png' }
+)
+
+function Test-AMRPNGFile {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $stream = $null
+    try {
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+        $stream = [System.IO.File]::OpenRead($Path)
+        if ($stream.Length -lt 128) { return $false }
+
+        # Check the PNG signature and IHDR chunk before accepting a downloaded file.
+        $header = New-Object byte[] 24
+        if ($stream.Read($header, 0, $header.Length) -ne $header.Length) { return $false }
+        $signature = [byte[]](137,80,78,71,13,10,26,10)
+        for ($i = 0; $i -lt $signature.Length; $i++) {
+            if ($header[$i] -ne $signature[$i]) { return $false }
+        }
+        if ($header[12] -ne 73 -or $header[13] -ne 72 -or $header[14] -ne 68 -or $header[15] -ne 82) {
+            return $false
+        }
+
+        $width = [System.Net.IPAddress]::NetworkToHostOrder([BitConverter]::ToInt32($header, 16))
+        $height = [System.Net.IPAddress]::NetworkToHostOrder([BitConverter]::ToInt32($header, 20))
+        return ($width -gt 0 -and $height -gt 0)
+    }
+    catch { return $false }
+    finally { if ($null -ne $stream) { $stream.Dispose() } }
+}
+
+function Update-AMRFixedSoftwareIcons {
+    # Skip the network request only when this patch version succeeded previously
+    # AND all three resulting cache files are still valid PNG files.
+    $allCachedAndValid = $true
+    foreach ($icon in $script:IconFixFiles) {
+        $cachedPath = Join-Path $script:IconDir ($icon.Id + '.png')
+        if (-not (Test-AMRPNGFile -Path $cachedPath)) {
+            $allCachedAndValid = $false
+            break
+        }
+    }
+    if ((Test-Path -LiteralPath $script:IconFixMarkerPath -PathType Leaf) -and $allCachedAndValid) {
+        Write-AMRLog 'The three targeted software icons are already refreshed and validated.' INFO Software
+        return
+    }
+
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+    $updated = 0
+    foreach ($icon in $script:IconFixFiles) {
+        $targetPath = Join-Path $script:IconDir ($icon.Id + '.png')
+        $tempPath = Join-Path $script:DownloadDir ("AMR_{0}_{1}.download" -f $icon.Id,$script:IconFixVersion)
+        try {
+            Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+            $iconUrl = '{0}/{1}?v={2}' -f $script:IconFixBaseUrl,$icon.FileName,$script:IconFixVersion
+            Invoke-WebRequest -Uri $iconUrl -OutFile $tempPath -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+
+            if (-not (Test-AMRPNGFile -Path $tempPath)) {
+                throw ("The downloaded file failed PNG validation: {0}" -f $icon.FileName)
+            }
+
+            # Replace the existing cache file only after the temporary download validates.
+            Move-Item -LiteralPath $tempPath -Destination $targetPath -Force -ErrorAction Stop
+            if (-not (Test-AMRPNGFile -Path $targetPath)) {
+                throw ("The refreshed cache file failed validation: {0}" -f $icon.FileName)
+            }
+            $updated++
+            Write-AMRLog ("Refreshed software icon cache: {0}." -f $icon.Id) SUCCESS Software
+        }
+        catch {
+            Write-AMRLog ("Could not refresh software icon {0}: {1}" -f $icon.Id,$_.Exception.Message) WARNING Software
+        }
+        finally {
+            if (Test-Path -LiteralPath $tempPath) {
+                Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    if ($updated -eq $script:IconFixFiles.Count) {
+        try {
+            Set-Content -LiteralPath $script:IconFixMarkerPath -Value $script:IconFixVersion -Encoding ASCII -Force -ErrorAction Stop
+            Write-AMRLog 'All three targeted software icons were downloaded, validated, and cached successfully.' SUCCESS Software
+        }
+        catch {
+            # Marker failure must not prevent the utility from starting; the icons are already refreshed.
+            Write-AMRLog ("Icons were refreshed, but the update marker could not be saved: {0}" -f $_.Exception.Message) WARNING Software
+        }
+    }
+    else {
+        # No success marker: a later launch will retry any failed refreshes.
+        Remove-Item -LiteralPath $script:IconFixMarkerPath -Force -ErrorAction SilentlyContinue
+        Write-AMRLog ("Targeted icon refresh incomplete ({0}/{1}); it will retry on the next launch." -f $updated,$script:IconFixFiles.Count) WARNING Software
+    }
+}
+
+# Run AFTER the general archive initializer so these three current files always win
+# over older copies in the archive or in ProgramData\AMR-Utility\Icons.
+Update-AMRFixedSoftwareIcons
+
 # Convert icon files to frozen WPF ImageSource objects.
 # WPF Image.Source expects an ImageSource, not a plain filesystem path string.
 function Get-AMRIconImageSource {
