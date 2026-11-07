@@ -160,7 +160,9 @@ function Register-AMRExceptionHandlers {
     }
 
     try {
-        $script:TaskUnhandledHandler = [System.Threading.Tasks.UnobservedTaskExceptionEventHandler]{
+        # TaskScheduler.UnobservedTaskException uses EventHandler<TEventArgs>;
+        # there is no UnobservedTaskExceptionEventHandler type in .NET.
+        $script:TaskUnhandledHandler = [System.EventHandler[System.Threading.Tasks.UnobservedTaskExceptionEventArgs]]{
             param($sender, $eventArgs)
             try {
                 Write-AMRDiagnostic -Severity 'ERROR' -Area 'Async' -Operation 'UnobservedTaskException' -Message 'An unobserved background task exception was captured.' -ErrorRecord $eventArgs.Exception
@@ -1825,6 +1827,13 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
        <ContentPresenter x:Name="ContentSite" VerticalAlignment="Center" HorizontalAlignment="Center" ContentSource="Header"/>
       </Border>
       <ControlTemplate.Triggers>
+       <!-- Subtle hover feedback using the existing main-tab blue palette. -->
+       <Trigger Property="IsMouseOver" Value="True">
+        <Setter TargetName="Border" Property="Background" Value="#334B75"/>
+        <Setter TargetName="Border" Property="BorderBrush" Value="#4B78C2"/>
+        <Setter Property="Foreground" Value="#EAF2FF"/>
+       </Trigger>
+       <!-- Keep the selected tab's original appearance above the hover state. -->
        <Trigger Property="IsSelected" Value="True">
         <Setter TargetName="Border" Property="Background" Value="#2563EB"/>
         <Setter TargetName="Border" Property="BorderBrush" Value="#3B82F6"/>
@@ -2050,22 +2059,64 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
        </Grid>
       </Grid>
       
-      <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
-       <ItemsControl Name="SoftwareGrid" Margin="0,5,0,0">
-        <ItemsControl.GroupStyle>
-         <GroupStyle>
-          <GroupStyle.Panel>
+      <Grid Grid.Row="1" Margin="0,0,0,4">
+       <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="190"/>
+        <ColumnDefinition Width="*"/>
+       </Grid.ColumnDefinitions>
+
+       <Border Grid.Column="0" Margin="0,5,12,5" Background="#202B3B"
+               BorderBrush="#30445F" BorderThickness="1" CornerRadius="10" Padding="10">
+        <DockPanel LastChildFill="True">
+         <TextBlock DockPanel.Dock="Top" Text="CATEGORIES" FontSize="11"
+                    FontWeight="Bold" Foreground="#8FB8E8" Margin="5,3,5,10"/>
+         <ListBox Name="SoftwareCategoryList"
+                  Background="Transparent" BorderThickness="0" Foreground="#DCE8F7"
+                  ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                  ScrollViewer.VerticalScrollBarVisibility="Hidden"
+                  SelectionMode="Single">
+          <ListBox.ItemsPanel>
            <ItemsPanelTemplate><StackPanel Orientation="Vertical"/></ItemsPanelTemplate>
-          </GroupStyle.Panel>
-          <GroupStyle.HeaderTemplate>
-           <DataTemplate>
-            <Border BorderBrush="#3F3F46" BorderThickness="0,0,0,1" Margin="10,20,10,15" Padding="0,0,0,8">
-             <TextBlock Text="{Binding Name}" FontSize="18" FontWeight="SemiBold" Foreground="#3B82F6"/>
-            </Border>
-           </DataTemplate>
-          </GroupStyle.HeaderTemplate>
-         </GroupStyle>
-        </ItemsControl.GroupStyle>
+          </ListBox.ItemsPanel>
+          <ListBox.Resources>
+           <Style TargetType="ListBoxItem">
+            <Setter Property="Foreground" Value="#C9D8EA"/>
+            <Setter Property="Background" Value="#26364B"/>
+            <Setter Property="Padding" Value="10,9"/>
+            <Setter Property="Margin" Value="0,0,0,7"/>
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Template">
+             <Setter.Value>
+              <ControlTemplate TargetType="ListBoxItem">
+               <Border Name="CategoryTileBorder" Background="{TemplateBinding Background}"
+                       BorderBrush="#344B68" BorderThickness="1" CornerRadius="7"
+                       Padding="{TemplateBinding Padding}">
+                <ContentPresenter HorizontalAlignment="Left" VerticalAlignment="Center"/>
+               </Border>
+               <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                 <Setter TargetName="CategoryTileBorder" Property="Background" Value="#304A6B"/>
+                 <Setter TargetName="CategoryTileBorder" Property="BorderBrush" Value="#527AA8"/>
+                </Trigger>
+                <Trigger Property="IsSelected" Value="True">
+                 <Setter TargetName="CategoryTileBorder" Property="Background" Value="#24558A"/>
+                 <Setter TargetName="CategoryTileBorder" Property="BorderBrush" Value="#5B9BE0"/>
+                 <Setter Property="Foreground" Value="#FFFFFF"/>
+                 <Setter Property="FontWeight" Value="SemiBold"/>
+                </Trigger>
+               </ControlTemplate.Triggers>
+              </ControlTemplate>
+             </Setter.Value>
+            </Setter>
+           </Style>
+          </ListBox.Resources>
+         </ListBox>
+        </DockPanel>
+       </Border>
+
+       <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+       <ItemsControl Name="SoftwareGrid" Margin="0,5,0,0">
         <ItemsControl.ItemsPanel>
          <ItemsPanelTemplate><WrapPanel Orientation="Horizontal"/></ItemsPanelTemplate>
         </ItemsControl.ItemsPanel>
@@ -2107,8 +2158,8 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
          </DataTemplate>
         </ItemsControl.ItemTemplate>
        </ItemsControl>
-      </ScrollViewer>
-      
+       </ScrollViewer>
+      </Grid>      
       <!-- App Console Bottom Bar & Progress Bar -->
       <Border Grid.Row="2" Background="#27272A" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="12" Padding="20" Margin="0,20,0,0">
        <Grid>
@@ -2128,7 +2179,8 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
          </StackPanel>
          <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
           <Button Name="DeselectAllBtn" Content="Clear Selection" Background="Transparent" Foreground="#A1A1AA" FontSize="14" Margin="0,0,15,0"/>
-          <Button Name="RepairSelectedBtn" Content="🔧 Repair" Background="#EAB308" Foreground="#18181B" BorderThickness="0" FontSize="14" FontWeight="Bold" Margin="0,0,15,0"/>
+          <Button Name="RepairSelectedBtn" Content="🔧 Repair" Background="#EAB308" Foreground="#18181B" BorderThickness="0" FontSize="14" FontWeight="Bold" Margin="0,0,10,0"/>
+          <Button Name="UninstallSelectedBtn" Content="🗑 Uninstall" Visibility="Collapsed" Background="#DC2626" Foreground="#FFFFFF" BorderBrush="#F87171" BorderThickness="1" Padding="14,10" FontSize="14" FontWeight="Bold" Margin="0,0,15,0" ToolTip="Safely uninstall selected installed applications."/>
           <Button Name="UpdateSelectedBtn" Content="⬆ Update" Background="#3B82F6" Foreground="#FFFFFF" BorderThickness="0" FontSize="14" FontWeight="Bold" Margin="0,0,15,0"/>
           <Button Name="InstallInteractiveBtn" Content="🖥 Interactive Install" Background="#8B5CF6" Foreground="#FFFFFF" BorderThickness="0" Padding="15,12" FontSize="14" FontWeight="Bold" Margin="0,0,10,0"/>
           <Button Name="InstallSelectedBtn" Content="⬇ Smart Install" Background="#10B981" Foreground="#FFFFFF" BorderThickness="0" Padding="20,12" FontSize="14" FontWeight="Bold"/>
@@ -3319,31 +3371,47 @@ function Refresh-AMROverview {
 # ==========================================================
 
 $script:AppsView = [System.Windows.Data.CollectionViewSource]::GetDefaultView($script:SoftwareCatalog)
-$script:AppsView.GroupDescriptions.Add((New-Object System.Windows.Data.PropertyGroupDescription("Category")))
+
+# Build the vertical category navigation from the existing catalog data.
+# The catalog itself and all installation metadata remain unchanged.
+$script:SelectedSoftwareCategory = 'All Applications'
+$script:SoftwareCategories = @('All Applications') + @(
+    $script:SoftwareCatalog |
+        ForEach-Object { [string]$_.Category } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Sort-Object -Unique
+)
+(C 'SoftwareCategoryList').ItemsSource = $script:SoftwareCategories
+(C 'SoftwareCategoryList').SelectedIndex = 0
 
 $script:ShowInstalledOnly = $false
+try { (C 'UninstallSelectedBtn').Visibility = 'Collapsed' } catch {}
 
 function Update-AMRInstalledCatalogState {
-    # Build one local inventory snapshot, then compare it against the 500-app catalog.
-    # Exact normalized identities avoid broad/unsafe partial-name matches.
+    # Build a multi-source local inventory once, then match it against the catalog.
+    # Evidence sources: Windows uninstall registry, AppX/MSIX, WinGet, Chocolatey and Scoop.
+    # Provisioned AppX packages are intentionally excluded: provisioned does not mean installed.
     $installedIdentities = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $wingetIdentities = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $chocoIdentities = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $scoopIdentities = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+
+    # 1. Windows uninstall inventory: machine/user and 64-bit/32-bit registry locations.
+    $registryEntryCount = 0
     $uninstallPaths = @(
         'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
         'HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
         'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
         'HKCU:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
     )
-
     foreach ($registryPath in $uninstallPaths) {
         try {
             foreach ($entry in @(Get-ItemProperty -Path $registryPath -ErrorAction SilentlyContinue)) {
                 $displayNameProperty = $entry.PSObject.Properties['DisplayName']
                 $childNameProperty = $entry.PSObject.Properties['PSChildName']
-                # Only product identity fields are valid evidence. Publisher and
-                # UninstallString are deliberately excluded: they can create false
-                # positives for unrelated catalog entries.
                 $displayNameValue = if ($displayNameProperty -and $null -ne $displayNameProperty.Value) { [string]$displayNameProperty.Value } else { '' }
                 $childNameValue = if ($childNameProperty -and $null -ne $childNameProperty.Value) { [string]$childNameProperty.Value } else { '' }
+                if (-not [string]::IsNullOrWhiteSpace($displayNameValue)) { $registryEntryCount++ }
                 foreach ($identity in @($displayNameValue, $childNameValue)) {
                     if (-not [string]::IsNullOrWhiteSpace($identity)) {
                         $normalized = ($identity -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
@@ -3356,25 +3424,147 @@ function Update-AMRInstalledCatalogState {
         }
     }
 
+    # 2. AppX/MSIX packages installed for the current user or any user on this PC.
+    $appxPackageCount = 0
     try {
-        foreach ($package in @(Get-AppxPackage -ErrorAction SilentlyContinue)) {
-            foreach ($identity in @([string]$package.Name, [string]$package.PackageFamilyName)) {
-                if (-not [string]::IsNullOrWhiteSpace($identity)) {
-                    $normalized = ($identity -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
-                    if ($normalized.Length -ge 3) { [void]$installedIdentities.Add($normalized) }
+        $appxPackages = @(Get-AppxPackage -AllUsers -ErrorAction Stop)
+    } catch {
+        Write-AMRLog "All-user AppX inventory was unavailable; falling back to the current user: $($_.Exception.Message)" WARNING Software
+        try { $appxPackages = @(Get-AppxPackage -ErrorAction SilentlyContinue) } catch { $appxPackages = @() }
+    }
+    foreach ($package in $appxPackages) {
+        # When Windows exposes per-user package states, count only packages registered
+        # as Installed for at least one user; do not count packages merely Staged.
+        $userInfoProperty = $package.PSObject.Properties['PackageUserInformation']
+        if ($userInfoProperty -and $null -ne $userInfoProperty.Value) {
+            $hasInstalledUser = $false
+            foreach ($userInfo in @($userInfoProperty.Value)) {
+                if ([string]$userInfo.InstallState -eq 'Installed') { $hasInstalledUser = $true; break }
+            }
+            if (-not $hasInstalledUser) { continue }
+        }
+        $appxPackageCount++
+        foreach ($identity in @([string]$package.Name, [string]$package.PackageFamilyName, [string]$package.PackageFullName)) {
+            if (-not [string]::IsNullOrWhiteSpace($identity)) {
+                $normalized = ($identity -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
+                if ($normalized.Length -ge 3) { [void]$installedIdentities.Add($normalized) }
+            }
+        }
+    }
+
+    # 3. WinGet's own installed-package inventory. Parse only the ID column when possible;
+    # the exact-ID fallback handles CLI table-layout differences without loose name matching.
+    $wingetRawOutput = ''
+    $wingetAvailable = $false
+    try {
+        $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+        if ($winget) {
+            $wingetAvailable = $true
+            $wingetToken = [guid]::NewGuid().ToString('N')
+            $wingetStdoutPath = Join-Path $env:TEMP ("AMR_ShowInstalled_{0}.out" -f $wingetToken)
+            $wingetStderrPath = Join-Path $env:TEMP ("AMR_ShowInstalled_{0}.err" -f $wingetToken)
+            $wingetProcess = $null
+            $wingetExitCode = -1
+            try {
+                $wingetProcess = Start-Process -FilePath $winget.Source -ArgumentList 'list --disable-interactivity --accept-source-agreements' -PassThru -WindowStyle Hidden -RedirectStandardOutput $wingetStdoutPath -RedirectStandardError $wingetStderrPath -ErrorAction Stop
+                if (-not $wingetProcess.WaitForExit(20000)) {
+                    try { Stop-Process -Id $wingetProcess.Id -Force -ErrorAction SilentlyContinue } catch {}
+                    throw 'WinGet installed-package inventory timed out after 20 seconds.'
                 }
+                $wingetProcess.WaitForExit()
+                $wingetExitCode = [int]$wingetProcess.ExitCode
+                $wingetStdout = if (Test-Path -LiteralPath $wingetStdoutPath) { [string](Get-Content -LiteralPath $wingetStdoutPath -Raw -ErrorAction SilentlyContinue) } else { '' }
+                $wingetStderr = if (Test-Path -LiteralPath $wingetStderrPath) { [string](Get-Content -LiteralPath $wingetStderrPath -Raw -ErrorAction SilentlyContinue) } else { '' }
+                $wingetRawOutput = $wingetStdout
+                $wingetOutput = @($wingetStdout -split "`r?`n")
+            } finally {
+                if ($wingetProcess) { try { $wingetProcess.Dispose() } catch {} }
+                foreach ($tempOutput in @($wingetStdoutPath,$wingetStderrPath)) {
+                    if (Test-Path -LiteralPath $tempOutput) { Remove-Item -LiteralPath $tempOutput -Force -ErrorAction SilentlyContinue }
+                }
+            }
+            if ($wingetExitCode -eq 0) {
+                $headerIndex = -1
+                $idColumnStart = -1
+                $versionColumnStart = -1
+                for ($lineIndex = 0; $lineIndex -lt $wingetOutput.Count; $lineIndex++) {
+                    $lineText = [string]$wingetOutput[$lineIndex]
+                    $idHeader = [regex]::Match($lineText, '(?i)\bId\b')
+                    $versionHeader = [regex]::Match($lineText, '(?i)\bVersion\b')
+                    if ($idHeader.Success -and $versionHeader.Success -and $versionHeader.Index -gt $idHeader.Index) {
+                        $headerIndex = $lineIndex
+                        $idColumnStart = $idHeader.Index
+                        $versionColumnStart = $versionHeader.Index
+                        break
+                    }
+                }
+                if ($headerIndex -ge 0) {
+                    for ($lineIndex = ($headerIndex + 1); $lineIndex -lt $wingetOutput.Count; $lineIndex++) {
+                        $lineText = [string]$wingetOutput[$lineIndex]
+                        if ($lineText.Length -le $idColumnStart) { continue }
+                        $fieldLength = [Math]::Min(($versionColumnStart - $idColumnStart), ($lineText.Length - $idColumnStart))
+                        if ($fieldLength -le 0) { continue }
+                        $packageId = $lineText.Substring($idColumnStart, $fieldLength).Trim()
+                        if ($packageId -match '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+                            $normalizedId = ($packageId -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
+                            if ($normalizedId.Length -ge 3) { [void]$wingetIdentities.Add($normalizedId) }
+                        }
+                    }
+                }
+            } else {
+                Write-AMRLog ("WinGet installed-package inventory returned exit code {0}; registry/AppX detection will still be used. {1}" -f $wingetExitCode,$wingetStderr) WARNING Software
             }
         }
     } catch {
-        Write-AMRLog "Could not read AppX package inventory: $($_.Exception.Message)" WARNING Software
+        Write-AMRLog "Could not read WinGet installed-package inventory: $($_.Exception.Message)" WARNING Software
     }
 
-    # Canonical aliases for common display-name differences between the catalog and
-    # Windows uninstall entries (for example, Everything is registered without 'Search').
+    # 4. Chocolatey local package folders are authoritative for Chocolatey-managed installs.
+    $chocoRoots = @()
+    if (-not [string]::IsNullOrWhiteSpace($env:ChocolateyInstall)) { $chocoRoots += $env:ChocolateyInstall }
+    $chocoRoots += (Join-Path $env:ProgramData 'chocolatey')
+    foreach ($chocoRoot in @($chocoRoots | Select-Object -Unique)) {
+        $chocoLib = Join-Path $chocoRoot 'lib'
+        if (-not (Test-Path -LiteralPath $chocoLib -PathType Container)) { continue }
+        try {
+            foreach ($packageFolder in @(Get-ChildItem -LiteralPath $chocoLib -Directory -ErrorAction SilentlyContinue)) {
+                $nuspecFiles = @(Get-ChildItem -LiteralPath $packageFolder.FullName -Filter '*.nuspec' -File -ErrorAction SilentlyContinue)
+                if ($nuspecFiles.Count -gt 0) {
+                    $normalizedFolder = ($packageFolder.Name -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
+                    if ($normalizedFolder.Length -ge 3) { [void]$chocoIdentities.Add($normalizedFolder) }
+                }
+            }
+        } catch {
+            Write-AMRLog "Could not read Chocolatey package inventory at '$chocoLib': $($_.Exception.Message)" WARNING Software
+        }
+    }
+
+    # 5. Scoop app folders (user and global installations).
+    $scoopRoots = @()
+    if (-not [string]::IsNullOrWhiteSpace($env:SCOOP)) { $scoopRoots += $env:SCOOP }
+    if (-not [string]::IsNullOrWhiteSpace($env:SCOOP_GLOBAL)) { $scoopRoots += $env:SCOOP_GLOBAL }
+    if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) { $scoopRoots += (Join-Path $env:USERPROFILE 'scoop') }
+    if (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) { $scoopRoots += (Join-Path $env:ProgramData 'scoop') }
+    foreach ($scoopRoot in @($scoopRoots | Select-Object -Unique)) {
+        $appsPath = Join-Path $scoopRoot 'apps'
+        if (-not (Test-Path -LiteralPath $appsPath -PathType Container)) { continue }
+        try {
+            foreach ($appFolder in @(Get-ChildItem -LiteralPath $appsPath -Directory -ErrorAction SilentlyContinue)) {
+                $normalizedFolder = ($appFolder.Name -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
+                if ($normalizedFolder.Length -ge 3) { [void]$scoopIdentities.Add($normalizedFolder) }
+            }
+        } catch {
+            Write-AMRLog "Could not read Scoop package inventory at '$appsPath': $($_.Exception.Message)" WARNING Software
+        }
+    }
+
+    # Canonical aliases for known catalog/installer naming differences.
     $identityAliases = @{
         'everythingsearch' = @('everything')
-        'visualstudiocode' = @('vscode')
+        'visualstudiocode' = @('vscode','microsoftvisualstudiocode')
         'microsoftedgewebview2runtime' = @('webview2runtime','microsoftedgewebview2')
+        'googlechrome' = @('chrome')
+        'microsoftedge' = @('edge')
         'discord' = @('discord')
         '7zip' = @('7zip')
         'vlcmediaplayer' = @('vlc')
@@ -3389,57 +3579,324 @@ function Update-AMRInstalledCatalogState {
         foreach ($identity in @([string]$app.Name, [string]$app.Id, [string]$app.ChocoId)) {
             if ([string]::IsNullOrWhiteSpace($identity)) { continue }
             $normalized = ($identity -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
-            if ($normalized.Length -ge 3) { $candidateIdentities.Add($normalized) }
+            if ($normalized.Length -ge 3 -and -not $candidateIdentities.Contains($normalized)) { $candidateIdentities.Add($normalized) }
         }
+
+        # The final segment of a package ID often matches its Windows display name
+        # (for example, Vendor.ProductName vs. Product Name).
+        if (-not [string]::IsNullOrWhiteSpace([string]$app.Id) -and [string]$app.Id -match '\.') {
+            $idSuffix = ([string]$app.Id -split '\.')[-1]
+            $normalizedSuffix = ($idSuffix -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
+            if ($normalizedSuffix.Length -ge 3 -and -not $candidateIdentities.Contains($normalizedSuffix)) { $candidateIdentities.Add($normalizedSuffix) }
+        }
+
         foreach ($baseIdentity in @($candidateIdentities.ToArray())) {
             if ($identityAliases.ContainsKey($baseIdentity)) {
                 foreach ($alias in $identityAliases[$baseIdentity]) {
                     $normalizedAlias = ($alias -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
-                    if ($normalizedAlias.Length -ge 3) { $candidateIdentities.Add($normalizedAlias) }
+                    if ($normalizedAlias.Length -ge 3 -and -not $candidateIdentities.Contains($normalizedAlias)) { $candidateIdentities.Add($normalizedAlias) }
                 }
             }
         }
-        foreach ($normalized in $candidateIdentities) {
-            if ($installedIdentities.Contains($normalized)) { $isInstalled = $true; break }
-            # Versioned display names such as 'Everything 1.4.1.x' normalize to
-            # 'everything141x'. Accept only a numeric/version suffix after a full alias.
-            foreach ($observed in $installedIdentities) {
-                if ($observed.Length -gt $normalized.Length -and $observed.StartsWith($normalized, [System.StringComparison]::OrdinalIgnoreCase)) {
-                    $suffix = $observed.Substring($normalized.Length)
-                    if ($suffix -match '^\d+(x64|x86|64bit|32bit)?$') { $isInstalled = $true; break }
-                }
+
+        # Strong package-manager evidence: exact WinGet package ID, Chocolatey ID,
+        # or Scoop app-folder identity.
+        $normalizedCatalogId = ([string]$app.Id -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
+        $normalizedChocoId = ([string]$app.ChocoId -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
+        if ($normalizedCatalogId.Length -ge 3 -and $wingetIdentities.Contains($normalizedCatalogId)) { $isInstalled = $true }
+        if (-not $isInstalled -and $normalizedChocoId.Length -ge 3 -and $chocoIdentities.Contains($normalizedChocoId)) { $isInstalled = $true }
+        if (-not $isInstalled) {
+            foreach ($candidate in $candidateIdentities) {
+                if ($scoopIdentities.Contains($candidate)) { $isInstalled = $true; break }
             }
-            if ($isInstalled) { break }
         }
+
+        # Windows registry and AppX identities, using exact normalized matches first.
+        if (-not $isInstalled) {
+            foreach ($normalized in $candidateIdentities) {
+                if ($installedIdentities.Contains($normalized)) { $isInstalled = $true; break }
+                # Accept only a version/architecture suffix after a complete known identity.
+                foreach ($observed in $installedIdentities) {
+                    if ($observed.Length -gt $normalized.Length -and $observed.StartsWith($normalized, [System.StringComparison]::OrdinalIgnoreCase)) {
+                        $suffix = $observed.Substring($normalized.Length)
+                        if ($suffix -match '^\d+(x64|x86|64bit|32bit)?$') { $isInstalled = $true; break }
+                    }
+                }
+                if ($isInstalled) { break }
+            }
+        }
+
+        # Fallback for WinGet CLI versions whose table headings/layout differ.
+        if (-not $isInstalled -and -not [string]::IsNullOrWhiteSpace($wingetRawOutput) -and -not [string]::IsNullOrWhiteSpace([string]$app.Id)) {
+            $escapedId = [regex]::Escape([string]$app.Id)
+            if ($wingetRawOutput -match ('(?im)(?<![A-Za-z0-9_.-])' + $escapedId + '(?![A-Za-z0-9_.-])')) { $isInstalled = $true }
+        }
+
         $app.IsInstalled = $isInstalled
         if ($isInstalled) { $installedCount++ }
     }
 
+    Write-AMRLog ("Installed inventory scanned: {0} registry entries, {1} AppX/MSIX packages, {2} WinGet IDs, {3} Chocolatey packages, {4} Scoop apps. Catalog matches: {5}." -f $registryEntryCount,$appxPackageCount,$wingetIdentities.Count,$chocoIdentities.Count,$scoopIdentities.Count,$installedCount) INFO Software
     return $installedCount
+}
+
+
+# ----------------------------------------------------------
+# Background installed-inventory scanner
+# The inventory scan runs in a dedicated runspace. Only the
+# final IsInstalled flags are copied back on the WPF UI thread.
+# ----------------------------------------------------------
+$script:InstalledScanState = @{
+    Current = $null
+    Ready = $false
+    Count = 0
+    Error = ''
+    PendingShow = $false
+    RescanRequested = $false
+}
+
+function Set-AMRInstalledViewVisible {
+    param([int]$InstalledCount)
+
+    $script:ShowInstalledOnly = $true
+    (C 'ShowInstalledBtn').Content = "Show All ($InstalledCount)"
+    (C 'ShowInstalledBtn').ToolTip = 'Return to the full software catalog.'
+    (C 'ShowInstalledBtn').IsEnabled = $true
+    (C 'UninstallSelectedBtn').Visibility = 'Visible'
+    $script:AppsView.Refresh()
+    Write-AMRLog "Installed-app filter enabled: $InstalledCount catalog application(s) detected." INFO Software
+}
+
+function Complete-AMRInstalledCatalogScan {
+    param($JobState)
+
+    $job = $JobState.Current
+    if (-not $job) { return }
+
+    $outputItems = @()
+    $workerError = ''
+    try {
+        $outputItems = @($job.PowerShell.EndInvoke($job.AsyncResult))
+    } catch {
+        $workerError = $_.Exception.Message
+    }
+
+    if (-not $workerError -and $job.PowerShell.Streams.Error.Count -gt 0) {
+        $workerError = (($job.PowerShell.Streams.Error | ForEach-Object { $_.ToString() }) -join "`n")
+    }
+
+    $payload = $null
+    foreach ($outputItem in $outputItems) {
+        if ($null -ne $outputItem -and $outputItem.PSObject.Properties['InstalledFlags']) {
+            $payload = $outputItem
+        }
+    }
+    if (-not $payload -and -not $workerError) {
+        $workerError = 'The background inventory worker completed without returning a valid result.'
+    }
+
+    try { $job.PowerShell.Dispose() } catch {}
+    try { $job.Runspace.Close(); $job.Runspace.Dispose() } catch {}
+    $JobState.Current = $null
+
+    if ($payload -and -not $workerError) {
+        $flags = @($payload.InstalledFlags)
+        if ($flags.Count -ne $script:SoftwareCatalog.Count) {
+            $workerError = "Inventory result size mismatch. Expected $($script:SoftwareCatalog.Count), received $($flags.Count)."
+        } else {
+            for ($index = 0; $index -lt $script:SoftwareCatalog.Count; $index++) {
+                $script:SoftwareCatalog[$index].IsInstalled = [bool]$flags[$index]
+            }
+            $JobState.Ready = $true
+            $JobState.Count = [int]$payload.Count
+            $JobState.Error = ''
+            foreach ($entry in @($payload.Logs)) {
+                if ($entry -and $entry.Message) {
+                    $level = if ($entry.Level) { [string]$entry.Level } else { 'INFO' }
+                    $area = if ($entry.Area) { [string]$entry.Area } else { 'Software' }
+                    Write-AMRLog ([string]$entry.Message) $level $area
+                }
+            }
+        }
+    }
+
+    if ($workerError) {
+        $JobState.Ready = $false
+        $JobState.Error = $workerError
+        Write-AMRLog "Background installed-app scan failed: $workerError" ERROR Software
+        if ($JobState.PendingShow) {
+            (C 'ShowInstalledBtn').Content = 'Show Installed'
+            (C 'ShowInstalledBtn').IsEnabled = $true
+            $JobState.PendingShow = $false
+            Show-AMRMessage "Could not finish the installed-app scan:`n`n$workerError" 'Installed Apps Scan' OK Error | Out-Null
+        }
+    }
+
+    # If a refresh was requested while an older scan was running (for example,
+    # immediately after uninstall), run a fresh scan before publishing the view.
+    if ($JobState.RescanRequested) {
+        $JobState.RescanRequested = $false
+        $JobState.Ready = $false
+        Start-AMRInstalledCatalogScan -ShowWhenReady:([bool]$JobState.PendingShow)
+        return
+    }
+
+    if ($JobState.Ready -and $JobState.PendingShow) {
+        $JobState.PendingShow = $false
+        Set-AMRInstalledViewVisible -InstalledCount $JobState.Count
+    }
+}
+
+function Start-AMRInstalledCatalogScan {
+    param(
+        [switch]$ShowWhenReady,
+        [switch]$Refresh
+    )
+
+    $state = $script:InstalledScanState
+    if ($ShowWhenReady) { $state.PendingShow = $true }
+
+    if ($state.Current) {
+        if ($Refresh) { $state.RescanRequested = $true }
+        return
+    }
+
+    if ($state.Ready -and -not $Refresh) {
+        if ($state.PendingShow) {
+            $state.PendingShow = $false
+            Set-AMRInstalledViewVisible -InstalledCount $state.Count
+        }
+        return
+    }
+
+    $catalogSnapshot = @(
+        foreach ($app in $script:SoftwareCatalog) {
+            [pscustomobject]@{
+                Name = [string]$app.Name
+                Id = [string]$app.Id
+                ChocoId = [string]$app.ChocoId
+                IsInstalled = $false
+            }
+        }
+    )
+
+    try {
+        $inventoryCommand = Get-Command Update-AMRInstalledCatalogState -ErrorAction Stop
+        $inventoryFunctionBody = $inventoryCommand.ScriptBlock.ToString()
+
+        $workerScript = @'
+param($CatalogSnapshot, $InventoryFunctionBody)
+$ErrorActionPreference = 'Continue'
+$script:SoftwareCatalog = @($CatalogSnapshot)
+$script:InventoryLogs = New-Object 'System.Collections.Generic.List[object]'
+function Write-AMRLog {
+    param([string]$Message, [string]$Level, [string]$Area)
+    try {
+        [void]$script:InventoryLogs.Add([pscustomobject]@{
+            Message = [string]$Message
+            Level = [string]$Level
+            Area = [string]$Area
+        })
+    } catch {}
+}
+$definition = "function Update-AMRInstalledCatalogState {`r`n" + $InventoryFunctionBody + "`r`n}"
+Invoke-Expression $definition
+$count = Update-AMRInstalledCatalogState
+$flags = @($script:SoftwareCatalog | ForEach-Object { [bool]$_.IsInstalled })
+[pscustomobject]@{
+    Count = [int]$count
+    InstalledFlags = $flags
+    Logs = @($script:InventoryLogs.ToArray())
+}
+'@
+
+        $runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+        $runspace.Open()
+        $powerShell = [PowerShell]::Create()
+        $powerShell.Runspace = $runspace
+        [void]$powerShell.AddScript($workerScript)
+        [void]$powerShell.AddArgument($catalogSnapshot)
+        [void]$powerShell.AddArgument($inventoryFunctionBody)
+        $asyncResult = $powerShell.BeginInvoke()
+
+        $timer = New-Object System.Windows.Threading.DispatcherTimer
+        $timer.Interval = [TimeSpan]::FromMilliseconds(150)
+        $jobState = $state
+        $job = [pscustomobject]@{
+            PowerShell = $powerShell
+            Runspace = $runspace
+            AsyncResult = $asyncResult
+            Timer = $timer
+        }
+        $state.Current = $job
+
+        $timer.Add_Tick({
+            $activeJob = $jobState.Current
+            if (-not $activeJob) {
+                $timer.Stop()
+                return
+            }
+            if (-not $activeJob.AsyncResult.IsCompleted) { return }
+            $timer.Stop()
+            Complete-AMRInstalledCatalogScan -JobState $jobState
+        }.GetNewClosure())
+
+        $timer.Start()
+        Write-AMRLog 'Installed-app inventory scan started in the background. The interface remains available.' INFO Software
+    } catch {
+        $state.Error = $_.Exception.Message
+        $state.Ready = $false
+        $state.Current = $null
+        (C 'ShowInstalledBtn').Content = 'Show Installed'
+        (C 'ShowInstalledBtn').IsEnabled = $true
+        Write-AMRLog "Could not start the background installed-app scan: $($_.Exception.Message)" ERROR Software
+        if ($state.PendingShow) {
+            $state.PendingShow = $false
+            Show-AMRMessage "Could not start the installed-app scan:`n`n$($_.Exception.Message)" 'Installed Apps Scan' OK Error | Out-Null
+        }
+    }
 }
 
 $script:AppsView.Filter = [System.Predicate[object]]{
     param($item)
     if ($script:ShowInstalledOnly -and -not $item.IsInstalled) { return $false }
+
+    $selectedCategory = [string]$script:SelectedSoftwareCategory
+    if (-not [string]::IsNullOrWhiteSpace($selectedCategory) -and
+        $selectedCategory -ne 'All Applications' -and
+        [string]$item.Category -ne $selectedCategory) { return $false }
+
     $searchText = (C 'SearchBox').Text
     if ([string]::IsNullOrWhiteSpace($searchText)) { return $true }
     $escaped = [regex]::Escape($searchText)
     return ($item.Name -match "(?i)$escaped") -or ($item.Id -match "(?i)$escaped")
 }
 
+(C 'SoftwareCategoryList').Add_SelectionChanged({
+    $selected = (C 'SoftwareCategoryList').SelectedItem
+    if ($null -ne $selected) {
+        $script:SelectedSoftwareCategory = [string]$selected
+        $script:AppsView.Refresh()
+    }
+})
+
 (C 'SearchBox').Add_TextChanged({ $script:AppsView.Refresh() })
 (C 'ShowInstalledBtn').Add_Click({
     if (-not $script:ShowInstalledOnly) {
-        $installedCount = Update-AMRInstalledCatalogState
-        $script:ShowInstalledOnly = $true
-        (C 'ShowInstalledBtn').Content = "Show All ($installedCount)"
-        (C 'ShowInstalledBtn').ToolTip = 'Return to the full software catalog.'
-        $script:AppsView.Refresh()
-        Write-AMRLog "Installed-app filter enabled: $installedCount catalog application(s) detected." INFO Software
+        if ($script:InstalledScanState.Ready) {
+            Set-AMRInstalledViewVisible -InstalledCount $script:InstalledScanState.Count
+        } else {
+            (C 'ShowInstalledBtn').Content = 'Loading Installed...'
+            (C 'ShowInstalledBtn').IsEnabled = $false
+            $script:ProgressText.Text = 'Preparing installed applications in the background...'
+            Start-AMRInstalledCatalogScan -ShowWhenReady
+        }
     } else {
         $script:ShowInstalledOnly = $false
         (C 'ShowInstalledBtn').Content = 'Show Installed'
         (C 'ShowInstalledBtn').ToolTip = 'Show only applications detected as installed on this PC.'
+        (C 'ShowInstalledBtn').IsEnabled = $true
+        (C 'UninstallSelectedBtn').Visibility = 'Collapsed'
         $script:AppsView.Refresh()
         Write-AMRLog 'Installed-app filter disabled; showing the full software catalog.' INFO Software
     }
@@ -4544,10 +5001,35 @@ Write-WorkerLog "Queue completed." "SUCCESS" -Percent 100
 function Set-AMRInstallButtonsEnabled {
     param([bool]$Enabled)
 
-    foreach ($name in @('InstallSelectedBtn','InstallInteractiveBtn','UpdateSelectedBtn','RepairSelectedBtn','DeselectAllBtn')) {
+    foreach ($name in @('InstallSelectedBtn','InstallInteractiveBtn','UpdateSelectedBtn','RepairSelectedBtn','UninstallSelectedBtn','DeselectAllBtn')) {
         $button = C $name
         if ($button) { $button.IsEnabled = $Enabled }
     }
+}
+
+function Update-AMRInstallProgressFromLogLine {
+    param([string]$Line)
+
+    if ([string]::IsNullOrWhiteSpace($Line)) { return $Line }
+    $displayLine = $Line
+    if ($Line -match '^PROG:(\d+)\|(.*)$') {
+        $percent = [math]::Max(0, [math]::Min(100, [int]$matches[1]))
+        $displayLine = [string]$matches[2]
+        $script:ProgressBar.IsIndeterminate = $false
+        $script:ProgressBar.Value = $percent
+        return ("{0}%  |  {1}" -f $percent, $displayLine)
+    }
+
+    # Package managers and native installers do not consistently expose a numeric
+    # percentage. Animate the bar during those waits instead of leaving it frozen
+    # at an old milestone or inventing a percentage.
+    if ($Line -match '(?i)\[(Winget|Chocolatey|Direct)\].*(Executing|Downloading|Installer started|Running native Windows Installer)') {
+        $script:ProgressBar.IsIndeterminate = $true
+        return ('Working  |  ' + $Line)
+    } elseif ($Line -match '(?i)(Completed|finished|failed|returned code|timed out|APP-END|APP-EXCEPTION|Queue completed)') {
+        $script:ProgressBar.IsIndeterminate = $false
+    }
+    return $displayLine
 }
 
 function Complete-AMRInstallQueue {
@@ -4561,10 +5043,7 @@ function Complete-AMRInstallQueue {
     $line = $null
     while ($script:InstallLogQueue.TryDequeue([ref]$line)) {
         if ($line) {
-            if ($line -match "^PROG:(\d+)\|(.*)$") {
-                $script:ProgressBar.Value = [int]$matches[1]
-                $line = $matches[2]
-            }
+            $line = Update-AMRInstallProgressFromLogLine -Line $line
             try { Add-Content -LiteralPath $script:LogFile -Value $line -Encoding UTF8 -ErrorAction Stop } catch { Write-AMRDiagnostic -Severity 'ERROR' -Area 'Software' -Operation 'AppendInstallQueueLog' -Message 'Could not persist an installer worker log line.' -ErrorRecord $_ -Target $script:LogFile }
             foreach ($key in @('All','Software')) {
                 $control = $script:LogControls[$key]
@@ -4599,6 +5078,7 @@ function Complete-AMRInstallQueue {
     Set-AMRInstallButtonsEnabled -Enabled $true
 
     if ($ErrorText) {
+        $script:ProgressBar.IsIndeterminate = $false
         $script:ProgressBar.Value = 0
         $script:ProgressText.Text = "Installation failed with error."
         Write-AMRLog "Installation worker failed: $ErrorText" ERROR Software
@@ -4622,6 +5102,7 @@ function Complete-AMRInstallQueue {
         $summary += "`n`n⚠ One or more installers requested a restart (1641/3010)."
     }
 
+    $script:ProgressBar.IsIndeterminate = $false
     $script:ProgressBar.Value = 100
     $script:ProgressText.Text = "Finished: $($Result.SuccessCount) Verified, $($Result.UnverifiedCount) Unverified, $($Result.CancelledCount) Cancelled, $($Result.SkippedCount) Skipped, $($Result.FailedCount) Failed."
     Write-AMRLog "Queue finished. Verified: $($Result.SuccessCount), Unverified: $($Result.UnverifiedCount), Cancelled: $($Result.CancelledCount), Skipped: $($Result.SkippedCount), Failed: $($Result.FailedCount)." SUCCESS Software
@@ -4675,6 +5156,7 @@ function Execute-SmartMultiTierInstallAsync {
     $script:InstallRunning = $true
     $script:InstallActionName = $ActionName
     $script:InstallSelectedSnapshot = $selectedSnapshot
+    $script:ProgressBar.IsIndeterminate = $false
     $script:ProgressBar.Value = 0
     $script:ProgressText.Text = "Initializing $ActionName..."
     Set-AMRInstallButtonsEnabled -Enabled $false
@@ -4714,10 +5196,7 @@ function Execute-SmartMultiTierInstallAsync {
             $queuedLine = $null
             while ($script:InstallLogQueue.TryDequeue([ref]$queuedLine)) {
                 if ($queuedLine) {
-                    if ($queuedLine -match "^PROG:(\d+)\|(.*)$") {
-                        $script:ProgressBar.Value = [int]$matches[1]
-                        $queuedLine = $matches[2]
-                    }
+                    $queuedLine = Update-AMRInstallProgressFromLogLine -Line $queuedLine
                     try { Add-Content -LiteralPath $script:LogFile -Value $queuedLine -Encoding UTF8 -ErrorAction Stop } catch { Write-AMRDiagnostic -Severity 'ERROR' -Area 'Software' -Operation 'AppendInstallTimerLog' -Message 'Could not persist an installer progress log line.' -ErrorRecord $_ -Target $script:LogFile }
                     foreach ($key in @('All','Software')) {
                         $control = $script:LogControls[$key]
@@ -4807,6 +5286,512 @@ function Execute-SmartMultiTierInstallAsync {
     }
 }
 
+# --- SAFE SOFTWARE UNINSTALL ENGINE ---
+function Show-AMRUninstallChoice {
+    param([string[]]$ApplicationNames)
+
+    $dialog = New-Object System.Windows.Window
+    $dialog.Title = 'AMR | Uninstall Options'
+    $dialog.Owner = $script:Window
+    $dialog.WindowStartupLocation = 'CenterOwner'
+    $dialog.SizeToContent = 'WidthAndHeight'
+    $dialog.MinWidth = 500
+    $dialog.MaxWidth = 620
+    $dialog.ResizeMode = 'NoResize'
+    $dialog.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#18181B')
+    $dialog.Foreground = [System.Windows.Media.Brushes]::White
+    $dialog.ShowInTaskbar = $false
+
+    $root = New-Object System.Windows.Controls.StackPanel
+    $root.Margin = '20'
+    $heading = New-Object System.Windows.Controls.TextBlock
+    $heading.Text = 'Choose how AMR should remove the selected app(s)'
+    $heading.FontSize = 17; $heading.FontWeight = 'Bold'; $heading.Foreground = [System.Windows.Media.Brushes]::White
+    $root.Children.Add($heading) | Out-Null
+    $names = New-Object System.Windows.Controls.TextBlock
+    $names.Text = ($ApplicationNames | ForEach-Object { '• ' + $_ }) -join "`n"
+    $names.Margin = '0,8,0,12'; $names.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#A1A1AA')
+    $names.TextWrapping = 'Wrap'; $names.MaxHeight = 90
+    $root.Children.Add($names) | Out-Null
+
+    # Use a restrained, static button template so WPF's default theme does not
+    # apply the overly bright hover/focus animation to these destructive choices.
+    function New-AMRUninstallButtonStyle {
+        param([string]$HoverColor, [string]$PressedColor, [string]$BorderColor = '#465365', [string]$HoverBorderColor = '#718096')
+        $styleXaml = @"
+<Style xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" TargetType="{x:Type Button}" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Setter Property="BorderThickness" Value="1"/>
+  <Setter Property="BorderBrush" Value="$BorderColor"/>
+  <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+  <Setter Property="Template">
+    <Setter.Value>
+      <ControlTemplate TargetType="{x:Type Button}">
+        <Border x:Name="ButtonBorder" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="7" SnapsToDevicePixels="True">
+          <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="8,2" RecognizesAccessKey="True"/>
+        </Border>
+        <ControlTemplate.Triggers>
+          <Trigger Property="IsMouseOver" Value="True">
+            <Setter TargetName="ButtonBorder" Property="Background" Value="$HoverColor"/>
+            <Setter TargetName="ButtonBorder" Property="BorderBrush" Value="$HoverBorderColor"/>
+          </Trigger>
+          <Trigger Property="IsPressed" Value="True">
+            <Setter TargetName="ButtonBorder" Property="Background" Value="$PressedColor"/>
+          </Trigger>
+          <Trigger Property="IsEnabled" Value="False">
+            <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.55"/>
+          </Trigger>
+        </ControlTemplate.Triggers>
+      </ControlTemplate>
+    </Setter.Value>
+  </Setter>
+</Style>
+"@
+        return [Windows.Markup.XamlReader]::Parse($styleXaml)
+    }
+
+    $result = @{ Choice = 'Cancel' }
+    $preserve = New-Object System.Windows.Controls.Button
+    $preserve.Content = 'Uninstall only — keep data & settings'
+    $preserve.Height = 40; $preserve.Margin = '0,0,0,8'; $preserve.Padding = '12,8'
+    $preserve.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#293B50')
+    $preserve.Foreground = [System.Windows.Media.Brushes]::White; $preserve.FontWeight = 'SemiBold'
+    $preserve.Cursor = [System.Windows.Input.Cursors]::Hand
+    $preserve.Style = New-AMRUninstallButtonStyle -HoverColor '#354B63' -PressedColor '#1D2B3B'
+    $preserve.Add_Click({ $result.Choice = 'UninstallOnly'; $dialog.Close() }.GetNewClosure())
+    $root.Children.Add($preserve) | Out-Null
+
+    $complete = New-Object System.Windows.Controls.Button
+    $complete.Content = 'Complete uninstall — remove app files & settings too'
+    $complete.Height = 40; $complete.Margin = '0,0,0,8'; $complete.Padding = '12,8'
+    $complete.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#B94A52')
+    $complete.Foreground = [System.Windows.Media.Brushes]::White; $complete.FontWeight = 'SemiBold'
+    $complete.Cursor = [System.Windows.Input.Cursors]::Hand
+    $complete.Style = New-AMRUninstallButtonStyle -HoverColor '#C65A62' -PressedColor '#963842' -BorderColor '#D9777E' -HoverBorderColor '#E58B91'
+    $complete.Add_Click({ $result.Choice = 'Complete'; $dialog.Close() }.GetNewClosure())
+    $root.Children.Add($complete) | Out-Null
+
+    $note = New-Object System.Windows.Controls.TextBlock
+    $note.Text = 'Complete uninstall targets only verified app-specific folders and registry entries. Personal documents, projects, downloads, and shared folders are protected.'
+    $note.TextWrapping = 'Wrap'; $note.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FBBF24'); $note.Margin = '0,4,0,10'
+    $root.Children.Add($note) | Out-Null
+    $cancel = New-Object System.Windows.Controls.Button
+    $cancel.Content = 'Cancel'; $cancel.HorizontalAlignment = 'Right'; $cancel.Width = 110; $cancel.Height = 34
+    $cancel.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#B94A52'); $cancel.Foreground = [System.Windows.Media.Brushes]::White
+    $cancel.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#D9777E')
+    $cancel.Cursor = [System.Windows.Input.Cursors]::Hand
+    $cancel.Style = New-AMRUninstallButtonStyle -HoverColor '#C65A62' -PressedColor '#963842' -BorderColor '#D9777E' -HoverBorderColor '#E58B91'
+    $cancel.Add_Click({ $dialog.Close() })
+    $root.Children.Add($cancel) | Out-Null
+    $dialog.Content = $root
+    [void]$dialog.ShowDialog()
+    return [string]$result.Choice
+}
+
+function Get-AMRExactUninstallEntry {
+    param([string]$AppName)
+    $paths = @(
+        'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKCU:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    foreach ($path in $paths) {
+        try {
+            $entry = Get-ItemProperty -Path $path -ErrorAction SilentlyContinue | Where-Object {
+                $_.PSObject.Properties['DisplayName'] -and ([string]$_.DisplayName).Trim().Equals($AppName.Trim(), [StringComparison]::OrdinalIgnoreCase)
+            } | Select-Object -First 1
+            if ($entry) { return $entry }
+        } catch {}
+    }
+    return $null
+}
+
+function Get-AMRSafeCleanupCandidates {
+    param($App)
+    $candidates = New-Object System.Collections.Generic.List[string]
+    $entry = Get-AMRExactUninstallEntry -AppName ([string]$App.Name)
+    # InstallLocation is optional in Windows uninstall registry entries. Access it
+    # through PSObject.Properties so entries without that value cannot throw.
+    $installLocationProperty = if ($entry) { $entry.PSObject.Properties['InstallLocation'] } else { $null }
+    if ($installLocationProperty -and -not [string]::IsNullOrWhiteSpace([string]$installLocationProperty.Value)) {
+        try {
+            $full = [IO.Path]::GetFullPath([string]$installLocationProperty.Value).TrimEnd('\')
+            $leaf = [IO.Path]::GetFileName($full)
+            $normLeaf = ($leaf -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
+            $normName = ([string]$App.Name -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
+            $protectedRoots = @($env:USERPROFILE, $env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData, $env:WINDIR) | Where-Object { $_ }
+            $isProtectedRoot = $false
+            foreach ($rootPath in $protectedRoots) {
+                try { if ($full.Equals([IO.Path]::GetFullPath($rootPath).TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) { $isProtectedRoot = $true } } catch {}
+            }
+            if (-not $isProtectedRoot -and $normLeaf -eq $normName -and (Test-Path -LiteralPath $full -PathType Container)) { $candidates.Add($full) }
+        } catch {}
+    }
+    # AppData is included only when the folder name is an exact normalized match.
+    $appDataRoots = @((Join-Path $env:APPDATA ''), (Join-Path $env:LOCALAPPDATA '')) | Where-Object { $_ }
+    $normalizedName = ([string]$App.Name -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
+    foreach ($rootPath in $appDataRoots) {
+        try {
+            if (Test-Path -LiteralPath $rootPath) {
+                foreach ($folder in @(Get-ChildItem -LiteralPath $rootPath -Directory -ErrorAction SilentlyContinue)) {
+                    $normalizedLeaf = ($folder.Name -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
+                    if ($normalizedLeaf -eq $normalizedName -and -not $candidates.Contains($folder.FullName)) { $candidates.Add($folder.FullName) }
+                }
+            }
+        } catch {}
+    }
+    return @($candidates)
+}
+
+function Remove-AMRExactUninstallRegistryEntry {
+    param([string]$AppName)
+    $entry = Get-AMRExactUninstallEntry -AppName $AppName
+    if (-not $entry) { return $false }
+    $keyPath = [string]$entry.PSPath
+    if ([string]::IsNullOrWhiteSpace($keyPath)) { return $false }
+    # Re-check the exact DisplayName immediately before deleting this one uninstall metadata key.
+    try {
+        $current = Get-ItemProperty -LiteralPath $keyPath -ErrorAction Stop
+        if (-not $current.PSObject.Properties['DisplayName'] -or
+            -not ([string]$current.DisplayName).Trim().Equals($AppName.Trim(), [StringComparison]::OrdinalIgnoreCase)) { return $false }
+        Remove-Item -LiteralPath $keyPath -Recurse -Force -ErrorAction Stop
+        Write-AMRLog "Removed exact uninstall registry metadata for '$AppName'." SUCCESS Software
+        return $true
+    } catch {
+        Write-AMRLog "Could not remove exact uninstall registry metadata for '$AppName': $($_.Exception.Message)" WARNING Software
+        return $false
+    }
+}
+
+function Wait-AMRUninstallProcess {
+    param(
+        [Parameter(Mandatory=$true)]$Process,
+        [Parameter(Mandatory=$true)][string]$AppName
+    )
+
+    if (-not $Process) { throw 'The uninstaller process was not created.' }
+    $script:ProgressBar.IsIndeterminate = $true
+    $script:ProgressText.Text = "Uninstalling $AppName... waiting for the uninstaller to finish."
+
+    # Keep WPF responsive while a native uninstaller runs. The indeterminate bar
+    # intentionally communicates activity, not a fabricated percentage.
+    $frame = New-Object System.Windows.Threading.DispatcherFrame
+    $timer = New-Object System.Windows.Threading.DispatcherTimer
+    $timer.Interval = [TimeSpan]::FromMilliseconds(180)
+    $tickHandler = {
+        try {
+            $Process.Refresh()
+            if ($Process.HasExited) {
+                $timer.Stop()
+                $frame.Continue = $false
+            }
+        } catch {
+            $timer.Stop()
+            $frame.Continue = $false
+        }
+    }.GetNewClosure()
+    $timer.Add_Tick($tickHandler)
+    try {
+        $timer.Start()
+        [System.Windows.Threading.Dispatcher]::PushFrame($frame)
+        $Process.Refresh()
+        if (-not $Process.HasExited) { [void]$Process.WaitForExit() }
+        return [int]$Process.ExitCode
+    } finally {
+        try { $timer.Stop(); $timer.Remove_Tick($tickHandler) } catch {}
+        $script:ProgressBar.IsIndeterminate = $false
+    }
+}
+
+function Invoke-AMRExactNativeUninstall {
+    param(
+        $App,
+        [bool]$KeepData = $true,
+        [bool]$Complete = $false
+    )
+
+    # Keep a full attempt trail. A failed registry uninstaller must NOT prevent
+    # trying the exact package-manager identity configured for this catalog item.
+    $attempts = New-Object System.Collections.Generic.List[string]
+    $entry = Get-AMRExactUninstallEntry -AppName ([string]$App.Name)
+
+    if ($entry) {
+        $isMsi = $false
+        try { $isMsi = ([int]$entry.WindowsInstaller -eq 1) } catch {}
+        $quietUninstallText = ''
+        $normalUninstallText = ''
+        if ($entry.PSObject.Properties['QuietUninstallString']) { $quietUninstallText = [string]$entry.QuietUninstallString }
+        if ($entry.PSObject.Properties['UninstallString']) { $normalUninstallText = [string]$entry.UninstallString }
+        $uninstallText = if (-not [string]::IsNullOrWhiteSpace($quietUninstallText)) {
+            $quietUninstallText
+        } else { $normalUninstallText }
+        $productCode = $null
+        if ($uninstallText -match '(?i)\{[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\}') { $productCode = $Matches[0] }
+        if (-not $productCode -and [string]$entry.PSChildName -match '^\{[0-9a-fA-F-]{36}\}$') { $productCode = [string]$entry.PSChildName }
+
+        if (($isMsi -or $productCode) -and $productCode) {
+            try {
+                $msiArgs = @('/x', $productCode)
+                if (-not $KeepData) { $msiArgs += @('/qn', '/norestart') }
+                else { $msiArgs += @('/passive', '/norestart') }
+                $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs -PassThru -ErrorAction Stop
+                $uninstallExitCode = Wait-AMRUninstallProcess -Process $proc -AppName ([string]$App.Name)
+                try { $proc.Dispose() } catch {}
+                if ($uninstallExitCode -in @(0,1641,3010)) {
+                    return [pscustomobject]@{ Success=$true; Detail="Native MSI uninstall succeeded (exit $uninstallExitCode)." }
+                }
+                $attempts.Add("MSI uninstall returned exit code $uninstallExitCode")
+            } catch { $attempts.Add("MSI uninstall error: $($_.Exception.Message)") }
+        } elseif (-not [string]::IsNullOrWhiteSpace($uninstallText)) {
+            try {
+                # Parse quoted executable paths correctly; never use Invoke-Expression.
+                if ($uninstallText -match '^\s*"(?<exe>[^"]+)"\s*(?<args>.*)$') {
+                    $exe = $Matches.exe; $args = [string]$Matches.args
+                } elseif ($uninstallText -match '^\s*(?<exe>.+?\.exe)\s*(?<args>.*)$') {
+                    $exe = $Matches.exe.Trim('"'); $args = [string]$Matches.args
+                } else {
+                    throw "Could not safely parse uninstall command: $uninstallText"
+                }
+                if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+                    throw "Uninstaller executable was not found: $exe"
+                }
+                # Resolve the product installation directory for uninstallers that
+                # require their original working directory (notably NSIS).
+                $installDir = ''
+                $installLocationProperty = $entry.PSObject.Properties['InstallLocation']
+                if ($installLocationProperty) { $installDir = [string]$installLocationProperty.Value }
+                if ([string]::IsNullOrWhiteSpace($installDir)) {
+                    try {
+                        $installDir = Split-Path -Parent $exe
+                    } catch { $installDir = '' }
+                }
+                if ([string]$App.Id -ieq 'MetaBrainz.Picard' -and
+                    (Test-Path -LiteralPath 'HKLM:\Software\MusicBrainz\Picard')) {
+                    try {
+                        $picardInstall = (Get-ItemProperty -LiteralPath 'HKLM:\\Software\\Musicbrainz\\Picard' -Name InstallDir -ErrorAction Stop).InstallDir
+                        if (-not [string]::IsNullOrWhiteSpace([string]$picardInstall) -and
+                            (Test-Path -LiteralPath ([string]$picardInstall) -PathType Container)) {
+                            $installDir = [string]$picardInstall
+                        }
+                    } catch {}
+                }
+
+                # MusicBrainz Picard's Windows installer is NSIS-based. Its own
+                # installer source explicitly launches uninst.exe with:
+                #   /S _?=<original install directory>
+                # Running the registry UninstallString unchanged opens the
+                # interactive uninstaller and can leave this utility waiting.
+                # Apply the same verified NSIS convention to uninst.exe entries.
+                $isNsisUninstaller = ([IO.Path]::GetFileName($exe) -ieq 'uninst.exe')
+                if (-not $isNsisUninstaller) {
+                    # Some NSIS builds use uninstall.exe. Detect the NSIS marker
+                    # before adding NSIS-only switches to avoid guessing.
+                    try {
+                        $probeLength = [int][Math]::Min((Get-Item -LiteralPath $exe -ErrorAction Stop).Length, 2097152)
+                        if ($probeLength -gt 0) {
+                            $stream = [IO.File]::OpenRead($exe)
+                            try {
+                                $buffer = New-Object byte[] $probeLength
+                                [void]$stream.Read($buffer, 0, $probeLength)
+                                $probeText = [Text.Encoding]::ASCII.GetString($buffer)
+                                if ($probeText -match '(?i)Nullsoft Install System') { $isNsisUninstaller = $true }
+                            } finally { $stream.Dispose() }
+                        }
+                    } catch {}
+                }
+
+                $uninstallArgsText = [string]$args
+                if ($isNsisUninstaller) {
+                    if ($uninstallArgsText -notmatch '(?i)(^|\s)/S(\s|$)') {
+                        $uninstallArgsText = ($uninstallArgsText + ' /S').Trim()
+                    }
+                    if (-not [string]::IsNullOrWhiteSpace($installDir) -and $uninstallArgsText -notmatch '(?i)_\?=') {
+                        $uninstallArgsText += (' _?="' + $installDir.TrimEnd('\') + '"')
+                    }
+                    $attempts.Add("Detected NSIS uninstaller; supplied silent mode and original install directory.")
+                }
+
+                $proc = Start-Process -FilePath $exe -ArgumentList $uninstallArgsText -PassThru -ErrorAction Stop
+                $uninstallExitCode = Wait-AMRUninstallProcess -Process $proc -AppName ([string]$App.Name)
+                try { $proc.Dispose() } catch {}
+                if ($uninstallExitCode -in @(0,1641,3010)) {
+                    return [pscustomobject]@{ Success=$true; Detail="Native uninstaller succeeded (exit $uninstallExitCode)." }
+                }
+                $attempts.Add("Native uninstaller returned exit code $uninstallExitCode")
+            } catch { $attempts.Add("Native uninstaller error: $($_.Exception.Message)") }
+        } else {
+            $attempts.Add('Exact registry entry exists but has no usable uninstall command.')
+        }
+    } else {
+        $attempts.Add('No exact DisplayName registry uninstall entry was found.')
+    }
+
+    # AppX/MSIX: exact package identity only. Do not remove packages by partial name.
+    try {
+        $appxIds = @([string]$App.Id, [string]$App.Name) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+        $appxPackage = Get-AppxPackage -ErrorAction SilentlyContinue | Where-Object {
+            $pkg = $_
+            foreach ($identity in $appxIds) {
+                if ($pkg.Name -ieq $identity -or $pkg.PackageFamilyName -ieq $identity -or $pkg.PackageFullName -ieq $identity) { return $true }
+            }
+            return $false
+        } | Select-Object -First 1
+        if ($appxPackage) {
+            try {
+                if ($KeepData) {
+                    $removeCommand = Get-Command Remove-AppxPackage -ErrorAction Stop
+                    if (-not $removeCommand.Parameters.ContainsKey('PreserveApplicationData')) {
+                        $attempts.Add('AppX package found, but this Windows version cannot preserve its application data.')
+                    } else {
+                        Remove-AppxPackage -Package ([string]$appxPackage.PackageFullName) -PreserveApplicationData -ErrorAction Stop
+                        return [pscustomobject]@{ Success=$true; Detail='Exact AppX/MSIX package removed for current user; app data preservation requested.' }
+                    }
+                } else {
+                    Remove-AppxPackage -Package ([string]$appxPackage.PackageFullName) -ErrorAction Stop
+                    return [pscustomobject]@{ Success=$true; Detail='Exact AppX/MSIX package removed for current user.' }
+                }
+            } catch { $attempts.Add("AppX/MSIX uninstall error: $($_.Exception.Message)") }
+        }
+    } catch { $attempts.Add("AppX/MSIX detection error: $($_.Exception.Message)") }
+
+    # Scoop: match an exact installed app directory, then invoke Scoop by that exact name.
+    try {
+        $scoopCandidates = @([string]$App.Name, [string]$App.Id, [string]$App.ChocoId) |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            ForEach-Object { ($_ -replace '[^a-zA-Z0-9]','').ToLowerInvariant() } |
+            Where-Object { $_.Length -ge 3 } | Select-Object -Unique
+        $scoopRoots = @()
+        if ($env:SCOOP) { $scoopRoots += $env:SCOOP }
+        if ($env:SCOOP_GLOBAL) { $scoopRoots += $env:SCOOP_GLOBAL }
+        if ($env:USERPROFILE) { $scoopRoots += (Join-Path $env:USERPROFILE 'scoop') }
+        if ($env:ProgramData) { $scoopRoots += (Join-Path $env:ProgramData 'scoop') }
+        $scoopAppName = $null
+        foreach ($rootPath in @($scoopRoots | Select-Object -Unique)) {
+            $appsPath = Join-Path $rootPath 'apps'
+            if (-not (Test-Path -LiteralPath $appsPath -PathType Container)) { continue }
+            foreach ($folder in @(Get-ChildItem -LiteralPath $appsPath -Directory -ErrorAction SilentlyContinue)) {
+                $observed = ($folder.Name -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
+                if ($scoopCandidates -contains $observed) { $scoopAppName = [string]$folder.Name; break }
+            }
+            if ($scoopAppName) { break }
+        }
+        if ($scoopAppName) {
+            $scoop = Get-Command scoop -ErrorAction SilentlyContinue
+            if ($scoop) {
+                $scoopArgs = @('uninstall', $scoopAppName)
+                if ($Complete) { $scoopArgs += '--purge' }
+                & $scoop.Source @scoopArgs 2>&1 | Out-Null
+                $scoopExitCode = $LASTEXITCODE
+                if ($scoopExitCode -eq 0) { return [pscustomobject]@{ Success=$true; Detail="Scoop removed exact app '$scoopAppName' (exit 0)." } }
+                $attempts.Add("Scoop uninstall returned exit code $scoopExitCode for '$scoopAppName'.")
+            } else { $attempts.Add('Scoop app folder matched, but the Scoop command is unavailable.') }
+        }
+    } catch { $attempts.Add("Scoop uninstall error: $($_.Exception.Message)") }
+
+    # WinGet fallback is attempted even when a registry entry exists but its native
+    # uninstaller failed. Use the catalog's exact package ID, never a fuzzy name.
+    $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+    if ($winget -and -not [string]::IsNullOrWhiteSpace([string]$App.Id)) {
+        try {
+            $wgArgs = @('uninstall','--id',[string]$App.Id,'--exact','--accept-source-agreements')
+            if ($Complete) { $wgArgs += '--purge' }
+            $wgArgs += @('--silent','--disable-interactivity')
+            $proc = Start-Process -FilePath $winget.Source -ArgumentList $wgArgs -PassThru -WindowStyle Hidden -ErrorAction Stop
+            $uninstallExitCode = Wait-AMRUninstallProcess -Process $proc -AppName ([string]$App.Name)
+            try { $proc.Dispose() } catch {}
+            if ($uninstallExitCode -in @(0,1641,3010)) { return [pscustomobject]@{ Success=$true; Detail="WinGet exact-ID uninstall succeeded (exit $uninstallExitCode)." } }
+            $attempts.Add("WinGet exact-ID uninstall returned exit code $uninstallExitCode.")
+        } catch { $attempts.Add("WinGet uninstall error: $($_.Exception.Message)") }
+    }
+
+    # Chocolatey exact package ID fallback.
+    $choco = Get-Command choco.exe -ErrorAction SilentlyContinue
+    if ($choco -and -not [string]::IsNullOrWhiteSpace([string]$App.ChocoId)) {
+        try {
+            $proc = Start-Process -FilePath $choco.Source -ArgumentList @('uninstall',[string]$App.ChocoId,'-y','--no-progress') -PassThru -WindowStyle Hidden -ErrorAction Stop
+            $uninstallExitCode = Wait-AMRUninstallProcess -Process $proc -AppName ([string]$App.Name)
+            try { $proc.Dispose() } catch {}
+            if ($uninstallExitCode -in @(0,1641,3010)) { return [pscustomobject]@{ Success=$true; Detail="Chocolatey exact-ID uninstall succeeded (exit $uninstallExitCode)." } }
+            $attempts.Add("Chocolatey uninstall returned exit code $uninstallExitCode.")
+        } catch { $attempts.Add("Chocolatey uninstall error: $($_.Exception.Message)") }
+    }
+
+    return [pscustomobject]@{ Success=$false; Detail=('All supported exact uninstall methods failed or were unavailable: ' + ($attempts -join ' | ')) }
+}
+
+function Invoke-AMRSelectedUninstall {
+    if ($script:InstallRunning) { Show-AMRMessage 'Another software operation is currently running.' 'AMR Uninstall' OK Warning | Out-Null; return }
+    if (-not $script:ShowInstalledOnly) { Show-AMRMessage 'Switch to Show Installed before using Uninstall.' 'AMR Uninstall' OK Warning | Out-Null; return }
+    $selected = @($script:SoftwareCatalog | Where-Object { $_.IsSelected -eq $true -and $_.IsInstalled -eq $true })
+    if ($selected.Count -eq 0) { Show-AMRMessage 'Select one or more detected installed applications first.' 'Selection Required' OK Warning | Out-Null; return }
+    $choice = Show-AMRUninstallChoice -ApplicationNames @($selected | ForEach-Object { [string]$_.Name })
+    if ($choice -eq 'Cancel') { return }
+
+    $cleanupMap = @{}
+    if ($choice -eq 'Complete') {
+        foreach ($app in $selected) { $cleanupMap[[string]$app.Name] = @(Get-AMRSafeCleanupCandidates -App $app) }
+        $previewLines = @()
+        foreach ($app in $selected) {
+            $paths = @($cleanupMap[[string]$app.Name])
+            $previewLines += if ($paths.Count) { "• $($app.Name)`n  " + ($paths -join "`n  ") } else { "• $($app.Name): no additional app-specific folders verified" }
+        }
+        $preview = "Complete uninstall will remove only these verified app-specific folders after the native uninstall succeeds:`n`n" + ($previewLines -join "`n`n") + "`n`nPersonal files and shared folders are excluded. Continue?"
+        $confirm = Show-AMRMessage $preview 'Confirm Complete Uninstall' YesNo Warning
+        if ($confirm -ne [System.Windows.MessageBoxResult]::Yes) { return }
+    } else {
+        $confirm = Show-AMRMessage ("Uninstall the following application(s) while keeping their user data and settings?`n`n" + (($selected | ForEach-Object { '• ' + $_.Name }) -join "`n")) 'Confirm Uninstall' YesNo Warning
+        if ($confirm -ne [System.Windows.MessageBoxResult]::Yes) { return }
+    }
+
+    Set-AMRInstallButtonsEnabled -Enabled $false
+    $script:ProgressBar.IsIndeterminate = $false
+    $script:ProgressBar.Value = 0
+    $script:ProgressText.Text = "Uninstall queued: 0% (0/$($selected.Count) applications completed)."
+    $success = 0; $failed = 0; $removedFolders = 0
+    try {
+        for ($i=0; $i -lt $selected.Count; $i++) {
+            $app = $selected[$i]
+            $script:ProgressBar.IsIndeterminate = $true
+            $completedBefore = [math]::Round(($i / $selected.Count) * 100)
+            $script:ProgressText.Text = "Uninstalling $($app.Name)... ($completedBefore% completed; current app in progress)"
+            Write-AMRLog "Starting uninstall for '$($app.Name)' (mode: $choice)." INFO Software
+            try {
+                $result = Invoke-AMRExactNativeUninstall -App $app -KeepData:($choice -eq 'UninstallOnly') -Complete:($choice -eq 'Complete')
+                if ($result.Success) {
+                    $success++
+                    Write-AMRLog "Uninstall succeeded for '$($app.Name)': $($result.Detail)" SUCCESS Software
+                    if ($choice -eq 'Complete') {
+                        [void](Remove-AMRExactUninstallRegistryEntry -AppName ([string]$app.Name))
+                        foreach ($folderPath in @($cleanupMap[[string]$app.Name])) {
+                            try {
+                                $resolved = [IO.Path]::GetFullPath([string]$folderPath).TrimEnd('\')
+                                if ((Test-Path -LiteralPath $resolved -PathType Container) -and [IO.Path]::GetFileName($resolved)) {
+                                    Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction Stop
+                                    $removedFolders++
+                                    Write-AMRLog "Removed verified app-specific folder: $resolved" SUCCESS Software
+                                }
+                            } catch { Write-AMRLog "Could not remove '$folderPath': $($_.Exception.Message)" WARNING Software }
+                        }
+                    }
+                } else { $failed++; Write-AMRLog "Uninstall not completed for '$($app.Name)': $($result.Detail)" WARNING Software }
+            } catch { $failed++; Write-AMRLog "Uninstall failed for '$($app.Name)': $($_.Exception.Message)" ERROR Software }
+            $script:ProgressBar.IsIndeterminate = $false
+            $script:ProgressBar.Value = [math]::Round((($i+1)/$selected.Count)*100)
+            $script:ProgressText.Text = "Uninstall progress: $([int]$script:ProgressBar.Value)% ($($i+1)/$($selected.Count) applications completed)."
+        }
+    } finally {
+        $script:ProgressBar.IsIndeterminate = $false
+        Set-AMRInstallButtonsEnabled -Enabled $true
+        try { Start-AMRInstalledCatalogScan -Refresh -ShowWhenReady:([bool]$script:ShowInstalledOnly) } catch { Write-AMRLog "Could not schedule the post-uninstall inventory refresh: $($_.Exception.Message)" WARNING Software }
+        $script:AppsView.Refresh()
+        foreach ($app in $script:SoftwareCatalog) { $app.IsSelected = $false }
+    }
+    $script:ProgressBar.IsIndeterminate = $false
+    $script:ProgressBar.Value = 100
+    $script:ProgressText.Text = "Uninstall finished: $success succeeded, $failed failed."
+    Show-AMRMessage ("Uninstall summary`n`nSucceeded: $success`nFailed or unsupported: $failed`nApp-specific folders removed: $removedFolders`n`nSome uninstallers may request a restart.") 'AMR Uninstall Summary' OK Information | Out-Null
+}
+
 # BUTTON BINDINGS
 (C 'InstallSelectedBtn').Add_Click({
     Execute-SmartMultiTierInstallAsync -ActionCommand 'install' -ActionName 'Smart Silent Install'
@@ -4823,6 +5808,8 @@ function Execute-SmartMultiTierInstallAsync {
 (C 'RepairSelectedBtn').Add_Click({
     Execute-SmartMultiTierInstallAsync -ActionCommand 'repair' -ActionName 'App Repair'
 })
+
+(C 'UninstallSelectedBtn').Add_Click({ Invoke-AMRSelectedUninstall })
 
 # --- 8. MEGA CUSTOMIZE EXECUTION ENGINE (27 TOOLS & TWEAKS) ---
 (C 'ApplyCustomizeBtn').Add_Click({
@@ -6961,4 +7948,7 @@ Update-AMRUtilitiesView
 Write-AMRLog ('Amr | windows_utility initialized. ' + $script:AMRReliabilityPhase) INFO System
 Refresh-AMROverview
 Write-AMRLog 'Utility Ready.' SUCCESS System
+# Warm the installed-app inventory before the user opens Show Installed.
+# This scan is asynchronous and never blocks the WPF startup thread.
+Start-AMRInstalledCatalogScan
 [void]$script:Window.ShowDialog()
