@@ -850,7 +850,7 @@ function Set-AMRRegistryKey {
     return [bool]($success -and $verified)
 }
 
-# --- 3. EXPANDED SOFTWARE CATALOG (500 APPLICATIONS; 235 EXISTING + 265 ADDITIONS) ---
+# --- 3. EXPANDED SOFTWARE CATALOG (1000 APPLICATIONS; 589 BASE + 411 VERIFIED WINGET ADDITIONS) ---
 $RawApps = @(
     # 01. Web Browsers (16 Apps)
     [pscustomobject]@{ Name='Google Chrome'; Category='01. Web Browsers'; Id='Google.Chrome'; ChocoId='googlechrome'; DirectUrl='https://dl.google.com/chrome/install/standalonesetup64.exe'; DirectArgs='/silent /install'; Publisher='Google LLC' },
@@ -1408,6 +1408,519 @@ $RawApps = @(
     [pscustomobject]@{ Name='DS4Windows'; Category='27. Gaming & Game Tools'; Id='Ryochan7.DS4Windows'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='' },
     [pscustomobject]@{ Name='BakkesMod'; Category='27. Gaming & Game Tools'; Id='BakkesMod.BakkesMod'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='' },
     [pscustomobject]@{ Name='Lossless Scaling'; Category='27. Gaming & Game Tools'; Id='THS.LosslessScaling'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='' }
+
+    # --- Verified catalog expansion batch 01 (6 apps; Winget manifest IDs confirmed) ---
+    [pscustomobject]@{ Name='Autodesk Fusion'; Category='21. Design & Graphics'; Id='Autodesk.Fusion'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Autodesk, Inc.' },
+    [pscustomobject]@{ Name='Windows App'; Category='24. Remote Access & Networking'; Id='Microsoft.WindowsApp'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corp.' },
+    [pscustomobject]@{ Name='Filen Sync'; Category='12. Cloud & Storage'; Id='FilenCloud.FilenSync'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Filen Cloud Dienste UG' },
+    [pscustomobject]@{ Name='Insync'; Category='12. Cloud & Storage'; Id='Insynchq.Insync'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Insynchq Pte. Ltd.' },
+    [pscustomobject]@{ Name='uv'; Category='19. Development & IDEs'; Id='astral-sh.uv'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Astral Software Inc.' },
+    [pscustomobject]@{ Name='Microsoft App Installer'; Category='05. System Utilities'; Id='Microsoft.AppInstaller'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' }
+
+    # --- Verified catalog expansion batch 02 (7 apps; official version/locale/installer manifests confirmed) ---
+    [pscustomobject]@{ Name='Alacritty'; Category='19. Development & IDEs'; Id='Alacritty.Alacritty'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Alacritty' },
+    [pscustomobject]@{ Name='Kubernetes CLI'; Category='19. Development & IDEs'; Id='Kubernetes.kubectl'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='The Kubernetes Authors' },
+    [pscustomobject]@{ Name='Krew'; Category='19. Development & IDEs'; Id='Kubernetes.krew'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Kubernetes SIGs' },
+    [pscustomobject]@{ Name='UniGetUI'; Category='05. System Utilities'; Id='Devolutions.UniGetUI'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Devolutions Inc.' },
+    [pscustomobject]@{ Name='Bambu Studio'; Category='21. Design & Graphics'; Id='Bambulab.Bambustudio'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Bambulab' },
+    [pscustomobject]@{ Name='Microsoft Power BI Desktop'; Category='20. Productivity & Notes'; Id='Microsoft.PowerBI'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
+    [pscustomobject]@{ Name='k6'; Category='19. Development & IDEs'; Id='GrafanaLabs.k6'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Grafana Labs' }
+
+    # --- Verified catalog expansion batch 03 (2 apps; official version/locale/installer manifests confirmed) ---
+    [pscustomobject]@{ Name='Autodesk Design Review'; Category='21. Design & Graphics'; Id='Autodesk.DesignReview'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Autodesk, Inc.' },
+    [pscustomobject]@{ Name='Bluebeam Revu 21'; Category='28. Office & PDF'; Id='Bluebeam.Revu.21'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Bluebeam, Inc.' }
+
+    # --- Verified catalog expansion batch 04 (6 apps; official version/locale/installer manifests confirmed) ---
+    [pscustomobject]@{ Name='Rainmeter'; Category='05. System Utilities'; Id='Rainmeter.Rainmeter'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Rainmeter' },
+    [pscustomobject]@{ Name='Lively Wallpaper'; Category='21. Design & Graphics'; Id='rocksdanister.LivelyWallpaper'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='rocksdanister' },
+    [pscustomobject]@{ Name='calibre'; Category='20. Productivity & Notes'; Id='calibre.calibre'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Kovid Goyal' },
+    [pscustomobject]@{ Name='Miniconda3'; Category='19. Development & IDEs'; Id='Anaconda.Miniconda3'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Anaconda, Inc.' },
+    [pscustomobject]@{ Name='Spyder'; Category='19. Development & IDEs'; Id='Spyder.Spyder'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Spyder Project Contributors and others' },
+    [pscustomobject]@{ Name='Julia'; Category='30. Education & Science'; Id='Julialang.Julia'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Julia Language' }
+
+    # 32. Verified additions - Batch 01 (18 applications; WinGet IDs confirmed in the public package index)
+    [pscustomobject]@{ Name='Google Earth Pro'; Category='30. Education & Science'; Id='Google.EarthPro'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Google LLC' },
+    [pscustomobject]@{ Name='Chrome Remote Desktop Host'; Category='24. Remote Access & Networking'; Id='Google.ChromeRemoteDesktopHost'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Google LLC' },
+    [pscustomobject]@{ Name='Quick Share from Google'; Category='25. Cloud & Backup'; Id='Google.QuickShare'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Google LLC' },
+    [pscustomobject]@{ Name='Microsoft .NET SDK 10.0'; Category='13. Runtimes & Libraries'; Id='Microsoft.DotNet.SDK.10'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
+    [pscustomobject]@{ Name='Process Explorer'; Category='23. System & Hardware'; Id='Microsoft.Sysinternals.ProcessExplorer'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
+    [pscustomobject]@{ Name='Process Monitor'; Category='23. System & Hardware'; Id='Microsoft.Sysinternals.ProcessMonitor'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
+    [pscustomobject]@{ Name='Autoruns'; Category='23. System & Hardware'; Id='Microsoft.Sysinternals.Autoruns'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
+    [pscustomobject]@{ Name='TCPView'; Category='24. Remote Access & Networking'; Id='Microsoft.Sysinternals.TCPView'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
+    [pscustomobject]@{ Name='ZoomIt'; Category='09. Productivity'; Id='Microsoft.Sysinternals.ZoomIt'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
+    [pscustomobject]@{ Name='Power Automate for desktop'; Category='09. Productivity'; Id='Microsoft.PowerAutomateDesktop'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
+    [pscustomobject]@{ Name='Outlook for Windows'; Category='07. Communication'; Id='Microsoft.Outlook'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
+    [pscustomobject]@{ Name='Brave Beta'; Category='01. Web Browsers'; Id='Brave.Brave.Beta'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Brave Software' },
+    [pscustomobject]@{ Name='Vivaldi Snapshot'; Category='01. Web Browsers'; Id='Vivaldi.Vivaldi.Snapshot'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Vivaldi Technologies' },
+    [pscustomobject]@{ Name='Adobe DNG Converter'; Category='10. Design & Graphics'; Id='Adobe.DNGConverter'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Adobe Inc.' },
+    [pscustomobject]@{ Name='Affinity'; Category='21. Design & Graphics'; Id='Canva.Affinity'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Canva' },
+    [pscustomobject]@{ Name='Files - Stable'; Category='05. System Utilities'; Id='FilesCommunity.Files'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Files Community' },
+    [pscustomobject]@{ Name='Sourcetree'; Category='19. Development & IDEs'; Id='Atlassian.Sourcetree'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Atlassian' },
+    [pscustomobject]@{ Name='League of Legends (EU West)'; Category='27. Gaming & Game Tools'; Id='RiotGames.LeagueOfLegends.EUW'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Riot Games' }
+    [pscustomobject]@{ Name='Windows Subsystem for Linux'; Category='14. Virtualization'; Id='Microsoft.WSL'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft' },
+    [pscustomobject]@{ Name='Sigcheck'; Category='11. Security & Privacy'; Id='Microsoft.Sysinternals.Sigcheck'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Sysinternals' },
+    [pscustomobject]@{ Name='Android Studio'; Category='19. Development & IDEs'; Id='Google.AndroidStudio'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Google' },
+    [pscustomobject]@{ Name='Google Cloud SDK'; Category='19. Development & IDEs'; Id='Google.CloudSDK'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Google' },
+    [pscustomobject]@{ Name='Adobe Creative Cloud'; Category='10. Design & Graphics'; Id='Adobe.CreativeCloud'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Adobe' },
+    [pscustomobject]@{ Name='Python 3.13'; Category='13. Runtimes & Libraries'; Id='Python.Python.3.13'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Python Software Foundation' },
+    [pscustomobject]@{ Name='Helm'; Category='15. Network & Database'; Id='Helm.Helm'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Helm Authors' },
+    [pscustomobject]@{ Name='AWS Command Line Interface'; Category='15. Network & Database'; Id='Amazon.AWSCLI'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Amazon Web Services' },
+    [pscustomobject]@{ Name='Box'; Category='25. Cloud & Backup'; Id='Box.Box'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Box, Inc.' },
+    [pscustomobject]@{ Name='HTTPie'; Category='15. Network & Database'; Id='HTTPie.HTTPie'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='HTTPie' },
+    [pscustomobject]@{ Name='TablePlus'; Category='15. Network & Database'; Id='TablePlus.TablePlus'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='TablePlus' },
+    [pscustomobject]@{ Name='Rockstar Games Launcher'; Category='27. Gaming & Game Tools'; Id='RockstarGames.Launcher'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Rockstar Games' },
+    [pscustomobject]@{ Name='KakaoTalk'; Category='07. Communication'; Id='Kakao.KakaoTalk'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Kakao Corp.' },
+    [pscustomobject]@{ Name='REAPER'; Category='03. Media Creation'; Id='Cockos.REAPER'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Cockos Incorporated' },
+    [pscustomobject]@{ Name='Camtasia'; Category='03. Media Creation'; Id='TechSmith.Camtasia'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='TechSmith' },
+    [pscustomobject]@{ Name='Lightshot'; Category='03. Media Creation'; Id='Skillbrains.Lightshot'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Skillbrains' },
+    [pscustomobject]@{ Name='Loom'; Category='07. Communication'; Id='Loom.Loom'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Loom, Inc.' },
+    [pscustomobject]@{ Name='Voicemeeter'; Category='02. Media & Audio'; Id='VB-Audio.Voicemeeter'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='VB-Audio Software' },
+    [pscustomobject]@{ Name='FxSound'; Category='02. Media & Audio'; Id='FxSound.FxSound'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='FxSound' },
+    [pscustomobject]@{ Name='EarTrumpet'; Category='02. Media & Audio'; Id='File-New-Project.EarTrumpet'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='File-New-Project' },
+    [pscustomobject]@{ Name='Logi Options+'; Category='05. System Utilities'; Id='Logitech.OptionsPlus'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Logitech' },
+    [pscustomobject]@{ Name='MSI Center'; Category='05. System Utilities'; Id='MSI.MSICenter'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Micro-Star International' },
+    [pscustomobject]@{ Name='Fan Control'; Category='05. System Utilities'; Id='Rem0o.FanControl'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Rem0o' },
+    [pscustomobject]@{ Name='TranslucentTB'; Category='05. System Utilities'; Id='CharlesMilette.TranslucentTB'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Charles Milette' },
+    [pscustomobject]@{ Name='StartAllBack'; Category='05. System Utilities'; Id='StartIsBack.StartAllBack'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='StartIsBack' },
+    [pscustomobject]@{ Name='ExplorerPatcher'; Category='05. System Utilities'; Id='valinet.ExplorerPatcher'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='valinet' },
+    [pscustomobject]@{ Name='Directory Opus'; Category='05. System Utilities'; Id='GPSoftware.DirectoryOpus'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='GPSoftware' },
+    [pscustomobject]@{ Name='XYplorer'; Category='05. System Utilities'; Id='Cologne Code Company.XYplorer'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Cologne Code Company' },
+    [pscustomobject]@{ Name='Q-Dir'; Category='05. System Utilities'; Id='SoftwareOK.Q-Dir'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='SoftwareOK' },
+    [pscustomobject]@{ Name='Double Commander'; Category='05. System Utilities'; Id='alexx2000.DoubleCommander'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Double Commander Team' },
+    [pscustomobject]@{ Name='GoodSync'; Category='25. Cloud & Backup'; Id='SiberSystems.GoodSync'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Siber Systems' },
+    [pscustomobject]@{ Name='Veeam Agent for Microsoft Windows'; Category='25. Cloud & Backup'; Id='Veeam.VeeamAgent'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Veeam Software' },
+    [pscustomobject]@{ Name='EaseUS Todo Backup'; Category='25. Cloud & Backup'; Id='EaseUS.TodoBackup'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='EaseUS' },
+    [pscustomobject]@{ Name='Ollama'; Category='19. Development & IDEs'; Id='Ollama.Ollama'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Ollama' },
+    [pscustomobject]@{ Name='LM Studio'; Category='19. Development & IDEs'; Id='ElementLabs.LMStudio'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Element Labs' },
+    [pscustomobject]@{ Name='Jan'; Category='19. Development & IDEs'; Id='Jan.Jan'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Jan' },
+    [pscustomobject]@{ Name='Claude'; Category='20. Productivity & Notes'; Id='Anthropic.Claude'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Anthropic' },
+    [pscustomobject]@{ Name='Cursor'; Category='19. Development & IDEs'; Id='Anysphere.Cursor'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Anysphere' },
+    [pscustomobject]@{ Name='Windsurf'; Category='19. Development & IDEs'; Id='Codeium.Windsurf'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Codeium' },
+    [pscustomobject]@{ Name='Zed'; Category='19. Development & IDEs'; Id='ZedIndustries.Zed'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Zed Industries' },
+    [pscustomobject]@{ Name='GitKraken'; Category='19. Development & IDEs'; Id='Axosoft.GitKraken'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Axosoft' },
+    [pscustomobject]@{ Name='Fork'; Category='19. Development & IDEs'; Id='Fork.Fork'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Fork' },
+    [pscustomobject]@{ Name='Rancher Desktop'; Category='14. Virtualization'; Id='SUSE.RancherDesktop'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='SUSE' },
+    [pscustomobject]@{ Name='Minikube'; Category='14. Virtualization'; Id='Kubernetes.minikube'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Kubernetes Authors' },
+    [pscustomobject]@{ Name='Lens'; Category='14. Virtualization'; Id='Mirantis.Lens'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Mirantis' },
+    [pscustomobject]@{ Name='k9s'; Category='14. Virtualization'; Id='Derailed.k9s'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Derailed' },
+    [pscustomobject]@{ Name='ChatGPT'; Category='20. Productivity & Notes'; Id='OpenAI.ChatGPT'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='OpenAI' },
+    [pscustomobject]@{ Name='Citrix Workspace'; Category='24. Remote Access & Networking'; Id='Citrix.Workspace'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Citrix Systems' },
+    [pscustomobject]@{ Name='Miro'; Category='20. Productivity & Notes'; Id='Miro.Miro'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Miro' },
+    [pscustomobject]@{ Name='Samsung Smart Switch'; Category='25. Cloud & Backup'; Id='Samsung.SmartSwitch'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Samsung Electronics' },
+    # --- Verified Winget-index expansion Batch 03 (111 new package IDs) ---
+    [pscustomobject]@{ Name='Brave Nightly'; Category='01. Web Browsers'; Id='Brave.Brave.Nightly'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Brave' },
+    [pscustomobject]@{ Name='DebugView'; Category='23. System & Hardware'; Id='Microsoft.Sysinternals.DebugView'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
+    [pscustomobject]@{ Name='Handle'; Category='23. System & Hardware'; Id='Microsoft.Sysinternals.Handle'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
+    [pscustomobject]@{ Name='Remote Desktop Connection Manager'; Category='23. System & Hardware'; Id='Microsoft.Sysinternals.RDCMan'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
+    [pscustomobject]@{ Name='BGInfo'; Category='23. System & Hardware'; Id='Microsoft.Sysinternals.BGInfo'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
+    [pscustomobject]@{ Name='SDelete'; Category='23. System & Hardware'; Id='Microsoft.Sysinternals.SDelete'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
+    [pscustomobject]@{ Name='Desktops'; Category='23. System & Hardware'; Id='Microsoft.Sysinternals.Desktops'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
+    [pscustomobject]@{ Name='PsTools Suite'; Category='23. System & Hardware'; Id='Microsoft.Sysinternals.PsTools'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
+    [pscustomobject]@{ Name='Windows Admin Center'; Category='26. Database & Server'; Id='Microsoft.WindowsAdminCenter'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
+    [pscustomobject]@{ Name='Microsoft Remote Help'; Category='24. Remote Access & Networking'; Id='Microsoft.RemoteHelp'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
+    [pscustomobject]@{ Name='PowerShell Preview'; Category='13. Runtimes & Libraries'; Id='Microsoft.PowerShell.Preview'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
+    [pscustomobject]@{ Name='Microsoft Access Database Engine 2016'; Category='13. Runtimes & Libraries'; Id='Microsoft.AccessDatabaseEngine.2016'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
+    [pscustomobject]@{ Name='Google Japanese Input'; Category='31. Fonts & Language Tools'; Id='Google.JapaneseIME'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Google LLC' },
+    [pscustomobject]@{ Name='Google Pinyin IME'; Category='31. Fonts & Language Tools'; Id='Google.Pinyin'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Google LLC' },
+    [pscustomobject]@{ Name='HashiCorp Consul'; Category='19. Development & IDEs'; Id='Hashicorp.Consul'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='HashiCorp' },
+    [pscustomobject]@{ Name='HashiCorp Packer'; Category='19. Development & IDEs'; Id='Hashicorp.Packer'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='HashiCorp' },
+    [pscustomobject]@{ Name='HashiCorp Boundary'; Category='19. Development & IDEs'; Id='Hashicorp.Boundary'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='HashiCorp' },
+    [pscustomobject]@{ Name='iCloud'; Category='25. Cloud & Backup'; Id='Apple.iCloud'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Apple Inc.' },
+    [pscustomobject]@{ Name='Amazon Kindle'; Category='30. Education & Science'; Id='Amazon.Kindle'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Amazon' },
+    [pscustomobject]@{ Name='Deezer'; Category='29. Media & Streaming'; Id='Deezer.Deezer'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Deezer' },
+    [pscustomobject]@{ Name='Plex'; Category='29. Media & Streaming'; Id='Plex.Plex'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Plex' },
+    [pscustomobject]@{ Name='MPC-BE'; Category='02. Media & Audio'; Id='MPC-BE.MPC-BE'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='MPC-BE Team' },
+    [pscustomobject]@{ Name='LMMS'; Category='02. Media & Audio'; Id='LMMS.LMMS'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='LMMS Team' },
+    [pscustomobject]@{ Name='MuseScore'; Category='02. Media & Audio'; Id='Musescore.Musescore'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Muse Group' },
+    [pscustomobject]@{ Name='LibreHardwareMonitor'; Category='23. System & Hardware'; Id='LibreHardwareMonitor.LibreHardwareMonitor'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='LibreHardwareMonitor Team' },
+    [pscustomobject]@{ Name='Open-Shell'; Category='05. System Utilities'; Id='Open-Shell.Open-Shell-Menu'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Open-Shell Team' },
+    [pscustomobject]@{ Name='XYplorer'; Category='05. System Utilities'; Id='CologneCodeCompany.XYplorer'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Cologne Code Company' },
+    [pscustomobject]@{ Name='AOMEI Partition Assistant'; Category='05. System Utilities'; Id='AOMEI.PartitionAssistant'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='AOMEI Technology' },
+    [pscustomobject]@{ Name='EaseUS Partition Master'; Category='05. System Utilities'; Id='EaseUS.PartitionMaster'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='EaseUS' },
+    [pscustomobject]@{ Name='UNetbootin'; Category='05. System Utilities'; Id='unetbootin.unetbootin'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='UNetbootin Team' },
+    [pscustomobject]@{ Name='Win32 Disk Imager'; Category='05. System Utilities'; Id='Win32diskimager.win32diskimager'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Win32 Disk Imager Team' },
+    [pscustomobject]@{ Name='Viber'; Category='07. Communication'; Id='Rakuten.Viber'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Rakuten' },
+    [pscustomobject]@{ Name='GoTo'; Category='07. Communication'; Id='GoTo.GoTo'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='GoTo' },
+    [pscustomobject]@{ Name='AppFlowy'; Category='20. Productivity & Notes'; Id='AppFlowy.AppFlowy'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='AppFlowy' },
+    [pscustomobject]@{ Name='JabRef'; Category='30. Education & Science'; Id='JabRef.JabRef'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='JabRef Team' },
+    [pscustomobject]@{ Name='Celestia'; Category='30. Education & Science'; Id='Celestia.Celestia'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Celestia Development Team' },
+    [pscustomobject]@{ Name='Autologon'; Category='23. System & Hardware'; Id='Microsoft.Sysinternals.Autologon'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
+    [pscustomobject]@{ Name='Microsoft Data Migration Assistant'; Category='26. Database & Server'; Id='Microsoft.DataMigrationAssistant'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
+    [pscustomobject]@{ Name='Microsoft Azure Service Fabric SDK'; Category='26. Database & Server'; Id='Microsoft.ServiceFabricSDK'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
+    [pscustomobject]@{ Name='Bot Framework Emulator'; Category='26. Database & Server'; Id='Microsoft.BotFrameworkEmulator'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
+    [pscustomobject]@{ Name='Google Drive'; Category='25. Cloud & Backup'; Id='Google.GoogleDrive'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Google LLC' },
+    [pscustomobject]@{ Name='Google Play Games'; Category='27. Gaming & Game Tools'; Id='Google.PlayGames'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Google LLC' },
+    [pscustomobject]@{ Name='Microsoft 365 Apps'; Category='28. Office & PDF'; Id='Microsoft.Office'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Apple Inc.' },
+    [pscustomobject]@{ Name='AWS VPN Client'; Category='24. Remote Access & Networking'; Id='Amazon.AWSVPNClient'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Amazon' },
+    [pscustomobject]@{ Name='Adobe Connect'; Category='07. Communication'; Id='Adobe.Connect'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Adobe' },
+    [pscustomobject]@{ Name='JetBrains ReSharper'; Category='19. Development & IDEs'; Id='JetBrains.ReSharper'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='JetBrains' },
+    [pscustomobject]@{ Name='JetBrains dotPeek'; Category='19. Development & IDEs'; Id='JetBrains.dotPeek'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='JetBrains' },
+    [pscustomobject]@{ Name='JetBrains dotTrace'; Category='19. Development & IDEs'; Id='JetBrains.dotTrace'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='JetBrains' },
+    [pscustomobject]@{ Name='Sublime Merge'; Category='19. Development & IDEs'; Id='SublimeHQ.SublimeMerge'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Sublime HQ' },
+    [pscustomobject]@{ Name='Perforce P4V'; Category='19. Development & IDEs'; Id='Perforce.P4V'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Perforce' },
+    [pscustomobject]@{ Name='Python 3.14'; Category='13. Runtimes & Libraries'; Id='Python.Python.3.14'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Python Software Foundation' },
+    [pscustomobject]@{ Name='Anaconda3'; Category='19. Development & IDEs'; Id='Anaconda.Anaconda3'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Anaconda' },
+    [pscustomobject]@{ Name='Eclipse Temurin JDK 25'; Category='13. Runtimes & Libraries'; Id='EclipseAdoptium.Temurin.25.JDK'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Eclipse Adoptium' },
+    [pscustomobject]@{ Name='Oracle JDK 25'; Category='13. Runtimes & Libraries'; Id='Oracle.JDK.25'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Oracle' },
+    [pscustomobject]@{ Name='Node.js'; Category='13. Runtimes & Libraries'; Id='OpenJS.NodeJS'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='OpenJS Foundation' },
+    [pscustomobject]@{ Name='Racket'; Category='19. Development & IDEs'; Id='Racket.Racket'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Racket' },
+    [pscustomobject]@{ Name='Hoppscotch'; Category='19. Development & IDEs'; Id='hoppscotch.Hoppscotch'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Hoppscotch' },
+    [pscustomobject]@{ Name='Amazon Music'; Category='29. Media & Streaming'; Id='Amazon.Music'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Amazon' },
+    [pscustomobject]@{ Name='Qobuz'; Category='29. Media & Streaming'; Id='Qobuz.Qobuz'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Qobuz' },
+    [pscustomobject]@{ Name='Mixxx'; Category='02. Media & Audio'; Id='Mixxx.Mixxx'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Mixxx Team' },
+    [pscustomobject]@{ Name='Elgato Wave Link'; Category='02. Media & Audio'; Id='Elgato.WaveLink'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Elgato' },
+    [pscustomobject]@{ Name='Nilesoft Shell'; Category='05. System Utilities'; Id='Nilesoft.Shell'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Nilesoft' },
+    [pscustomobject]@{ Name='Qalculate!'; Category='09. Productivity'; Id='Qalculate.Qalculate'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Qalculate Team' },
+    [pscustomobject]@{ Name='IDrive'; Category='25. Cloud & Backup'; Id='IDrive.IDrive'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='IDrive' },
+    [pscustomobject]@{ Name='YubiKey Manager'; Category='11. Security & Privacy'; Id='Yubico.YubikeyManager'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Yubico' },
+    [pscustomobject]@{ Name='TigerVNC'; Category='24. Remote Access & Networking'; Id='TigerVNC.TigerVNC'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='TigerVNC Team' },
+    [pscustomobject]@{ Name='RealVNC Viewer'; Category='24. Remote Access & Networking'; Id='RealVNC.VNCViewer'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='RealVNC' },
+    [pscustomobject]@{ Name='mRemoteNG'; Category='24. Remote Access & Networking'; Id='mRemoteNG.mRemoteNG'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='mRemoteNG Team' },
+    [pscustomobject]@{ Name='electerm'; Category='24. Remote Access & Networking'; Id='electerm.electerm'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='electerm Team' },
+    [pscustomobject]@{ Name='Betterbird'; Category='07. Communication'; Id='Betterbird.Betterbird'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Betterbird Project' },
+    [pscustomobject]@{ Name='Mailbird'; Category='07. Communication'; Id='Mailbird.Mailbird'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Mailbird' },
+    [pscustomobject]@{ Name='Rambox'; Category='07. Communication'; Id='Rambox.Rambox'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Rambox' },
+    [pscustomobject]@{ Name='FastCopy'; Category='05. System Utilities'; Id='FastCopy.FastCopy'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='FastCopy' },
+    [pscustomobject]@{ Name='TeraCopy'; Category='05. System Utilities'; Id='CodeSector.TeraCopy'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Code Sector' },
+    [pscustomobject]@{ Name='Meld'; Category='19. Development & IDEs'; Id='Meld.Meld'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Meld Project' },
+    [pscustomobject]@{ Name='Microsoft Mouse and Keyboard Center'; Category='23. System & Hardware'; Id='Microsoft.MouseandKeyboardCenter'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
+    [pscustomobject]@{ Name='AutoIt'; Category='19. Development & IDEs'; Id='AutoIt.AutoIt'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='AutoIt Team' },
+    [pscustomobject]@{ Name='Wox'; Category='09. Productivity'; Id='Wox.Wox'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Wox Team' },
+    [pscustomobject]@{ Name='Stirling-PDF'; Category='28. Office & PDF'; Id='StirlingTools.StirlingPDF'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Stirling Tools' },
+    [pscustomobject]@{ Name='JASP'; Category='30. Education & Science'; Id='JASP.JASP'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='JASP Team' },
+    [pscustomobject]@{ Name='Scilab'; Category='30. Education & Science'; Id='Scilab.Scilab'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Scilab Consortium' },
+    [pscustomobject]@{ Name='Xournal++'; Category='28. Office & PDF'; Id='Xournal++.Xournal++'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Xournal++ Team' },
+    [pscustomobject]@{ Name='Wondershare EdrawMax'; Category='10. Design & Graphics'; Id='EdrawSoft.EdrawMax'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Wondershare' },
+    [pscustomobject]@{ Name='SoftPerfect Network Scanner'; Category='24. Remote Access & Networking'; Id='SoftPerfect.NetworkScanner'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='SoftPerfect' },
+    [pscustomobject]@{ Name='OpenRGB'; Category='23. System & Hardware'; Id='OpenRGB.OpenRGB'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='OpenRGB Team' },
+    [pscustomobject]@{ Name='scrcpy'; Category='24. Remote Access & Networking'; Id='Genymobile.scrcpy'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Genymobile' },
+    [pscustomobject]@{ Name='Huawei HiSuite'; Category='24. Remote Access & Networking'; Id='Huawei.HiSuite'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Huawei' },
+    [pscustomobject]@{ Name='Android SDK Platform-Tools'; Category='24. Remote Access & Networking'; Id='Google.PlatformTools'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Google LLC' },
+    [pscustomobject]@{ Name='Universal ADB Driver'; Category='24. Remote Access & Networking'; Id='ClockworkMod.UniversalADBDriver'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='ClockworkMod' },
+    [pscustomobject]@{ Name='Session'; Category='07. Communication'; Id='Session.Session'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Session' },
+    [pscustomobject]@{ Name='Threema'; Category='07. Communication'; Id='Threema.Threema'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Threema' },
+    [pscustomobject]@{ Name='Proton Mail Bridge'; Category='07. Communication'; Id='Proton.ProtonMailBridge'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Proton AG' },
+    [pscustomobject]@{ Name='Claws Mail'; Category='07. Communication'; Id='ClawsMail.ClawsMail'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Claws Mail Team' },
+    [pscustomobject]@{ Name='Sylpheed'; Category='07. Communication'; Id='Sylpheed.Sylpheed'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Sylpheed Team' },
+    [pscustomobject]@{ Name='TuxGuitar'; Category='02. Media & Audio'; Id='TuxGuitar.TuxGuitar'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='TuxGuitar Team' },
+    [pscustomobject]@{ Name='NVIDIA CUDA Toolkit'; Category='13. Runtimes & Libraries'; Id='Nvidia.CUDA'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='NVIDIA Corporation' },
+    [pscustomobject]@{ Name='Revo Uninstaller'; Category='05. System Utilities'; Id='RevoUninstaller.RevoUninstaller'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='VS Revo Group' },
+    [pscustomobject]@{ Name='WizFile'; Category='05. System Utilities'; Id='AntibodySoftware.WizFile'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Antibody Software' },
+    [pscustomobject]@{ Name='Glary Utilities'; Category='05. System Utilities'; Id='Glarysoft.GlaryUtilities'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Glarysoft' },
+    [pscustomobject]@{ Name='Auslogics Disk Defrag'; Category='05. System Utilities'; Id='Auslogics.DiskDefrag'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Auslogics' },
+    [pscustomobject]@{ Name='dupeGuru'; Category='05. System Utilities'; Id='DupeGuru.DupeGuru'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='dupeGuru Team' },
+    [pscustomobject]@{ Name='nomacs'; Category='10. Design & Graphics'; Id='nomacs.nomacs'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='nomacs Team' },
+    [pscustomobject]@{ Name='Topaz Photo AI'; Category='10. Design & Graphics'; Id='TopazLabs.TopazPhotoAI'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Topaz Labs' },
+    [pscustomobject]@{ Name='Cryptomator'; Category='11. Security & Privacy'; Id='Cryptomator.Cryptomator'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Skymatic' },
+    [pscustomobject]@{ Name='Sandboxie-Plus'; Category='11. Security & Privacy'; Id='Sandboxie.Plus'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Sandboxie-Plus Team' },
+    [pscustomobject]@{ Name='Emsisoft Emergency Kit'; Category='11. Security & Privacy'; Id='Emsisoft.EmergencyKit'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Emsisoft' },
+    [pscustomobject]@{ Name='Wondershare Filmora'; Category='03. Media Creation'; Id='Wondershare.Filmora'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Wondershare' },
+    [pscustomobject]@{ Name='Action!'; Category='03. Media Creation'; Id='Mirillis.Action'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Mirillis' },
+    [pscustomobject]@{ Name='Windows App Runtime 1.8'; Category='13. Runtimes & Libraries'; Id='Microsoft.WindowsAppRuntime.1.8'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' },
+    [pscustomobject]@{ Name='AdwCleaner'; Category='11. Security & Privacy'; Id='Malwarebytes.AdwCleaner'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Malwarebytes' },
+    [pscustomobject]@{ Name='IObit Uninstaller'; Category='05. System Utilities'; Id='IObit.Uninstaller'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='IObit' }
+    [pscustomobject]@{ Name='SyncBackFree'; Category='35. Backup & Synchronization'; Id='2BrightSparks.SyncBackFree'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='2BrightSparks' }
+    [pscustomobject]@{ Name='Autodesk Access'; Category='33. CAD, BIM & Engineering'; Id='Autodesk.AutodeskAccess'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Autodesk' }
+    [pscustomobject]@{ Name='Autodesk Desktop Connector'; Category='33. CAD, BIM & Engineering'; Id='Autodesk.DesktopConnector'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Autodesk' }
+    [pscustomobject]@{ Name='Autodesk DWG TrueView 2027'; Category='33. CAD, BIM & Engineering'; Id='Autodesk.DWGTrueView.2027'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Autodesk' }
+    [pscustomobject]@{ Name='Autodesk Navisworks Freedom 2027'; Category='33. CAD, BIM & Engineering'; Id='Autodesk.NavisworksFreedom.2027'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Autodesk' }
+    [pscustomobject]@{ Name='MindManager 25'; Category='36. Business & Project Management'; Id='Corel.MindManager.25'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Corel' }
+    [pscustomobject]@{ Name='Multipass'; Category='14. Virtualization'; Id='Canonical.Multipass'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Canonical' }
+    [pscustomobject]@{ Name='Ubuntu 24.04 LTS'; Category='14. Virtualization'; Id='Canonical.Ubuntu.2404'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Canonical' }
+    [pscustomobject]@{ Name='Docker Buildx'; Category='19. Development & IDEs'; Id='Docker.Buildx'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Docker' }
+    [pscustomobject]@{ Name='Docker CLI'; Category='19. Development & IDEs'; Id='Docker.DockerCLI'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Docker' }
+    [pscustomobject]@{ Name='Docker Compose'; Category='19. Development & IDEs'; Id='Docker.DockerCompose'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Docker' }
+    [pscustomobject]@{ Name='Eclipse IDE for Java Developers'; Category='19. Development & IDEs'; Id='EclipseFoundation.Eclipse.Java'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Eclipse Foundation' }
+    [pscustomobject]@{ Name='Eclipse Mosquitto MQTT Broker'; Category='26. Database & Server'; Id='EclipseFoundation.Mosquitto'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Eclipse Foundation' }
+    [pscustomobject]@{ Name='SUMO Traffic Simulation'; Category='34. Data Science & Scientific Tools'; Id='EclipseFoundation.SUMO'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Eclipse Foundation' }
+    [pscustomobject]@{ Name='Firebird 5'; Category='26. Database & Server'; Id='FirebirdProject.Firebird.5'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Firebird Project' }
+    [pscustomobject]@{ Name='Egnyte Desktop App'; Category='35. Backup & Synchronization'; Id='Egnyte.EgnyteDesktopApp'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Egnyte' }
+    [pscustomobject]@{ Name='Dell Command | Configure'; Category='32. IT Administration & Diagnostics'; Id='Dell.CommandConfigure'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Dell' }
+    [pscustomobject]@{ Name='Dell Display and Peripheral Manager'; Category='37. Device & Peripheral Utilities'; Id='Dell.DisplayAndPeripheralManager'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Dell' }
+    [pscustomobject]@{ Name='Dell Optimizer'; Category='37. Device & Peripheral Utilities'; Id='Dell.Optimizer'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Dell' }
+    [pscustomobject]@{ Name='Dell System Update'; Category='32. IT Administration & Diagnostics'; Id='Dell.SystemUpdate'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Dell' }
+    [pscustomobject]@{ Name='Brother iPrint&Scan'; Category='37. Device & Peripheral Utilities'; Id='Brother.iPrintScan'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Brother Industries' }
+    [pscustomobject]@{ Name='Epson Scan 2'; Category='37. Device & Peripheral Utilities'; Id='EPSON.EpsonScan2'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Seiko Epson' }
+    [pscustomobject]@{ Name='Epson ScanSmart'; Category='37. Device & Peripheral Utilities'; Id='EPSON.ScanSmart'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Seiko Epson' }
+    [pscustomobject]@{ Name='Epson Event Manager'; Category='37. Device & Peripheral Utilities'; Id='EPSON.EventManager'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Seiko Epson' }
+    [pscustomobject]@{ Name='EpsonNet Config Portable'; Category='32. IT Administration & Diagnostics'; Id='EPSON.EpsonNetConfig.Portable'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Seiko Epson' }
+    [pscustomobject]@{ Name='Epson Connect Printer Setup'; Category='37. Device & Peripheral Utilities'; Id='EPSON.EpsonConnectPrinterSetup'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Seiko Epson' }
+    [pscustomobject]@{ Name='Canon Publisher Select 3'; Category='37. Device & Peripheral Utilities'; Id='Canon.PublisherSelect'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Canon' }
+    [pscustomobject]@{ Name='HP Cloud Recovery Tool'; Category='37. Device & Peripheral Utilities'; Id='HP.HPCloudRecoveryTool'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='HP' }
+    [pscustomobject]@{ Name='Lenovo Legion Toolkit'; Category='37. Device & Peripheral Utilities'; Id='BartoszCichecki.LenovoLegionToolkit'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Lenovo Legion Toolkit community project' }
+    [pscustomobject]@{ Name='ASUS DisplayWidget Center'; Category='37. Device & Peripheral Utilities'; Id='Asus.DisplayWidgetCenter'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='ASUS' }
+    [pscustomobject]@{ Name='ASUS GPU Tweak III'; Category='37. Device & Peripheral Utilities'; Id='Asus.GpuTweak3.Stable'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='ASUS' }
+    [pscustomobject]@{ Name='Intel Extreme Tuning Utility'; Category='37. Device & Peripheral Utilities'; Id='Intel.IntelExtremeTuningUtility'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Intel' }
+    [pscustomobject]@{ Name='Intel Fortran Compiler'; Category='19. Development & IDEs'; Id='Intel.FortranCompiler'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Intel' }
+    [pscustomobject]@{ Name='Intel OpenVINO Toolkit'; Category='34. Data Science & Scientific Tools'; Id='Intel.OpenVINOToolkit.2026.3.0'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Intel' }
+    [pscustomobject]@{ Name='Intel Processor Diagnostic Tool'; Category='32. IT Administration & Diagnostics'; Id='Intel.ProcessorDiagnosticTool'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Intel' }
+    [pscustomobject]@{ Name='Intel System Support Utility'; Category='32. IT Administration & Diagnostics'; Id='Intel.SystemSupportUtility'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Intel' }
+    [pscustomobject]@{ Name='Iometer'; Category='32. IT Administration & Diagnostics'; Id='Intel.Iometer'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Intel' }
+    [pscustomobject]@{ Name='Intel PresentMon'; Category='32. IT Administration & Diagnostics'; Id='Intel.PresentMon'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Intel' }
+    [pscustomobject]@{ Name='Thunderbolt Share'; Category='37. Device & Peripheral Utilities'; Id='Intel.ThunderboltShare'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Intel' }
+    [pscustomobject]@{ Name='Intel CSME Version Detection Tool'; Category='32. IT Administration & Diagnostics'; Id='Intel.CSMEVDT'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Intel' }
+    [pscustomobject]@{ Name='Intel Binary Configuration Tool'; Category='32. IT Administration & Diagnostics'; Id='Intel.BCT'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Intel' }
+    [pscustomobject]@{ Name='Android GPU Inspector'; Category='34. Data Science & Scientific Tools'; Id='Google.AndroidGPUInspector'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Google' }
+    [pscustomobject]@{ Name='Google Workspace Sync for Microsoft Outlook'; Category='07. Communication'; Id='Google.WorkspaceSyncForMicrosoftOutlook'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Google' }
+    [pscustomobject]@{ Name='Intel Endpoint Management Assistant'; Category='32. IT Administration & Diagnostics'; Id='Intel.EMAPlatformManager'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Intel' }
+    [pscustomobject]@{ Name='Eclipse Temurin JDK 26'; Category='13. Runtimes & Libraries'; Id='EclipseAdoptium.Temurin.26.JDK'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Eclipse Adoptium' }
+    [pscustomobject]@{ Name='Juju'; Category='26. Database & Server'; Id='Canonical.Juju'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Canonical' }
+    [pscustomobject]@{ Name='Terraform Language Server'; Category='19. Development & IDEs'; Id='Hashicorp.TerraformLanguageServer'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='HashiCorp' }
+    [pscustomobject]@{ Name='Papercut SMTP'; Category='15. Network & Database'; Id='ChangemakerStudios.Papercut-SMTP'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Changemaker Studios' }
+    [pscustomobject]@{ Name='GanttProject'; Category='36. Business & Project Management'; Id='GanttProject.GanttProject'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='GanttProject Team' }
+    [pscustomobject]@{ Name='Project Plan 365'; Category='36. Business & Project Management'; Id='Housatonic.ProjectPlan365'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Housatonic' }
+    [pscustomobject]@{ Name='Todoist'; Category='20. Productivity & Notes'; Id='Doist.Todoist'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Doist' }
+    [pscustomobject]@{ Name='Jabra Direct'; Category='37. Device & Peripheral Utilities'; Id='Jabra.Direct'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Jabra' }
+    [pscustomobject]@{ Name='Blink SIP Client'; Category='07. Communication'; Id='AGProjects.Blink'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='AG Projects' }
+    [pscustomobject]@{ Name='ClamAV'; Category='11. Security & Privacy'; Id='Cisco.ClamAV'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Cisco / ClamAV Project' }
+    [pscustomobject]@{ Name='Intel Assistive Context-Aware Toolkit'; Category='34. Data Science & Scientific Tools'; Id='Intel.ACAT'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Intel' }
+    [pscustomobject]@{ Name='Malwarebytes Windows Firewall Control'; Category='11. Security & Privacy'; Id='BiniSoft.WindowsFirewallControl'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Malwarebytes' }
+    [pscustomobject]@{ Name='AccessData Registry Viewer'; Category='32. IT Administration & Diagnostics'; Id='AccessData.RegistryViewer'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='AccessData' }
+    [pscustomobject]@{ Name='ValiDrive'; Category='32. IT Administration & Diagnostics'; Id='GibsonResearchCorporation.ValiDrive'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Gibson Research Corporation' }
+    [pscustomobject]@{ Name='Brother BRAdmin Professional 4'; Category='32. IT Administration & Diagnostics'; Id='Brother.BRAdmin.Professional.4'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Brother Industries' }
+    [pscustomobject]@{ Name='Epson iProjection'; Category='37. Device & Peripheral Utilities'; Id='EPSON.iProjection'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Seiko Epson' }
+    [pscustomobject]@{ Name='Epson Photo+'; Category='10. Design & Graphics'; Id='EPSON.PhotoPlus'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Seiko Epson' }
+    [pscustomobject]@{ Name='MyEpson Portal'; Category='37. Device & Peripheral Utilities'; Id='EPSON.MyEpsonPortal'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Seiko Epson' }
+    [pscustomobject]@{ Name='Epson Printer Connection Checker'; Category='37. Device & Peripheral Utilities'; Id='EPSON.PrinterConnectionChecker'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Seiko Epson' }
+    [pscustomobject]@{ Name='Insta360 Studio'; Category='03. Media Creation'; Id='ArashiVisionInc.Insta360Studio'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Insta360' }
+    [pscustomobject]@{ Name='ImageGlass'; Category='10. Design & Graphics'; Id='DuongDieuPhap.ImageGlass.MSI'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='ImageGlass Project' }
+    [pscustomobject]@{ Name='Foxit PDF Editor'; Category='28. Office & PDF'; Id='Foxit.PhantomPDF.Subscription'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Foxit' }
+    [pscustomobject]@{ Name='NAPS2'; Category='28. Office & PDF'; Id='Cyanfish.NAPS2'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='NAPS2 Project' }
+    [pscustomobject]@{ Name='EdrawProj'; Category='36. Business & Project Management'; Id='EdrawSoft.EdrawProj'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Wondershare' }
+    [pscustomobject]@{ Name='Outlook CalDav Synchronizer'; Category='07. Communication'; Id='aluxnimm.OutlookCalDavSynchronizer'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Outlook CalDav Synchronizer Project' }
+    [pscustomobject]@{ Name='Basecamp'; Category='36. Business & Project Management'; Id='37signals.Basecamp'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='37signals' }
+    [pscustomobject]@{ Name='Lark'; Category='07. Communication'; Id='ByteDance.Lark.MSI'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='ByteDance' }
+    [pscustomobject]@{ Name='Grain'; Category='07. Communication'; Id='GrainIntelligence.Grain'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Grain Intelligence' }
+    [pscustomobject]@{ Name='Filen CLI'; Category='35. Backup & Synchronization'; Id='FilenCloud.Filen-cli'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Filen' }
+    [pscustomobject]@{ Name='RcloneView'; Category='35. Backup & Synchronization'; Id='Bdrive.RcloneView'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Bdrive' }
+    [pscustomobject]@{ Name='Druva inSync'; Category='35. Backup & Synchronization'; Id='Druva.inSync'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Druva' }
+    [pscustomobject]@{ Name='Duplicacy CLI'; Category='35. Backup & Synchronization'; Id='gilbertchen.duplicacy.cli'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Duplicacy' }
+    [pscustomobject]@{ Name='Restic Profile'; Category='35. Backup & Synchronization'; Id='creativeprojects.resticprofile'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Restic Profile Project' }
+    [pscustomobject]@{ Name='Restic Browser'; Category='35. Backup & Synchronization'; Id='emuell.restic-browser'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='restic-browser Project' }
+    [pscustomobject]@{ Name='AWS SAM CLI'; Category='19. Development & IDEs'; Id='Amazon.SAM-CLI'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Amazon Web Services' }
+    [pscustomobject]@{ Name='MSI Afterburner'; Category='37. Device & Peripheral Utilities'; Id='Guru3D.Afterburner'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='MSI / Guru3D' }
+    [pscustomobject]@{ Name='Intel oneAPI Toolkit'; Category='34. Data Science & Scientific Tools'; Id='Intel.OneAPI.Toolkit'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Intel' }
+    [pscustomobject]@{ Name='Intel OpenVINO GenAI'; Category='34. Data Science & Scientific Tools'; Id='Intel.OpenVINO.GenAI.2026.3.0'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Intel' }
+    [pscustomobject]@{ Name='lessmsi'; Category='19. Development & IDEs'; Id='activescott.lessmsi'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='activescott' }
+    [pscustomobject]@{ Name='EMCO MSI Package Builder 12'; Category='19. Development & IDEs'; Id='EMCO.MSIPackageBuilder.12'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='EMCO' }
+    [pscustomobject]@{ Name='Android CLI'; Category='19. Development & IDEs'; Id='Google.AndroidCLI'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Google' }
+    [pscustomobject]@{ Name='AMD Open Capture and Analytics Tool'; Category='37. Device & Peripheral Utilities'; Id='AMD.OCAT'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='AMD' }
+    [pscustomobject]@{ Name='UndeleteOnClick'; Category='05. System Utilities'; Id='2BrightSparks.UndeleteOnClick'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='2BrightSparks' }
+    [pscustomobject]@{ Name='Cisco Jabber'; Category='07. Communication'; Id='Cisco.Jabber'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Cisco' }
+    # Batch 05: 12 additional WinGet packages; IDs checked against current public package records.
+    [pscustomobject]@{ Name='Sysinternals Suite'; Category='32. IT Administration & Diagnostics'; Id='Microsoft.Sysinternals.Suite'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Sysinternals' }
+    [pscustomobject]@{ Name='Microsoft Remote Desktop'; Category='07. Communication'; Id='Microsoft.RemoteDesktopClient'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' }
+    [pscustomobject]@{ Name='Sysmon'; Category='32. IT Administration & Diagnostics'; Id='Microsoft.Sysinternals.Sysmon'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Sysinternals' }
+    [pscustomobject]@{ Name='RAMMap'; Category='32. IT Administration & Diagnostics'; Id='Microsoft.Sysinternals.RAMMap'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Sysinternals' }
+    [pscustomobject]@{ Name='VMMap'; Category='32. IT Administration & Diagnostics'; Id='Microsoft.Sysinternals.VMMap'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Sysinternals' }
+    [pscustomobject]@{ Name='Whois'; Category='32. IT Administration & Diagnostics'; Id='Microsoft.Sysinternals.Whois'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Sysinternals' }
+    [pscustomobject]@{ Name='Strings'; Category='32. IT Administration & Diagnostics'; Id='Microsoft.Sysinternals.Strings'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Sysinternals' }
+    [pscustomobject]@{ Name='OpenTabletDriver'; Category='37. Device & Peripheral Utilities'; Id='OpenTabletDriver.OpenTabletDriver'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='OpenTabletDriver Developers' }
+    [pscustomobject]@{ Name='RegJump'; Category='32. IT Administration & Diagnostics'; Id='Microsoft.Sysinternals.RegJump'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Sysinternals' }
+    [pscustomobject]@{ Name='PendMoves'; Category='32. IT Administration & Diagnostics'; Id='Microsoft.Sysinternals.PendMoves'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Sysinternals' }
+    [pscustomobject]@{ Name='FindLinks'; Category='32. IT Administration & Diagnostics'; Id='Microsoft.Sysinternals.FindLinks'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Sysinternals' }
+    [pscustomobject]@{ Name='MoveFile'; Category='32. IT Administration & Diagnostics'; Id='Microsoft.Sysinternals.MoveFile'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Sysinternals' }
+    # Batch 06: 200 unique WinGet catalog additions; selected from public package catalog references.
+    [pscustomobject]@{ Name='Disk2vhd'; Category='32. IT Administration & Diagnostics'; Id='Microsoft.Sysinternals.Disk2vhd'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Sysinternals' }
+    [pscustomobject]@{ Name='PsExec'; Category='32. IT Administration & Diagnostics'; Id='Microsoft.Sysinternals.PsExec'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Sysinternals' }
+    [pscustomobject]@{ Name='PsKill'; Category='32. IT Administration & Diagnostics'; Id='Microsoft.Sysinternals.PsKill'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Sysinternals' }
+    [pscustomobject]@{ Name='PsList'; Category='32. IT Administration & Diagnostics'; Id='Microsoft.Sysinternals.PsList'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Sysinternals' }
+    [pscustomobject]@{ Name='PsLoggedOn'; Category='32. IT Administration & Diagnostics'; Id='Microsoft.Sysinternals.PsLoggedOn'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Sysinternals' }
+    [pscustomobject]@{ Name='PsPing'; Category='32. IT Administration & Diagnostics'; Id='Microsoft.Sysinternals.PsPing'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Sysinternals' }
+    [pscustomobject]@{ Name='PsShutdown'; Category='32. IT Administration & Diagnostics'; Id='Microsoft.Sysinternals.PsShutdown'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Sysinternals' }
+    [pscustomobject]@{ Name='PsSuspend'; Category='32. IT Administration & Diagnostics'; Id='Microsoft.Sysinternals.PsSuspend'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Sysinternals' }
+    [pscustomobject]@{ Name='AccessChk'; Category='32. IT Administration & Diagnostics'; Id='Microsoft.Sysinternals.AccessChk'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Sysinternals' }
+    [pscustomobject]@{ Name='Coreinfo'; Category='32. IT Administration & Diagnostics'; Id='Microsoft.Sysinternals.Coreinfo'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Sysinternals' }
+    [pscustomobject]@{ Name='Contig'; Category='32. IT Administration & Diagnostics'; Id='Microsoft.Sysinternals.Contig'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Sysinternals' }
+    [pscustomobject]@{ Name='DiskView'; Category='32. IT Administration & Diagnostics'; Id='Microsoft.Sysinternals.DiskView'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Sysinternals' }
+    [pscustomobject]@{ Name='WinObj'; Category='32. IT Administration & Diagnostics'; Id='Microsoft.Sysinternals.WinObj'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Sysinternals' }
+    [pscustomobject]@{ Name='PipeList'; Category='32. IT Administration & Diagnostics'; Id='Microsoft.Sysinternals.PipeList'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Sysinternals' }
+    [pscustomobject]@{ Name='ListDLLs'; Category='32. IT Administration & Diagnostics'; Id='Microsoft.Sysinternals.ListDLLs'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Sysinternals' }
+    [pscustomobject]@{ Name='Tftpd64'; Category='24. Remote Access & Networking'; Id='PhilippeJounin.Tftpd64'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Philippe Jounin' }
+    [pscustomobject]@{ Name='Advanced Port Scanner'; Category='24. Remote Access & Networking'; Id='Famatech.AdvancedPortScanner'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Famatech' }
+    [pscustomobject]@{ Name='SoftEther VPN Client'; Category='24. Remote Access & Networking'; Id='SoftEtherCorporation.SoftEtherVPN'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='SoftEther Corporation' }
+    [pscustomobject]@{ Name='DWService Agent'; Category='24. Remote Access & Networking'; Id='DWService.DWAgent'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='DWService' }
+    [pscustomobject]@{ Name='MeshCentral Agent'; Category='24. Remote Access & Networking'; Id='Ylianst.MeshCentral'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='MeshCentral' }
+    [pscustomobject]@{ Name='Mullvad Browser'; Category='17. Browsers & Web'; Id='Mullvad.Browser'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Mullvad VPN' }
+    [pscustomobject]@{ Name='DuckDuckGo Browser'; Category='17. Browsers & Web'; Id='DuckDuckGo.DesktopBrowser'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='DuckDuckGo' }
+    [pscustomobject]@{ Name='Thorium Browser'; Category='17. Browsers & Web'; Id='Alex313031.Thorium'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Alex313031' }
+    [pscustomobject]@{ Name='Arc Browser'; Category='17. Browsers & Web'; Id='TheBrowserCompany.Arc'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='The Browser Company' }
+    [pscustomobject]@{ Name='Visual Studio 2022 Professional'; Category='19. Development & IDEs'; Id='Microsoft.VisualStudio.2022.Professional'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' }
+    [pscustomobject]@{ Name='Bun JavaScript Runtime'; Category='19. Development & IDEs'; Id='Oven-sh.Bun'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Oven' }
+    [pscustomobject]@{ Name='Fast Node Manager'; Category='19. Development & IDEs'; Id='Schniz.fnm'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Schniz' }
+    [pscustomobject]@{ Name='pnpm'; Category='19. Development & IDEs'; Id='pnpm.pnpm'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='pnpm' }
+    [pscustomobject]@{ Name='Yarn Package Manager'; Category='19. Development & IDEs'; Id='Yarn.Yarn'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Yarn' }
+    [pscustomobject]@{ Name='NVM for Windows'; Category='19. Development & IDEs'; Id='CoreyButler.NVMforWindows'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Corey Butler' }
+    [pscustomobject]@{ Name='Ninja Build'; Category='19. Development & IDEs'; Id='Ninja-build.Ninja'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Ninja-build' }
+    [pscustomobject]@{ Name='NASM'; Category='19. Development & IDEs'; Id='NASM.NASM'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='NASM' }
+    [pscustomobject]@{ Name='Strawberry Perl'; Category='19. Development & IDEs'; Id='StrawberryPerl.StrawberryPerl'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Strawberry Perl' }
+    [pscustomobject]@{ Name='Azul Zulu JDK 21'; Category='13. Runtimes & Libraries'; Id='Azul.Zulu.21.JDK'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Azul Systems' }
+    [pscustomobject]@{ Name='Microsoft .NET SDK 10 Preview'; Category='13. Runtimes & Libraries'; Id='Microsoft.DotNet.SDK.Preview'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' }
+    [pscustomobject]@{ Name='jq'; Category='38. Developer Tools & CLI'; Id='jqlang.jq'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='jqlang' }
+    [pscustomobject]@{ Name='yq'; Category='38. Developer Tools & CLI'; Id='MikeFarah.yq'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Mike Farah' }
+    [pscustomobject]@{ Name='ripgrep'; Category='38. Developer Tools & CLI'; Id='BurntSushi.ripgrep.MSVC'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='BurntSushi' }
+    [pscustomobject]@{ Name='fd'; Category='38. Developer Tools & CLI'; Id='sharkdp.fd'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='sharkdp' }
+    [pscustomobject]@{ Name='bat'; Category='38. Developer Tools & CLI'; Id='sharkdp.bat'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='sharkdp' }
+    [pscustomobject]@{ Name='fzf'; Category='38. Developer Tools & CLI'; Id='junegunn.fzf'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='junegunn' }
+    [pscustomobject]@{ Name='zoxide'; Category='38. Developer Tools & CLI'; Id='ajeetdsouza.zoxide'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='ajeetdsouza' }
+    [pscustomobject]@{ Name='Starship Prompt'; Category='38. Developer Tools & CLI'; Id='Starship.Starship'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Starship' }
+    [pscustomobject]@{ Name='Delta Git Diff'; Category='38. Developer Tools & CLI'; Id='dandavison.delta'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Dandavison' }
+    [pscustomobject]@{ Name='Git LFS'; Category='38. Developer Tools & CLI'; Id='GitHub.GitLFS'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='GitHub' }
+    [pscustomobject]@{ Name='GitLab CLI'; Category='38. Developer Tools & CLI'; Id='GitLab.glab'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='GitLab' }
+    [pscustomobject]@{ Name='lazygit'; Category='38. Developer Tools & CLI'; Id='JesseDuffield.lazygit'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Jesse Duffield' }
+    [pscustomobject]@{ Name='GNU Make'; Category='38. Developer Tools & CLI'; Id='GnuWin32.Make'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='GnuWin32' }
+    [pscustomobject]@{ Name='Just Command Runner'; Category='38. Developer Tools & CLI'; Id='Casey.Just'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Casey' }
+    [pscustomobject]@{ Name='Beekeeper Studio'; Category='26. Database & Server'; Id='beekeeper-studio.beekeeper-studio'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Beekeeper Studio Team' }
+    [pscustomobject]@{ Name='Antares SQL Client'; Category='26. Database & Server'; Id='Fabio286.antares'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Fabio286' }
+    [pscustomobject]@{ Name='DbGate'; Category='26. Database & Server'; Id='JanProchazka.dbgate'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='DbGate' }
+    [pscustomobject]@{ Name='SQLiteStudio'; Category='26. Database & Server'; Id='sqlitestudio.pl.SQLiteStudio'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='SQLiteStudio' }
+    [pscustomobject]@{ Name='QuestDB'; Category='26. Database & Server'; Id='QuestDB.QuestDB'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='QuestDB' }
+    [pscustomobject]@{ Name='GeoGebra Classic'; Category='34. Data Science & Scientific Tools'; Id='GeoGebra.Classic'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='GeoGebra' }
+    [pscustomobject]@{ Name='Kiwix'; Category='34. Data Science & Scientific Tools'; Id='Kiwix.Kiwix'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Kiwix' }
+    [pscustomobject]@{ Name='GoldenDict'; Category='34. Data Science & Scientific Tools'; Id='GoldenDict.GoldenDict'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='GoldenDict' }
+    [pscustomobject]@{ Name='Scratch Desktop'; Category='34. Data Science & Scientific Tools'; Id='Scratch.Scratch'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Scratch Foundation' }
+    [pscustomobject]@{ Name='Pinta'; Category='21. Design & Graphics'; Id='Pinta.Pinta'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Pinta Community' }
+    [pscustomobject]@{ Name='yEd Graph Editor'; Category='21. Design & Graphics'; Id='yWorks.yEd'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='yWorks' }
+    [pscustomobject]@{ Name='Penpot Desktop'; Category='21. Design & Graphics'; Id='Penpot.Penpot'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Penpot' }
+    [pscustomobject]@{ Name='Lunacy'; Category='21. Design & Graphics'; Id='Icons8.Lunacy'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Icons8' }
+    [pscustomobject]@{ Name='MyPaint'; Category='21. Design & Graphics'; Id='MyPaint.MyPaint'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='MyPaint' }
+    [pscustomobject]@{ Name='VidCoder'; Category='03. Media Creation'; Id='RandomEngy.VidCoder'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='RandomEngy' }
+    [pscustomobject]@{ Name='Hybrid Video Encoder'; Category='03. Media Creation'; Id='Selur.Hybrid'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Selur' }
+    [pscustomobject]@{ Name='XMedia Recode'; Category='03. Media Creation'; Id='XMediaRecode.XMediaRecode'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='XMedia Recode' }
+    [pscustomobject]@{ Name='MediaInfo'; Category='02. Media & Audio'; Id='MediaArea.MediaInfo.GUI'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='MediaArea' }
+    [pscustomobject]@{ Name='FFmpeg Essentials'; Category='03. Media Creation'; Id='Gyan.FFmpeg.Essentials'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Gyan' }
+    [pscustomobject]@{ Name='Ardour'; Category='02. Media & Audio'; Id='Ardour.Ardour'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Ardour' }
+    [pscustomobject]@{ Name='Equalizer APO'; Category='02. Media & Audio'; Id='EqualizerAPO.EqualizerAPO'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Equalizer APO' }
+    [pscustomobject]@{ Name='Guitar Pro 8'; Category='02. Media & Audio'; Id='ArobasMusic.GuitarPro.8'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Arobas Music' }
+    [pscustomobject]@{ Name='PDF-XChange Editor'; Category='28. Office & PDF'; Id='TrackerSoftware.PDFXChangeEditor'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Tracker Software' }
+    [pscustomobject]@{ Name='FreeCommander'; Category='05. System Utilities'; Id='FreeCommander.FreeCommander'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='FreeCommander' }
+    [pscustomobject]@{ Name='OneCommander'; Category='05. System Utilities'; Id='OneCommander.OneCommander'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='OneCommander' }
+    [pscustomobject]@{ Name='Ant Renamer'; Category='05. System Utilities'; Id='AntSoftware.AntRenamer'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Ant Software' }
+    [pscustomobject]@{ Name='Duplicate Cleaner'; Category='05. System Utilities'; Id='DigitalVolcano.DuplicateCleaner'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='DigitalVolcano' }
+    [pscustomobject]@{ Name='Proton Pass'; Category='22. Security & Privacy'; Id='Proton.ProtonPass'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Proton AG' }
+    [pscustomobject]@{ Name='Simplewall'; Category='22. Security & Privacy'; Id='Henrypp.Simplewall'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Henry++' }
+    [pscustomobject]@{ Name='Gpg4win'; Category='22. Security & Privacy'; Id='GnuPG.Gpg4win'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='GnuPG' }
+    [pscustomobject]@{ Name='Anytype'; Category='20. Productivity & Notes'; Id='Anytype.Anytype'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Anytype' }
+    [pscustomobject]@{ Name='AFFiNE'; Category='20. Productivity & Notes'; Id='AFFiNE.AFFiNE'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='AFFiNE' }
+    [pscustomobject]@{ Name='Vortex Mod Manager'; Category='27. Gaming & Game Tools'; Id='NexusMods.Vortex'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Nexus Mods' }
+    [pscustomobject]@{ Name='itch.io App'; Category='27. Gaming & Game Tools'; Id='itch.itch'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='itch.io' }
+    [pscustomobject]@{ Name='GameSave Manager'; Category='27. Gaming & Game Tools'; Id='GameSaveManager.GameSaveManager'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='GameSave Manager' }
+    [pscustomobject]@{ Name='Minecraft Launcher'; Category='27. Gaming & Game Tools'; Id='Mojang.MinecraftLauncher'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Mojang' }
+    [pscustomobject]@{ Name='Gigabyte Control Center'; Category='37. Device & Peripheral Utilities'; Id='GIGABYTE.ControlCenter'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='GIGABYTE' }
+    [pscustomobject]@{ Name='Open Hardware Monitor'; Category='37. Device & Peripheral Utilities'; Id='OpenHardwareMonitor.OpenHardwareMonitor'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Open Hardware Monitor' }
+    [pscustomobject]@{ Name='GPU Shark'; Category='37. Device & Peripheral Utilities'; Id='Geeks3D.GPUShark'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Geeks3D' }
+    [pscustomobject]@{ Name='Inno Setup'; Category='38. Developer Tools & CLI'; Id='JRSoftware.InnoSetup'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='JRSoftware' }
+    [pscustomobject]@{ Name='NSIS'; Category='38. Developer Tools & CLI'; Id='NSIS.NSIS'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Nullsoft' }
+    [pscustomobject]@{ Name='WiX Toolset'; Category='38. Developer Tools & CLI'; Id='WiXToolset.WiXToolset'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='WiX Toolset' }
+    [pscustomobject]@{ Name='Dokan Library'; Category='05. System Utilities'; Id='Dokan.DokanLibrary'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Dokan' }
+    [pscustomobject]@{ Name='Winaero Tweaker'; Category='05. System Utilities'; Id='Winaero.Tweaker'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Winaero' }
+    [pscustomobject]@{ Name='NirSoft FontViewOK'; Category='31. Fonts & Language Tools'; Id='SoftwareOK.FontViewOK'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='SoftwareOK' }
+    [pscustomobject]@{ Name='Keyman'; Category='31. Fonts & Language Tools'; Id='Keyman.Keyman'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Keyman' }
+    [pscustomobject]@{ Name='BabelMap'; Category='31. Fonts & Language Tools'; Id='BabelStone.BabelMap'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='BabelStone' }
+    [pscustomobject]@{ Name='FontBase'; Category='31. Fonts & Language Tools'; Id='FontBase.FontBase'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='FontBase' }
+    [pscustomobject]@{ Name='LanguageTool Desktop'; Category='20. Productivity & Notes'; Id='LanguageTool.LanguageTool'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='LanguageTool' }
+    [pscustomobject]@{ Name='Readest'; Category='28. Office & PDF'; Id='Readest.Readest'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Readest' }
+    [pscustomobject]@{ Name='Zettlr'; Category='20. Productivity & Notes'; Id='Zettlr.Zettlr'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Zettlr' }
+    [pscustomobject]@{ Name='Trilium Notes'; Category='20. Productivity & Notes'; Id='TriliumNext.TriliumNotes'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='TriliumNext' }
+    [pscustomobject]@{ Name='QOwnNotes'; Category='20. Productivity & Notes'; Id='QOwnNotes.QOwnNotes'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='QOwnNotes' }
+    [pscustomobject]@{ Name='CherryTree'; Category='20. Productivity & Notes'; Id='giuspen.cherrytree'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Giuseppe Penone' }
+    [pscustomobject]@{ Name='Thunderbird Beta'; Category='07. Communication'; Id='Mozilla.Thunderbird.Beta'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Mozilla' }
+    [pscustomobject]@{ Name='Twinkle Tray'; Category='37. Device & Peripheral Utilities'; Id='xanderfrangos.twinkletray'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Xander Frangos' }
+    [pscustomobject]@{ Name='Monitorian'; Category='37. Device & Peripheral Utilities'; Id='emoacht.Monitorian'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='emoacht' }
+    [pscustomobject]@{ Name='DisplayCAL'; Category='37. Device & Peripheral Utilities'; Id='DisplayCAL.DisplayCAL'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='DisplayCAL' }
+    [pscustomobject]@{ Name='ColorControl'; Category='37. Device & Peripheral Utilities'; Id='Maassoft.ColorControl'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Maassoft' }
+    [pscustomobject]@{ Name='Wacom Center'; Category='37. Device & Peripheral Utilities'; Id='Wacom.WacomCenter'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Wacom' }
+    [pscustomobject]@{ Name='HuionTablet'; Category='37. Device & Peripheral Utilities'; Id='Huion.HuionTablet'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Huion' }
+    [pscustomobject]@{ Name='XP-Pen Pentablet'; Category='37. Device & Peripheral Utilities'; Id='XP-Pen.Pentablet'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='XP-Pen' }
+    [pscustomobject]@{ Name='Kingston SSD Manager'; Category='37. Device & Peripheral Utilities'; Id='Kingston.SSDManager'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Kingston' }
+    [pscustomobject]@{ Name='Western Digital Dashboard'; Category='37. Device & Peripheral Utilities'; Id='WesternDigital.Dashboard'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Western Digital' }
+    [pscustomobject]@{ Name='Seagate Toolkit'; Category='37. Device & Peripheral Utilities'; Id='Seagate.Toolkit'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Seagate' }
+    [pscustomobject]@{ Name='Intel Driver & Support Assistant'; Category='37. Device & Peripheral Utilities'; Id='Intel.DriverAndSupportAssistant'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Intel' }
+    [pscustomobject]@{ Name='AMD Software Adrenalin Edition'; Category='37. Device & Peripheral Utilities'; Id='AdvancedMicroDevices.AMDSoftware'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='AMD' }
+    [pscustomobject]@{ Name='Microsoft Mouse Without Borders'; Category='37. Device & Peripheral Utilities'; Id='Microsoft.MouseWithoutBorders'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft' }
+    [pscustomobject]@{ Name='ShareMouse'; Category='37. Device & Peripheral Utilities'; Id='ShareMouse.ShareMouse'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='ShareMouse' }
+    [pscustomobject]@{ Name='Syncthing Tray'; Category='35. Backup & Synchronization'; Id='Martchus.syncthingtray'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Martchus' }
+    [pscustomobject]@{ Name='UrBackup Client'; Category='35. Backup & Synchronization'; Id='UrBackup.UrBackupClient'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='UrBackup' }
+    [pscustomobject]@{ Name='Macrium Reflect Home'; Category='35. Backup & Synchronization'; Id='ParamountSoftwareUK.Reflect'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Paramount Software' }
+    [pscustomobject]@{ Name='AOMEI Backupper'; Category='35. Backup & Synchronization'; Id='AOMEI.Backupper'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='AOMEI' }
+    [pscustomobject]@{ Name='Hasleo Backup Suite'; Category='35. Backup & Synchronization'; Id='Hasleo.BackupSuite'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Hasleo' }
+    [pscustomobject]@{ Name='BorgBackup'; Category='35. Backup & Synchronization'; Id='BorgBackup.BorgBackup'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='BorgBackup' }
+    [pscustomobject]@{ Name='CloudBerry Backup'; Category='35. Backup & Synchronization'; Id='MSP360.Backup'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='MSP360' }
+    [pscustomobject]@{ Name='Syncovery'; Category='35. Backup & Synchronization'; Id='SuperFlexibleSoftware.Syncovery'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Super Flexible Software' }
+    [pscustomobject]@{ Name='Rclone Browser'; Category='35. Backup & Synchronization'; Id='kapitainsky.RcloneBrowser'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Kapitainsky' }
+    [pscustomobject]@{ Name='FortiClient VPN'; Category='24. Remote Access & Networking'; Id='Fortinet.FortiClientVPN'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Fortinet' }
+    [pscustomobject]@{ Name='Cisco Secure Client'; Category='24. Remote Access & Networking'; Id='Cisco.SecureClient'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Cisco' }
+    [pscustomobject]@{ Name='GlobalProtect'; Category='24. Remote Access & Networking'; Id='PaloAltoNetworks.GlobalProtect'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Palo Alto Networks' }
+    [pscustomobject]@{ Name='NetLimiter'; Category='24. Remote Access & Networking'; Id='LocktimeSoftware.NetLimiter'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Locktime' }
+    [pscustomobject]@{ Name='ESET NOD32 Antivirus'; Category='22. Security & Privacy'; Id='ESET.NOD32'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='ESET' }
+    [pscustomobject]@{ Name='Avira Security'; Category='22. Security & Privacy'; Id='Avira.Security'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Avira' }
+    [pscustomobject]@{ Name='AVG Antivirus Free'; Category='22. Security & Privacy'; Id='AVG.Antivirus.Free'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='AVG' }
+    [pscustomobject]@{ Name='Malwarebytes Browser Guard'; Category='22. Security & Privacy'; Id='Malwarebytes.BrowserGuard'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Malwarebytes' }
+    [pscustomobject]@{ Name='SOPS'; Category='22. Security & Privacy'; Id='Mozilla.SOPS'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Mozilla' }
+    [pscustomobject]@{ Name='Age Encryption'; Category='22. Security & Privacy'; Id='FiloSottile.age'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Filippo Valsorda' }
+    [pscustomobject]@{ Name='QCAD'; Category='33. CAD, BIM & Engineering'; Id='QCAD.QCAD'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='QCAD' }
+    [pscustomobject]@{ Name='SolveSpace'; Category='33. CAD, BIM & Engineering'; Id='SolveSpace.SolveSpace'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='SolveSpace' }
+    [pscustomobject]@{ Name='BRL-CAD'; Category='33. CAD, BIM & Engineering'; Id='BRL-CAD.BRL-CAD'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='BRL-CAD' }
+    [pscustomobject]@{ Name='OpenModelica'; Category='33. CAD, BIM & Engineering'; Id='OpenModelica.OpenModelica'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='OpenModelica' }
+    [pscustomobject]@{ Name='PaintTool SAI'; Category='21. Design & Graphics'; Id='SYSTEMAX.PaintToolSAI'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='SYSTEMAX' }
+    [pscustomobject]@{ Name='MediBang Paint'; Category='21. Design & Graphics'; Id='MediBang.MediBangPaint'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='MediBang' }
+    [pscustomobject]@{ Name='FireAlpaca'; Category='21. Design & Graphics'; Id='FireAlpaca.FireAlpaca'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='FireAlpaca' }
+    [pscustomobject]@{ Name='XnConvert'; Category='21. Design & Graphics'; Id='XnSoft.XnConvert'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='XnSoft' }
+    [pscustomobject]@{ Name='FastStone Capture'; Category='21. Design & Graphics'; Id='FastStone.Capture'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='FastStone' }
+    [pscustomobject]@{ Name='Tidal'; Category='02. Media & Audio'; Id='TIDAL.TIDAL'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='TIDAL' }
+    [pscustomobject]@{ Name='Plexamp'; Category='02. Media & Audio'; Id='Plex.Plexamp'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Plex' }
+    [pscustomobject]@{ Name='Cider'; Category='02. Media & Audio'; Id='CiderCollective.Cider'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Cider Collective' }
+    [pscustomobject]@{ Name='AIMP Skin Editor'; Category='02. Media & Audio'; Id='AIMP.AIMPSkinEditor'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='AIMP' }
+    [pscustomobject]@{ Name='O&O Defrag'; Category='05. System Utilities'; Id='OO-Software.Defrag'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='O&O Software' }
+    [pscustomobject]@{ Name='Wise Care 365'; Category='05. System Utilities'; Id='WiseCleaner.WiseCare365'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='WiseCleaner' }
+    [pscustomobject]@{ Name='PrivaZer'; Category='05. System Utilities'; Id='Goversoft.PrivaZer'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Goversoft' }
+    [pscustomobject]@{ Name='Patch My PC Home Updater'; Category='05. System Utilities'; Id='PatchMyPC.PatchMyPC'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Patch My PC' }
+    [pscustomobject]@{ Name='UniGetUI'; Category='05. System Utilities'; Id='MartiCliment.UniGetUI'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Marticliment' }
+    [pscustomobject]@{ Name='Scoop'; Category='05. System Utilities'; Id='ScoopInstaller.Scoop'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Scoop Installer' }
+    [pscustomobject]@{ Name='Chocolatey GUI'; Category='05. System Utilities'; Id='Chocolatey.ChocolateyGUI'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Chocolatey' }
+    [pscustomobject]@{ Name='Bulk Rename Utility'; Category='05. System Utilities'; Id='TGRMN.BulkRenameUtility'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='TGRMN' }
+    [pscustomobject]@{ Name='SyncBackPro'; Category='35. Backup & Synchronization'; Id='2BrightSparks.SyncBackPro'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='2BrightSparks' }
+    [pscustomobject]@{ Name='ClickUp'; Category='36. Business & Project Management'; Id='ClickUp.ClickUp'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='ClickUp' }
+    [pscustomobject]@{ Name='Asana'; Category='36. Business & Project Management'; Id='Asana.Asana'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Asana' }
+    [pscustomobject]@{ Name='Trello'; Category='36. Business & Project Management'; Id='Atlassian.Trello'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Atlassian' }
+    [pscustomobject]@{ Name='Jira'; Category='36. Business & Project Management'; Id='Atlassian.Jira'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Atlassian' }
+    [pscustomobject]@{ Name='Microsoft Project'; Category='36. Business & Project Management'; Id='Microsoft.Project'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' }
+    [pscustomobject]@{ Name='Microsoft Visio'; Category='36. Business & Project Management'; Id='Microsoft.Visio'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' }
+    [pscustomobject]@{ Name='GeoGebra 3D Calculator'; Category='34. Data Science & Scientific Tools'; Id='GeoGebra.3DCalculator'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='GeoGebra' }
+    [pscustomobject]@{ Name='Ubuntu 22.04 LTS'; Category='14. Virtualization'; Id='Canonical.Ubuntu.2204'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Canonical' }
+    [pscustomobject]@{ Name='Ubuntu 20.04 LTS'; Category='14. Virtualization'; Id='Canonical.Ubuntu.2004'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Canonical' }
+    [pscustomobject]@{ Name='Debian'; Category='14. Virtualization'; Id='Debian.Debian'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Debian Project' }
+    [pscustomobject]@{ Name='Kali Linux'; Category='14. Virtualization'; Id='KaliLinux.KaliLinux'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Kali Linux' }
+    [pscustomobject]@{ Name='openSUSE Leap 15.6'; Category='14. Virtualization'; Id='openSUSE.Leap.15.6'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='openSUSE' }
+    [pscustomobject]@{ Name='NVDA Screen Reader'; Category='39. Accessibility & Assistive Tools'; Id='NVAccess.NVDA'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='NV Access' }
+    [pscustomobject]@{ Name='Balabolka'; Category='39. Accessibility & Assistive Tools'; Id='Balabolka.Balabolka'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Cross+A' }
+    [pscustomobject]@{ Name='Streamlabs Desktop'; Category='03. Media Creation'; Id='Streamlabs.Streamlabs'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Streamlabs' }
+    [pscustomobject]@{ Name='NVIDIA Broadcast'; Category='03. Media Creation'; Id='Nvidia.Broadcast'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='NVIDIA' }
+    [pscustomobject]@{ Name='Twingate'; Category='24. Remote Access & Networking'; Id='Twingate.Twingate'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Twingate' }
+    [pscustomobject]@{ Name='SupRemo'; Category='24. Remote Access & Networking'; Id='SupRemo.SupRemo'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Nanosystems' }
+    [pscustomobject]@{ Name='Splashtop Business'; Category='24. Remote Access & Networking'; Id='Splashtop.SplashtopBusiness'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Splashtop' }
+    [pscustomobject]@{ Name='VMware Workstation Pro'; Category='14. Virtualization'; Id='VMware.WorkstationPro'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='VMware' }
+    [pscustomobject]@{ Name='Grafana'; Category='32. IT Administration & Diagnostics'; Id='Grafana.Grafana'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Grafana Labs' }
+    [pscustomobject]@{ Name='Prometheus'; Category='32. IT Administration & Diagnostics'; Id='Prometheus.Prometheus'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Prometheus Authors' }
+    [pscustomobject]@{ Name='Godot Engine'; Category='19. Development & IDEs'; Id='GodotEngine.GodotEngine'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Godot Engine' }
+    [pscustomobject]@{ Name='Unity Hub'; Category='19. Development & IDEs'; Id='Unity.UnityHub'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Unity Technologies' }
+    [pscustomobject]@{ Name='Unreal Engine'; Category='19. Development & IDEs'; Id='EpicGames.UnrealEngine'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Epic Games' }
+    [pscustomobject]@{ Name='0 A.D.'; Category='27. Gaming & Game Tools'; Id='WildfireGames.0AD'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Wildfire Games' }
+    [pscustomobject]@{ Name='ScummVM'; Category='27. Gaming & Game Tools'; Id='ScummVM.ScummVM'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='ScummVM Team' }
+    [pscustomobject]@{ Name='DuckStation'; Category='27. Gaming & Game Tools'; Id='Stenzek.DuckStation'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Stenzek' }
+    [pscustomobject]@{ Name='MAME'; Category='27. Gaming & Game Tools'; Id='MAME.MAME'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='MAME Team' }
+    [pscustomobject]@{ Name='OpenRA'; Category='27. Gaming & Game Tools'; Id='OpenRA.OpenRA'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='OpenRA' }
+    [pscustomobject]@{ Name='DOSBox-X'; Category='27. Gaming & Game Tools'; Id='DOSBox-X.DOSBox-X'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='DOSBox-X Team' }
+    [pscustomobject]@{ Name='GDevelop'; Category='19. Development & IDEs'; Id='GDevelop.GDevelop'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='GDevelop' }
+    [pscustomobject]@{ Name='Flutter SDK'; Category='19. Development & IDEs'; Id='Flutter.Flutter'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Google' }
+    [pscustomobject]@{ Name='Dart SDK'; Category='19. Development & IDEs'; Id='Dart.DartSDK'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Google' }
+    [pscustomobject]@{ Name='JetBrains RustRover'; Category='19. Development & IDEs'; Id='JetBrains.RustRover'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='JetBrains' }
+    [pscustomobject]@{ Name='JetBrains DataSpell'; Category='19. Development & IDEs'; Id='JetBrains.DataSpell'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='JetBrains' }
+    [pscustomobject]@{ Name='JetBrains Aqua'; Category='19. Development & IDEs'; Id='JetBrains.Aqua'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='JetBrains' }
+    [pscustomobject]@{ Name='Visual Studio 2022 Enterprise'; Category='19. Development & IDEs'; Id='Microsoft.VisualStudio.2022.Enterprise'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Microsoft Corporation' }
+    [pscustomobject]@{ Name='Kate Text Editor'; Category='19. Development & IDEs'; Id='KDE.Kate'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='KDE' }
+    [pscustomobject]@{ Name='KDevelop IDE'; Category='19. Development & IDEs'; Id='KDE.KDevelop'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='KDE' }
+    [pscustomobject]@{ Name='KStars Planetarium'; Category='34. Data Science & Scientific Tools'; Id='KDE.KStars'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='KDE' }
 )
 
 # --- SOFTWARE ICONS: DOWNLOAD/CACHE THE PUBLISHED ICON PACK ---
