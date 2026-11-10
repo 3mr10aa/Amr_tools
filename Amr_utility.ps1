@@ -1,5 +1,5 @@
 <#
-Amr | AMR Driver Center - Phase 6.10.23 Compact Overview Tiles + Update Tab
+Amr | AMR Driver Center - Phase 6.10.24 Compact Overview Tiles + Update Tab
 Windows 10/11 | Windows PowerShell 5.1 | WPF | Administrator
 Developer: عمرو أحمد عبد الفتاح | Phone: 01014716301 | Email: 3mr10aa@gmail.com
 #>
@@ -2476,7 +2476,7 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
    </Setter>
   </Style>
 
-  <!-- Phase 6.10.23: Compact Overview tiles and reserve space for the Update tab. -->
+  <!-- Phase 6.10.24: Compact Overview tiles and reserve space for the Update tab. -->
   <Style x:Key="OverviewSubTabControlStyle" TargetType="TabControl">
    <Setter Property="Background" Value="#18181B"/>
    <Setter Property="BorderThickness" Value="0"/>
@@ -2754,7 +2754,7 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
                     HorizontalScrollBarVisibility="Disabled"
                     Padding="10,8,10,16">
        <ScrollViewer.Resources>
-        <!-- Reuse the Software catalog's minimal circular scrollbar in Driver Center. -->
+        <!-- AMR soft circular scrollbar: subtle outlined thumb for both orientations. -->
         <Style TargetType="ScrollBar">
          <Setter Property="Width" Value="14"/>
          <Setter Property="Background" Value="Transparent"/>
@@ -2768,17 +2768,24 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
                <RepeatButton Command="ScrollBar.LineUpCommand" Opacity="0" Focusable="False" IsHitTestVisible="False"/>
               </Track.DecreaseRepeatButton>
               <Track.Thumb>
-               <Thumb Width="10" MinHeight="10" MaxHeight="10" Background="#8FB8E8" HorizontalAlignment="Center">
+               <Thumb Width="14" Height="14" MinWidth="14" MinHeight="14" Background="Transparent" HorizontalAlignment="Center" VerticalAlignment="Center">
                 <Thumb.Template>
                  <ControlTemplate TargetType="Thumb">
-                  <Grid Width="10" Height="10" HorizontalAlignment="Center" VerticalAlignment="Center">
-                   <Ellipse x:Name="ThumbCircle" Width="10" Height="10" Fill="{TemplateBinding Background}"/>
-                  </Grid>
+                  <Border x:Name="ThumbHalo" Width="14" Height="14" CornerRadius="7"
+                          Background="#26384D" BorderBrush="#668FB8E8" BorderThickness="1"
+                          HorizontalAlignment="Center" VerticalAlignment="Center">
+                   <Ellipse x:Name="ThumbCircle" Width="7" Height="7" Fill="#8FB8E8"
+                            HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                  </Border>
                   <ControlTemplate.Triggers>
                    <Trigger Property="IsMouseOver" Value="True">
+                    <Setter TargetName="ThumbHalo" Property="BorderBrush" Value="#99A9CCF2"/>
+                    <Setter TargetName="ThumbHalo" Property="Background" Value="#334A65"/>
                     <Setter TargetName="ThumbCircle" Property="Fill" Value="#A9CCF2"/>
                    </Trigger>
                    <Trigger Property="IsDragging" Value="True">
+                    <Setter TargetName="ThumbHalo" Property="BorderBrush" Value="#C3DDF8"/>
+                    <Setter TargetName="ThumbHalo" Property="Background" Value="#405A78"/>
                     <Setter TargetName="ThumbCircle" Property="Fill" Value="#C3DDF8"/>
                    </Trigger>
                   </ControlTemplate.Triggers>
@@ -2793,7 +2800,7 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
             </Grid>
             <ControlTemplate.Triggers>
              <Trigger Property="Orientation" Value="Horizontal">
-              <Setter Property="Height" Value="8"/>
+              <Setter Property="Height" Value="14"/>
               <Setter Property="Width" Value="Auto"/>
              </Trigger>
             </ControlTemplate.Triggers>
@@ -2929,7 +2936,7 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
          </StackPanel>
         </Grid>
         <Border Background="#151E2B" BorderBrush="#334155" BorderThickness="1" CornerRadius="10" Padding="6">
-         <ListView Name="DriverDeviceList" SelectionMode="Extended" Background="Transparent" Foreground="#E4E4E7" BorderThickness="0" MinHeight="260" MaxHeight="100000" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.CanContentScroll="True" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling">
+         <ListView Name="DriverDeviceList" SelectionMode="Extended" Background="Transparent" Foreground="#E4E4E7" BorderThickness="0" MinHeight="260" MaxHeight="100000" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.CanContentScroll="True" ScrollViewer.PanningMode="Both" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling">
           <ListView.Resources>
            <!-- Explicit dark row states prevent the default white hover/selection background from hiding text. -->
            <Style TargetType="ListViewItem">
