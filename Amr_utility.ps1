@@ -1,5 +1,5 @@
 <#
-Amr | AMR Driver Center - Phase 6.8 Direct Vendor Adapters & Full Multi-Source Discovery
+Amr | AMR Driver Center - Phase 6.10.14 Professional Driver Center UI Refinement
 Windows 10/11 | Windows PowerShell 5.1 | WPF | Administrator
 Developer: عمرو أحمد عبد الفتاح | Phone: 01014716301 | Email: 3mr10aa@gmail.com
 #>
@@ -2483,11 +2483,11 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
     <Setter.Value>
      <ControlTemplate TargetType="TabControl">
       <Grid>
-       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="206"/></Grid.ColumnDefinitions>
+       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="190"/></Grid.ColumnDefinitions>
        <Border Grid.Column="0" Background="{TemplateBinding Background}" Padding="0,0,12,0">
         <ContentPresenter ContentSource="SelectedContent"/>
        </Border>
-       <Border Grid.Column="1" Background="#1B2636" BorderBrush="#344B68" BorderThickness="1" CornerRadius="14" Padding="10" Margin="6,8,8,12" ClipToBounds="False">
+       <Border Grid.Column="1" Background="#172435" BorderBrush="#344B68" BorderThickness="1" CornerRadius="12" Padding="7" Margin="5,8,7,12" ClipToBounds="False">
         <TabPanel IsItemsHost="True" KeyboardNavigation.TabIndex="1" ClipToBounds="False"/>
        </Border>
       </Grid>
@@ -2497,12 +2497,12 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
   </Style>
   <!-- Match the Overview tiles to the Software Categories tiles: equal width, spacing and corner radius. -->
   <Style x:Key="OverviewSubTabItemStyle" TargetType="TabItem" BasedOn="{StaticResource {x:Type TabItem}}">
-   <Setter Property="Width" Value="178"/>
-   <Setter Property="MinHeight" Value="42"/>
+   <Setter Property="Width" Value="168"/>
+   <Setter Property="MinHeight" Value="40"/>
    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
    <Setter Property="VerticalContentAlignment" Value="Center"/>
-   <Setter Property="Padding" Value="13,10"/>
-   <Setter Property="Margin" Value="0,0,0,10"/>
+   <Setter Property="Padding" Value="11,8"/>
+   <Setter Property="Margin" Value="0,0,0,8"/>
    <Setter Property="Foreground" Value="#C9D8EA"/>
    <Setter Property="Background" Value="#26364B"/>
    <Setter Property="BorderThickness" Value="0"/>
@@ -2510,7 +2510,7 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
     <Setter.Value>
      <ControlTemplate TargetType="TabItem">
       <Border Name="OverviewSubTabTile" Background="{TemplateBinding Background}"
-              BorderBrush="#3B526F" BorderThickness="1" CornerRadius="12"
+              BorderBrush="#3B526F" BorderThickness="1" CornerRadius="10"
               Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
        <ContentPresenter HorizontalAlignment="Stretch" VerticalAlignment="Center"
                          ContentSource="Header" RecognizesAccessKey="True"/>
@@ -2719,12 +2719,14 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
      </TabItem>
      <TabItem>
       <TabItem.Header>
-       <StackPanel Width="154">
-        <TextBlock Text="Driver Center" FontWeight="SemiBold" Margin="0,0,0,7"/>
-        <Button Name="DriverSidebarSmartModeBtn" Content="✦ Smart View" HorizontalContentAlignment="Left" Background="#176B50" Foreground="#FFFFFF" BorderBrush="#34D399" BorderThickness="1" Padding="8,6" FontSize="10" Margin="0,0,0,5" Cursor="Hand"/>
-        <Button Name="DriverSidebarAdvancedModeBtn" Content="Professional" HorizontalContentAlignment="Left" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" BorderThickness="1" Padding="8,6" FontSize="10" Cursor="Hand"/>
+      <Border Width="166" Background="#182638" BorderBrush="#3A526F" BorderThickness="1" CornerRadius="11" Padding="9,8" SnapsToDevicePixels="True">
+       <StackPanel>
+        <TextBlock Text="DRIVER CENTER" Foreground="#EAF2FF" FontWeight="Bold" FontSize="11" Margin="2,0,2,8"/>
+        <Button Name="DriverSidebarSmartModeBtn" Content="✦  Smart View" HorizontalContentAlignment="Center" Background="#176B50" Foreground="#FFFFFF" BorderBrush="#34D399" BorderThickness="1" Padding="8,7" FontSize="10" FontWeight="SemiBold" Margin="0,0,0,6" Cursor="Hand"/>
+        <Button Name="DriverSidebarAdvancedModeBtn" Content="Professional" HorizontalContentAlignment="Center" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" BorderThickness="1" Padding="8,7" FontSize="10" Cursor="Hand"/>
        </StackPanel>
-      </TabItem.Header>
+      </Border>
+     </TabItem.Header>
       <ScrollViewer Name="DriverCenterScrollViewer" VerticalScrollBarVisibility="Auto" Padding="10,8,10,16">
        <StackPanel Name="DriverCenterMainPanel">
         <Grid Name="DriverCenterHeader" Margin="0,4,0,12">
@@ -2783,23 +2785,59 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
         <Grid Margin="0,0,0,10">
          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
          <StackPanel Grid.Column="0"><TextBlock Text="HARDWARE &amp; DRIVER STATUS" Foreground="#60A5FA" FontSize="14" FontWeight="Bold"/><TextBlock Name="DriverScanStatus" Text="Select Scan Device to inspect this computer. No driver will be downloaded or installed automatically." Foreground="#94A3B8" FontSize="11" TextWrapping="Wrap" Margin="0,4,8,0"/></StackPanel>
-         <Button Name="OpenOfficialSupportBtn" Grid.Column="1" Content="Official Support ↗" IsEnabled="False" Background="#263B3A" Foreground="#A7D8CE" BorderBrush="#456B65" Padding="12,8" FontSize="11" VerticalAlignment="Center"/>
         </Grid>
-        <WrapPanel Margin="0,0,0,10" HorizontalAlignment="Left">
-         <Button Name="DriverDownloadSelectedBtn" Content="Download &amp; Save Package" IsEnabled="False" Background="#244A70" Foreground="#EAF2FF" BorderBrush="#4B83B8" Padding="13,8" FontSize="11" Margin="0,0,8,0"/>
-         <Button Name="DriverInstallSelectedBtn" Content="Install Ready Update" IsEnabled="False" Background="#245B46" Foreground="#E8FFF3" BorderBrush="#3B8B69" Padding="13,8" FontSize="11" Margin="0,0,8,0"/>
-         <Button Name="DriverSmartSelectBtn" Content="✦ Smart Select" IsEnabled="False" Background="#315B82" Foreground="#FFFFFF" BorderBrush="#60A5FA" Padding="15,8" FontSize="11" FontWeight="Bold" Margin="0,0,8,0"/>
-         <Button Name="DriverStartSmartInstallBtn" Content="Start Smart Install" IsEnabled="False" Background="#176B50" Foreground="#FFFFFF" BorderBrush="#34D399" Padding="15,8" FontSize="11" FontWeight="Bold" Margin="0,0,8,0"/>
-         <Button Name="DriverSelectReadyBtn" Content="Select All Ready" IsEnabled="False" Background="#34445A" Foreground="#E2E8F0" BorderBrush="#526176" Padding="13,8" FontSize="11" Margin="0,0,8,0"/>
-         <Button Name="DriverClearSelectionBtn" Content="Clear Selection" IsEnabled="False" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" Padding="13,8" FontSize="11" Margin="0,0,8,0"/>
-         <Button Name="DriverInstallBatchBtn" Content="Install Selected Ready (0)" IsEnabled="False" Background="#28634D" Foreground="#E8FFF3" BorderBrush="#55A987" Padding="13,8" FontSize="11" Margin="0,0,8,0"/>
-         <Button Name="DriverInstallPlanBtn" Content="Preview Install Plan" IsEnabled="False" Background="#3A4660" Foreground="#E2E8F0" BorderBrush="#64748B" Padding="13,8" FontSize="11" Margin="0,0,8,0"/>
-         <Button Name="DriverCandidateManagerBtn" Content="Compare Driver Candidates" IsEnabled="False" Background="#344B69" Foreground="#E2E8F0" BorderBrush="#6689B5" Padding="13,8" FontSize="11"/>
-         <Button Name="DriverSourceManagerBtn" Content="Driver Source Manager" IsEnabled="False" Background="#344B69" Foreground="#E2E8F0" BorderBrush="#6689B5" Padding="13,8" FontSize="11" Margin="8,0,0,0"/>
-         <Button Name="DriverCatalogSearchBtn" Content="Search Microsoft Catalog ↗" IsEnabled="False" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" Padding="13,8" FontSize="11" Margin="8,0,0,0"/>
-         <Button Name="DriverRollbackCheckBtn" Content="Check Driver Rollback" IsEnabled="False" Background="#65412B" Foreground="#FFF1E6" BorderBrush="#A66B45" Padding="13,8" FontSize="11" Margin="8,0,0,0"/>
-         <Button Name="DriverOpenRecoveryBtn" Content="Open Driver Recovery Backups" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" Padding="13,8" FontSize="11" Margin="8,0,0,0"/>
-        </WrapPanel>
+        <StackPanel Margin="0,0,0,12">
+         <Border Name="DriverSmartActionsPanel" Background="#142B2A" BorderBrush="#286653" BorderThickness="1" CornerRadius="11" Padding="10" Margin="0,0,0,9">
+          <StackPanel>
+           <TextBlock Text="SMART WORKFLOW" Foreground="#86EFAC" FontSize="10" FontWeight="Bold" Margin="2,0,0,8"/>
+           <Grid>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+            <Button Name="DriverSmartSelectBtn" Grid.Column="0" Content="✦ Smart Select" IsEnabled="False" Background="#315B82" Foreground="#FFFFFF" BorderBrush="#60A5FA" Padding="12,9" FontSize="11" FontWeight="Bold" Margin="0,0,5,0"/>
+            <Button Name="DriverStartSmartInstallBtn" Grid.Column="1" Content="Start Smart Install" IsEnabled="False" Background="#176B50" Foreground="#FFFFFF" BorderBrush="#34D399" Padding="12,9" FontSize="11" FontWeight="Bold" Margin="5,0,0,0"/>
+           </Grid>
+          </StackPanel>
+         </Border>
+         <StackPanel Name="DriverProfessionalActionsPanel" Visibility="Collapsed">
+          <Border Background="#19283A" BorderBrush="#344B68" BorderThickness="1" CornerRadius="11" Padding="10" Margin="0,0,0,9">
+           <StackPanel>
+            <TextBlock Text="PACKAGE &amp; INSTALL" Foreground="#93C5FD" FontSize="10" FontWeight="Bold" Margin="2,0,0,8"/>
+            <Grid>
+             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+             <Button Name="DriverDownloadSelectedBtn" Grid.Column="0" Content="Download &amp; Save Package" IsEnabled="False" Background="#244A70" Foreground="#EAF2FF" BorderBrush="#4B83B8" Padding="10,9" FontSize="10" Margin="0,0,5,0"/>
+             <Button Name="DriverInstallSelectedBtn" Grid.Column="1" Content="Install Ready Update" IsEnabled="False" Background="#245B46" Foreground="#E8FFF3" BorderBrush="#3B8B69" Padding="10,9" FontSize="10" Margin="5,0,0,0"/>
+            </Grid>
+           </StackPanel>
+          </Border>
+          <Border Background="#19283A" BorderBrush="#344B68" BorderThickness="1" CornerRadius="11" Padding="10" Margin="0,0,0,9">
+           <StackPanel>
+            <TextBlock Text="SELECTION &amp; INSTALL PLAN" Foreground="#93C5FD" FontSize="10" FontWeight="Bold" Margin="2,0,0,8"/>
+            <Grid>
+             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+             <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+             <Button Name="DriverSelectReadyBtn" Grid.Row="0" Grid.Column="0" Content="Select All Ready" IsEnabled="False" Background="#34445A" Foreground="#E2E8F0" BorderBrush="#526176" Padding="10,8" FontSize="10" Margin="0,0,5,6"/>
+             <Button Name="DriverClearSelectionBtn" Grid.Row="0" Grid.Column="1" Content="Clear Selection" IsEnabled="False" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" Padding="10,8" FontSize="10" Margin="5,0,0,6"/>
+             <Button Name="DriverInstallBatchBtn" Grid.Row="1" Grid.Column="0" Content="Install Selected Ready (0)" IsEnabled="False" Background="#28634D" Foreground="#E8FFF3" BorderBrush="#55A987" Padding="10,8" FontSize="10" Margin="0,0,5,0"/>
+             <Button Name="DriverInstallPlanBtn" Grid.Row="1" Grid.Column="1" Content="Preview Install Plan" IsEnabled="False" Background="#3A4660" Foreground="#E2E8F0" BorderBrush="#64748B" Padding="10,8" FontSize="10" Margin="5,0,0,0"/>
+            </Grid>
+           </StackPanel>
+          </Border>
+          <Border Background="#19283A" BorderBrush="#344B68" BorderThickness="1" CornerRadius="11" Padding="10" Margin="0,0,0,9">
+           <StackPanel>
+            <TextBlock Text="OFFICIAL SUPPORT &amp; DRIVER SOURCES" Foreground="#A7D8CE" FontSize="10" FontWeight="Bold" Margin="2,0,0,8"/>
+            <Button Name="OpenOfficialSupportBtn" Content="Official Support ↗" IsEnabled="False" Background="#263B3A" Foreground="#A7D8CE" BorderBrush="#456B65" Padding="11,8" FontSize="10" HorizontalContentAlignment="Center" Margin="0,0,0,6"/>
+            <Grid>
+             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+             <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+             <Button Name="DriverCandidateManagerBtn" Grid.Row="0" Grid.Column="0" Content="Compare Candidates" IsEnabled="False" Background="#344B69" Foreground="#E2E8F0" BorderBrush="#6689B5" Padding="9,8" FontSize="10" Margin="0,0,5,6"/>
+             <Button Name="DriverSourceManagerBtn" Grid.Row="0" Grid.Column="1" Content="Driver Source Manager" IsEnabled="False" Background="#344B69" Foreground="#E2E8F0" BorderBrush="#6689B5" Padding="9,8" FontSize="10" Margin="5,0,0,6"/>
+             <Button Name="DriverCatalogSearchBtn" Grid.Row="1" Grid.Column="0" Content="Search Microsoft Catalog ↗" IsEnabled="False" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" Padding="9,8" FontSize="10" Margin="0,0,5,0"/>
+             <Button Name="DriverRollbackCheckBtn" Grid.Row="1" Grid.Column="1" Content="Check Driver Rollback" IsEnabled="False" Background="#65412B" Foreground="#FFF1E6" BorderBrush="#A66B45" Padding="9,8" FontSize="10" Margin="5,0,0,0"/>
+            </Grid>
+            <Button Name="DriverOpenRecoveryBtn" Content="Open Driver Recovery Backups" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" Padding="11,8" FontSize="10" Margin="0,7,0,0"/>
+           </StackPanel>
+          </Border>
+         </StackPanel>
+        </StackPanel>
         <TextBlock Name="DriverRollbackStatus" Text="Select a device to check for retained driver alternatives. Windows determines whether Roll Back Driver is available." Foreground="#D6B58C" FontSize="10" TextWrapping="Wrap" Margin="3,0,3,8"/>
         <Grid Margin="3,0,3,8">
          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -6637,6 +6675,10 @@ function Set-AMRDriverExperienceMode {
     $description = C 'DriverModeDescription'
     $deviceList = C 'DriverDeviceList'
     $scrollViewer = C 'DriverCenterScrollViewer'
+    $overviewSubTabs = C 'OverviewSubTabs'
+    if ($overviewSubTabs -and $overviewSubTabs.SelectedIndex -ne 1) { $overviewSubTabs.SelectedIndex = 1 }
+    $smartActionsPanel = C 'DriverSmartActionsPanel'
+    $professionalActionsPanel = C 'DriverProfessionalActionsPanel'
 
     # Defensive normalization for rows retained from earlier scans or alternate providers.
     foreach($row in @($script:DriverAllDeviceRows)) {
@@ -6652,6 +6694,8 @@ function Set-AMRDriverExperienceMode {
         if ($sidebarAdvancedButton) { $sidebarAdvancedButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#303846'); $sidebarAdvancedButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#526176'); $sidebarAdvancedButton.FontWeight = 'Normal' }
         if ($description) { $description.Text = 'Smart View: Smart Select recommends which confirmed driver candidates deserve attention. Smart Install separately prepares and installs only the choices you approve.' }
         if ($scrollViewer) { $scrollViewer.Padding = [System.Windows.Thickness]::new(10,8,10,16) }
+        if ($smartActionsPanel) { $smartActionsPanel.Visibility = 'Visible' }
+        if ($professionalActionsPanel) { $professionalActionsPanel.Visibility = 'Collapsed' }
 
         # Keep only the practical columns visible to a non-technical user.
         if ($deviceList -and $deviceList.View -and $deviceList.View.Columns.Count -ge 13) {
@@ -6699,7 +6743,9 @@ function Set-AMRDriverExperienceMode {
         if ($sidebarSmartButton) { $sidebarSmartButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#303846'); $sidebarSmartButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#526176'); $sidebarSmartButton.FontWeight = 'Normal' }
         if ($sidebarAdvancedButton) { $sidebarAdvancedButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#244A70'); $sidebarAdvancedButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4B83B8'); $sidebarAdvancedButton.FontWeight = 'Bold' }
         if ($description) { $description.Text = 'Professional Driver Center: compare every retained Windows Update match, choose an alternative, investigate official OEM/vendor sources, inspect rollback options and export reports.' }
-        if ($scrollViewer) { $scrollViewer.Padding = [System.Windows.Thickness]::new(4,4,4,8) }
+        if ($scrollViewer) { $scrollViewer.Padding = [System.Windows.Thickness]::new(10,8,10,16) }
+        if ($smartActionsPanel) { $smartActionsPanel.Visibility = 'Collapsed' }
+        if ($professionalActionsPanel) { $professionalActionsPanel.Visibility = 'Visible' }
 
         if ($deviceList -and $deviceList.View -and $deviceList.View.Columns.Count -ge 13) {
             $widths = @(245,105,145,115,150,135,95,190,190,75,250,130,55)
