@@ -1,5 +1,5 @@
 <#
-Amr | AMR Driver Center - Phase 6.10.14 Professional Driver Center UI Refinement
+Amr | AMR Driver Center - Phase 6.10.22 Compact Overview Tiles + Update Tab
 Windows 10/11 | Windows PowerShell 5.1 | WPF | Administrator
 Developer: عمرو أحمد عبد الفتاح | Phone: 01014716301 | Email: 3mr10aa@gmail.com
 #>
@@ -2476,45 +2476,69 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
    </Setter>
   </Style>
 
+  <!-- Phase 6.10.22: Compact Overview tiles and reserve space for the Update tab. -->
   <Style x:Key="OverviewSubTabControlStyle" TargetType="TabControl">
    <Setter Property="Background" Value="#18181B"/>
    <Setter Property="BorderThickness" Value="0"/>
    <Setter Property="Template">
     <Setter.Value>
      <ControlTemplate TargetType="TabControl">
-      <Grid>
-       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="190"/></Grid.ColumnDefinitions>
-       <Border Grid.Column="0" Background="{TemplateBinding Background}" Padding="0,0,12,0">
-        <ContentPresenter ContentSource="SelectedContent"/>
+      <Grid ClipToBounds="False">
+       <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="165"/>
+       </Grid.ColumnDefinitions>
+       <Border Grid.Column="0" Background="{TemplateBinding Background}"
+               Padding="0,0,10,0" ClipToBounds="False">
+        <ContentPresenter ContentSource="SelectedContent" ClipToBounds="False"/>
        </Border>
-       <Border Grid.Column="1" Background="#172435" BorderBrush="#344B68" BorderThickness="1" CornerRadius="12" Padding="7" Margin="5,8,7,12" ClipToBounds="False">
-        <TabPanel IsItemsHost="True" KeyboardNavigation.TabIndex="1" ClipToBounds="False"/>
+       <Border Grid.Column="1" Background="#172435" BorderBrush="#344B68"
+               BorderThickness="1" CornerRadius="9" Padding="6"
+               Margin="4,7,6,10" Height="198" VerticalAlignment="Top"
+               ClipToBounds="False">
+        <ScrollViewer VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled"
+                      CanContentScroll="False" Focusable="False"
+                      ClipToBounds="False">
+         <StackPanel IsItemsHost="True" Orientation="Vertical" KeyboardNavigation.TabIndex="1"
+                     ClipToBounds="False"/>
+        </ScrollViewer>
        </Border>
       </Grid>
      </ControlTemplate>
     </Setter.Value>
    </Setter>
   </Style>
-  <!-- Match the Overview tiles to the Software Categories tiles: equal width, spacing and corner radius. -->
-  <Style x:Key="OverviewSubTabItemStyle" TargetType="TabItem" BasedOn="{StaticResource {x:Type TabItem}}">
-   <Setter Property="Width" Value="168"/>
-   <Setter Property="MinHeight" Value="40"/>
+  <Style x:Key="OverviewSubTabItemStyle" TargetType="TabItem">
+   <Setter Property="Width" Value="138"/>
+   <Setter Property="Height" Value="48"/>
+   <Setter Property="MinHeight" Value="48"/>
+   <Setter Property="MaxHeight" Value="48"/>
    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
    <Setter Property="VerticalContentAlignment" Value="Center"/>
-   <Setter Property="Padding" Value="11,8"/>
-   <Setter Property="Margin" Value="0,0,0,8"/>
+   <Setter Property="Padding" Value="8,0"/>
+   <Setter Property="Margin" Value="0,0,0,7"/>
    <Setter Property="Foreground" Value="#C9D8EA"/>
    <Setter Property="Background" Value="#26364B"/>
    <Setter Property="BorderThickness" Value="0"/>
+   <Setter Property="SnapsToDevicePixels" Value="True"/>
    <Setter Property="Template">
     <Setter.Value>
      <ControlTemplate TargetType="TabItem">
-      <Border Name="OverviewSubTabTile" Background="{TemplateBinding Background}"
-              BorderBrush="#3B526F" BorderThickness="1" CornerRadius="10"
-              Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
-       <ContentPresenter HorizontalAlignment="Stretch" VerticalAlignment="Center"
-                         ContentSource="Header" RecognizesAccessKey="True"/>
-      </Border>
+      <Grid Height="48" MinHeight="48" ClipToBounds="False" SnapsToDevicePixels="True">
+       <Border x:Name="OverviewSubTabTile"
+               Height="42" VerticalAlignment="Center"
+               Background="{TemplateBinding Background}"
+               BorderBrush="#3B526F" BorderThickness="1"
+               CornerRadius="8" Padding="{TemplateBinding Padding}"
+               ClipToBounds="False" SnapsToDevicePixels="True">
+        <ContentPresenter ContentSource="Header"
+                          HorizontalAlignment="Center"
+                          VerticalAlignment="Center"
+                          RecognizesAccessKey="True"
+                          Margin="2,0,2,0"/>
+       </Border>
+      </Grid>
       <ControlTemplate.Triggers>
        <Trigger Property="IsMouseOver" Value="True">
         <Setter TargetName="OverviewSubTabTile" Property="Background" Value="#304A6B"/>
@@ -2526,6 +2550,9 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
         <Setter TargetName="OverviewSubTabTile" Property="BorderBrush" Value="#5B9BE0"/>
         <Setter Property="Foreground" Value="#FFFFFF"/>
         <Setter Property="FontWeight" Value="SemiBold"/>
+       </Trigger>
+       <Trigger Property="IsEnabled" Value="False">
+        <Setter TargetName="OverviewSubTabTile" Property="Opacity" Value="0.55"/>
        </Trigger>
       </ControlTemplate.Triggers>
      </ControlTemplate>
@@ -2574,7 +2601,7 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
    <!-- 1. OVERVIEW -->
    <TabItem Header="Overview">
     <TabControl Name="OverviewSubTabs" Style="{StaticResource OverviewSubTabControlStyle}" TabStripPlacement="Right" ItemContainerStyle="{StaticResource OverviewSubTabItemStyle}" Background="#18181B" BorderThickness="0" Margin="0,0,0,0">
-     <TabItem Header="System Overview">
+     <TabItem Header="System Overview" IsSelected="True">
     <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="10,0,10,20">
      <StackPanel>
       <Grid Margin="0,10,0,15">
@@ -2719,14 +2746,8 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
      </TabItem>
      <TabItem>
       <TabItem.Header>
-      <Border Width="166" Background="#182638" BorderBrush="#3A526F" BorderThickness="1" CornerRadius="11" Padding="9,8" SnapsToDevicePixels="True">
-       <StackPanel>
-        <TextBlock Text="DRIVER CENTER" Foreground="#EAF2FF" FontWeight="Bold" FontSize="11" Margin="2,0,2,8"/>
-        <Button Name="DriverSidebarSmartModeBtn" Content="✦  Smart View" HorizontalContentAlignment="Center" Background="#176B50" Foreground="#FFFFFF" BorderBrush="#34D399" BorderThickness="1" Padding="8,7" FontSize="10" FontWeight="SemiBold" Margin="0,0,0,6" Cursor="Hand"/>
-        <Button Name="DriverSidebarAdvancedModeBtn" Content="Professional" HorizontalContentAlignment="Center" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" BorderThickness="1" Padding="8,7" FontSize="10" Cursor="Hand"/>
-       </StackPanel>
-      </Border>
-     </TabItem.Header>
+       <TextBlock Text="DRIVER CENTER" Foreground="#EAF2FF" FontWeight="Bold" FontSize="10" TextAlignment="Center" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+      </TabItem.Header>
       <ScrollViewer Name="DriverCenterScrollViewer" VerticalScrollBarVisibility="Auto" Padding="10,8,10,16">
        <StackPanel Name="DriverCenterMainPanel">
         <Grid Name="DriverCenterHeader" Margin="0,4,0,12">
@@ -2920,6 +2941,17 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
         <TextBlock Text="Driver updates are matched through Microsoft's Windows Update Agent. AMR compares all returned candidates: exact Hardware ID and more-specific IDs rank first, Compatible IDs rank lower, then model/manufacturer hints, driver version and date break ties. The best candidate is selected automatically and its confidence/alternative count are shown. Windows Update remains the authority on applicability. Check Driver Rollback reports matching Driver Store packages only; Device Manager's Roll Back Driver control is the authority for actual rollback availability. Review results before downloading or installing." Foreground="#94A3B8" FontSize="10" TextWrapping="Wrap" Margin="4,6,4,0"/>
        </StackPanel>
       </ScrollViewer>
+     </TabItem>
+     <TabItem Header="Update">
+      <Grid Background="#18181B" Margin="10">
+       <StackPanel VerticalAlignment="Top" Margin="12">
+        <TextBlock Text="UPDATE CENTER" FontSize="24" FontWeight="Bold" Foreground="#F8FAFC"/>
+        <TextBlock Text="Windows and driver update management will be added here." Foreground="#94A3B8" FontSize="12" TextWrapping="Wrap" Margin="0,6,0,0"/>
+        <Border Background="#1B2432" BorderBrush="#334155" BorderThickness="1" CornerRadius="10" Padding="14" Margin="0,18,0,0" MaxWidth="620" HorizontalAlignment="Left">
+         <TextBlock Text="Update Center is reserved for the upcoming update features." Foreground="#CBD5E1" FontSize="12" TextWrapping="Wrap"/>
+        </Border>
+       </StackPanel>
+      </Grid>
      </TabItem>
     </TabControl>
    </TabItem>
@@ -6670,13 +6702,10 @@ function Set-AMRDriverExperienceMode {
     $script:DriverExperienceMode = $Mode
     $smartButton = C 'DriverSmartModeBtn'
     $advancedButton = C 'DriverAdvancedModeBtn'
-    $sidebarSmartButton = C 'DriverSidebarSmartModeBtn'
-    $sidebarAdvancedButton = C 'DriverSidebarAdvancedModeBtn'
     $description = C 'DriverModeDescription'
     $deviceList = C 'DriverDeviceList'
     $scrollViewer = C 'DriverCenterScrollViewer'
     $overviewSubTabs = C 'OverviewSubTabs'
-    if ($overviewSubTabs -and $overviewSubTabs.SelectedIndex -ne 1) { $overviewSubTabs.SelectedIndex = 1 }
     $smartActionsPanel = C 'DriverSmartActionsPanel'
     $professionalActionsPanel = C 'DriverProfessionalActionsPanel'
 
@@ -6690,8 +6719,6 @@ function Set-AMRDriverExperienceMode {
     if ($Mode -eq 'Smart') {
         if ($smartButton) { $smartButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#176B50'); $smartButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#34D399'); $smartButton.FontWeight = 'Bold' }
         if ($advancedButton) { $advancedButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#303846'); $advancedButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#526176'); $advancedButton.FontWeight = 'Normal' }
-        if ($sidebarSmartButton) { $sidebarSmartButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#176B50'); $sidebarSmartButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#34D399'); $sidebarSmartButton.FontWeight = 'Bold' }
-        if ($sidebarAdvancedButton) { $sidebarAdvancedButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#303846'); $sidebarAdvancedButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#526176'); $sidebarAdvancedButton.FontWeight = 'Normal' }
         if ($description) { $description.Text = 'Smart View: Smart Select recommends which confirmed driver candidates deserve attention. Smart Install separately prepares and installs only the choices you approve.' }
         if ($scrollViewer) { $scrollViewer.Padding = [System.Windows.Thickness]::new(10,8,10,16) }
         if ($smartActionsPanel) { $smartActionsPanel.Visibility = 'Visible' }
@@ -6740,8 +6767,6 @@ function Set-AMRDriverExperienceMode {
     else {
         if ($smartButton) { $smartButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#303846'); $smartButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#526176'); $smartButton.FontWeight = 'Normal' }
         if ($advancedButton) { $advancedButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#244A70'); $advancedButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4B83B8'); $advancedButton.FontWeight = 'Bold' }
-        if ($sidebarSmartButton) { $sidebarSmartButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#303846'); $sidebarSmartButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#526176'); $sidebarSmartButton.FontWeight = 'Normal' }
-        if ($sidebarAdvancedButton) { $sidebarAdvancedButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#244A70'); $sidebarAdvancedButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4B83B8'); $sidebarAdvancedButton.FontWeight = 'Bold' }
         if ($description) { $description.Text = 'Professional Driver Center: compare every retained Windows Update match, choose an alternative, investigate official OEM/vendor sources, inspect rollback options and export reports.' }
         if ($scrollViewer) { $scrollViewer.Padding = [System.Windows.Thickness]::new(10,8,10,16) }
         if ($smartActionsPanel) { $smartActionsPanel.Visibility = 'Collapsed' }
@@ -8200,8 +8225,6 @@ function Invoke-AMRDriverRollbackCheck {
 (C 'DriverOpenRecoveryBtn').Add_Click({ Open-AMRDriverRecoveryFolder })
 
 (C 'DriverSmartModeBtn').Add_Click({ Set-AMRDriverExperienceMode -Mode Smart })
-(C 'DriverSidebarSmartModeBtn').Add_Click({ Set-AMRDriverExperienceMode -Mode Smart })
-(C 'DriverSidebarAdvancedModeBtn').Add_Click({ Set-AMRDriverExperienceMode -Mode Advanced })
 (C 'DriverSmartSelectBtn').Add_Click({ Invoke-AMRSmartSelect })
 (C 'DriverStartSmartInstallBtn').Add_Click({ Start-AMRSmartInstall })
 (C 'DriverAdvancedModeBtn').Add_Click({ Set-AMRDriverExperienceMode -Mode Advanced })
