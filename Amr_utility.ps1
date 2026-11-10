@@ -1,5 +1,5 @@
 <#
-Amr | AMR Driver Center - Phase 6.10.24 Compact Overview Tiles + Update Tab
+Amr | AMR Driver Center - Phase 6.10.29 Global Soft Outlined Scrollbars
 Windows 10/11 | Windows PowerShell 5.1 | WPF | Administrator
 Developer: عمرو أحمد عبد الفتاح | Phone: 01014716301 | Email: 3mr10aa@gmail.com
 #>
@@ -2577,6 +2577,61 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
     </Setter.Value>
    </Setter>
   </Style>
+
+  <!-- Phase 6.10.29: global implicit ScrollBar style copied from approved Phase 6.10.24 outlined-circle design. -->
+  <Style x:Key="{x:Type ScrollBar}" TargetType="ScrollBar">
+         <Setter Property="Width" Value="14"/>
+         <Setter Property="Background" Value="Transparent"/>
+         <Setter Property="Foreground" Value="#8FB8E8"/>
+         <Setter Property="Template">
+          <Setter.Value>
+           <ControlTemplate TargetType="ScrollBar">
+            <Grid Background="Transparent" SnapsToDevicePixels="True">
+             <Track Name="PART_Track" IsDirectionReversed="True">
+              <Track.DecreaseRepeatButton>
+               <RepeatButton Command="ScrollBar.LineUpCommand" Opacity="0" Focusable="False" IsHitTestVisible="False"/>
+              </Track.DecreaseRepeatButton>
+              <Track.Thumb>
+               <Thumb Width="14" Height="14" MinWidth="14" MinHeight="14" Background="Transparent" HorizontalAlignment="Center" VerticalAlignment="Center">
+                <Thumb.Template>
+                 <ControlTemplate TargetType="Thumb">
+                  <Border x:Name="ThumbHalo" Width="14" Height="14" CornerRadius="7"
+                          Background="#26384D" BorderBrush="#668FB8E8" BorderThickness="1"
+                          HorizontalAlignment="Center" VerticalAlignment="Center">
+                   <Ellipse x:Name="ThumbCircle" Width="7" Height="7" Fill="#8FB8E8"
+                            HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                  </Border>
+                  <ControlTemplate.Triggers>
+                   <Trigger Property="IsMouseOver" Value="True">
+                    <Setter TargetName="ThumbHalo" Property="BorderBrush" Value="#99A9CCF2"/>
+                    <Setter TargetName="ThumbHalo" Property="Background" Value="#334A65"/>
+                    <Setter TargetName="ThumbCircle" Property="Fill" Value="#A9CCF2"/>
+                   </Trigger>
+                   <Trigger Property="IsDragging" Value="True">
+                    <Setter TargetName="ThumbHalo" Property="BorderBrush" Value="#C3DDF8"/>
+                    <Setter TargetName="ThumbHalo" Property="Background" Value="#405A78"/>
+                    <Setter TargetName="ThumbCircle" Property="Fill" Value="#C3DDF8"/>
+                   </Trigger>
+                  </ControlTemplate.Triggers>
+                 </ControlTemplate>
+                </Thumb.Template>
+               </Thumb>
+              </Track.Thumb>
+              <Track.IncreaseRepeatButton>
+               <RepeatButton Command="ScrollBar.LineDownCommand" Opacity="0" Focusable="False" IsHitTestVisible="False"/>
+              </Track.IncreaseRepeatButton>
+             </Track>
+            </Grid>
+            <ControlTemplate.Triggers>
+             <Trigger Property="Orientation" Value="Horizontal">
+              <Setter Property="Height" Value="14"/>
+              <Setter Property="Width" Value="Auto"/>
+             </Trigger>
+            </ControlTemplate.Triggers>
+           </ControlTemplate>
+          </Setter.Value>
+         </Setter>
+        </Style>
  </Window.Resources>
  
  <Grid>
@@ -2753,62 +2808,7 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
                     VerticalScrollBarVisibility="Auto"
                     HorizontalScrollBarVisibility="Disabled"
                     Padding="10,8,10,16">
-       <ScrollViewer.Resources>
-        <!-- AMR soft circular scrollbar: subtle outlined thumb for both orientations. -->
-        <Style TargetType="ScrollBar">
-         <Setter Property="Width" Value="14"/>
-         <Setter Property="Background" Value="Transparent"/>
-         <Setter Property="Foreground" Value="#8FB8E8"/>
-         <Setter Property="Template">
-          <Setter.Value>
-           <ControlTemplate TargetType="ScrollBar">
-            <Grid Background="Transparent" SnapsToDevicePixels="True">
-             <Track Name="PART_Track" IsDirectionReversed="True">
-              <Track.DecreaseRepeatButton>
-               <RepeatButton Command="ScrollBar.LineUpCommand" Opacity="0" Focusable="False" IsHitTestVisible="False"/>
-              </Track.DecreaseRepeatButton>
-              <Track.Thumb>
-               <Thumb Width="14" Height="14" MinWidth="14" MinHeight="14" Background="Transparent" HorizontalAlignment="Center" VerticalAlignment="Center">
-                <Thumb.Template>
-                 <ControlTemplate TargetType="Thumb">
-                  <Border x:Name="ThumbHalo" Width="14" Height="14" CornerRadius="7"
-                          Background="#26384D" BorderBrush="#668FB8E8" BorderThickness="1"
-                          HorizontalAlignment="Center" VerticalAlignment="Center">
-                   <Ellipse x:Name="ThumbCircle" Width="7" Height="7" Fill="#8FB8E8"
-                            HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                  </Border>
-                  <ControlTemplate.Triggers>
-                   <Trigger Property="IsMouseOver" Value="True">
-                    <Setter TargetName="ThumbHalo" Property="BorderBrush" Value="#99A9CCF2"/>
-                    <Setter TargetName="ThumbHalo" Property="Background" Value="#334A65"/>
-                    <Setter TargetName="ThumbCircle" Property="Fill" Value="#A9CCF2"/>
-                   </Trigger>
-                   <Trigger Property="IsDragging" Value="True">
-                    <Setter TargetName="ThumbHalo" Property="BorderBrush" Value="#C3DDF8"/>
-                    <Setter TargetName="ThumbHalo" Property="Background" Value="#405A78"/>
-                    <Setter TargetName="ThumbCircle" Property="Fill" Value="#C3DDF8"/>
-                   </Trigger>
-                  </ControlTemplate.Triggers>
-                 </ControlTemplate>
-                </Thumb.Template>
-               </Thumb>
-              </Track.Thumb>
-              <Track.IncreaseRepeatButton>
-               <RepeatButton Command="ScrollBar.LineDownCommand" Opacity="0" Focusable="False" IsHitTestVisible="False"/>
-              </Track.IncreaseRepeatButton>
-             </Track>
-            </Grid>
-            <ControlTemplate.Triggers>
-             <Trigger Property="Orientation" Value="Horizontal">
-              <Setter Property="Height" Value="14"/>
-              <Setter Property="Width" Value="Auto"/>
-             </Trigger>
-            </ControlTemplate.Triggers>
-           </ControlTemplate>
-          </Setter.Value>
-         </Setter>
-        </Style>
-       </ScrollViewer.Resources>
+       
        <!-- Keep the content's normal left-to-right layout while RTL places the scrollbar on the left. -->
        <StackPanel Name="DriverCenterMainPanel" FlowDirection="LeftToRight">
         <Grid Name="DriverCenterHeader" Margin="0,4,0,12">
@@ -3116,55 +3116,7 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
        </Border>
 
        <ScrollViewer Grid.Column="0" FlowDirection="RightToLeft" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-        <ScrollViewer.Resources>
-         <!-- Category-blue scrollbar for the Software catalog -->
-         <Style TargetType="ScrollBar">
-          <Setter Property="Width" Value="14"/>
-          <Setter Property="Background" Value="Transparent"/>
-          <Setter Property="Foreground" Value="#8FB8E8"/>
-          <Setter Property="Template">
-           <Setter.Value>
-            <ControlTemplate TargetType="ScrollBar">
-             <Grid Background="Transparent" SnapsToDevicePixels="True">
-              <Track Name="PART_Track" IsDirectionReversed="True">
-               <Track.DecreaseRepeatButton>
-                <RepeatButton Command="ScrollBar.LineUpCommand" Opacity="0" Focusable="False" IsHitTestVisible="False"/>
-               </Track.DecreaseRepeatButton>
-               <Track.Thumb>
-                <Thumb Width="10" MinHeight="10" MaxHeight="10" Background="#8FB8E8" HorizontalAlignment="Center">
-                 <Thumb.Template>
-                  <ControlTemplate TargetType="Thumb">
-                   <Grid Width="10" Height="10" HorizontalAlignment="Center" VerticalAlignment="Center">
-                    <Ellipse x:Name="ThumbCircle" Width="10" Height="10" Fill="{TemplateBinding Background}"/>
-                   </Grid>
-                   <ControlTemplate.Triggers>
-                    <Trigger Property="IsMouseOver" Value="True">
-                     <Setter TargetName="ThumbCircle" Property="Fill" Value="#A9CCF2"/>
-                    </Trigger>
-                    <Trigger Property="IsDragging" Value="True">
-                     <Setter TargetName="ThumbCircle" Property="Fill" Value="#C3DDF8"/>
-                    </Trigger>
-                   </ControlTemplate.Triggers>
-                  </ControlTemplate>
-                 </Thumb.Template>
-                </Thumb>
-               </Track.Thumb>
-               <Track.IncreaseRepeatButton>
-                <RepeatButton Command="ScrollBar.LineDownCommand" Opacity="0" Focusable="False" IsHitTestVisible="False"/>
-               </Track.IncreaseRepeatButton>
-              </Track>
-             </Grid>
-             <ControlTemplate.Triggers>
-              <Trigger Property="Orientation" Value="Horizontal">
-               <Setter Property="Height" Value="8"/>
-               <Setter Property="Width" Value="Auto"/>
-              </Trigger>
-             </ControlTemplate.Triggers>
-            </ControlTemplate>
-           </Setter.Value>
-          </Setter>
-         </Style>
-        </ScrollViewer.Resources>
+        
        <ItemsControl Name="SoftwareGrid" FlowDirection="LeftToRight" Margin="0,5,0,0">
         <ItemsControl.ItemsPanel>
          <ItemsPanelTemplate><UniformGrid Columns="3"/></ItemsPanelTemplate>
@@ -3246,107 +3198,9 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
 
    <!-- 3. MEGA CUSTOMIZE SUITE (27 TOOLS & TWEAKS) -->
    <TabItem Header="Customize">
-    <Grid Margin="8,4,8,8">
-     <Grid.ColumnDefinitions>
-      <ColumnDefinition Width="0.9*"/>
-      <ColumnDefinition Width="3"/>
-      <ColumnDefinition Width="1.1*"/>
-     </Grid.ColumnDefinitions>
-     <!-- Existing customization tools remain on the left, independently scrollable. -->
-     <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="4,0,8,8">
-      <StackPanel Name="CustomizePanel">
-      <Grid Margin="0,10,0,15">
-       <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="*"/>
-        <ColumnDefinition Width="Auto"/>
-       </Grid.ColumnDefinitions>
-       <StackPanel Grid.Column="0" Margin="0,0,8,0" VerticalAlignment="Center">
-        <TextBlock Text="Windows Customization" FontSize="11" FontWeight="Bold" Foreground="#FFFFFF" TextWrapping="Wrap"/>
-        <TextBlock Text="Select the tweaks you want to apply safely." Foreground="#A1A1AA" FontSize="9" TextWrapping="Wrap" Margin="0,2,0,0"/>
-       </StackPanel>
-       <StackPanel Grid.Column="1" VerticalAlignment="Center" MinWidth="112">
-        <Button Name="ApplyCustomizeBtn" Content="⚡ Apply Tweaks" Background="#10B981" Foreground="#FFFFFF" BorderThickness="0" FontSize="9" FontWeight="Bold" Padding="7,5"/>
-        <Button Name="CancelCustomizeBtn" Content="✕ Cancel Tweaks" Background="#3F1D1D" Foreground="#FECACA" BorderBrush="#7F1D1D" FontSize="9" Padding="7,5" Margin="0,4,0,0" ToolTip="Clear selections in the left panel only"/>
-        <Button Name="RestoreDefaultsBtn" Content="↶ Restore Defaults" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F" FontSize="9" Padding="7,5" Margin="0,4,0,0" ToolTip="Restore Registry settings captured before the first tweak application"/>
-        <TextBlock Name="CustomizeSelectionCount" Text="0 selected on left" Foreground="#A1A1AA" FontSize="9" TextAlignment="Center" Margin="0,4,0,0"/>
-       </StackPanel>
-      </Grid>
-
-      <WrapPanel Orientation="Horizontal">
-       <!-- Group 1: Appearance & Visuals (5 Tweaks) -->
-       <Border Background="#27272A" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="10" Padding="15" Margin="10" Width="410">
-        <StackPanel>
-         <TextBlock Text="1. Appearance &amp; Visuals" FontSize="16" FontWeight="Bold" Foreground="#3B82F6" Margin="0,0,0,10"/>
-         <CheckBox Name="chkDarkMode" Content="01. Enable System Dark Mode" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-         <CheckBox Name="chkDisableTransparency" Content="02. Disable Transparency Effects" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-         <CheckBox Name="chkDisableAccentColor" Content="03. Disable Accent Color on Title Bars" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-         <CheckBox Name="chkClassicVolume" Content="04. Enable Classic Volume Control Flyout" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-         <CheckBox Name="chkDisableAnimations" Content="05. Minimize Window Animation Overhead" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-        </StackPanel>
-       </Border>
-
-       <!-- Group 2: Taskbar & Start Menu (5 Tweaks) -->
-       <Border Background="#27272A" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="10" Padding="15" Margin="10" Width="410">
-        <StackPanel>
-         <TextBlock Text="2. Taskbar &amp; Start Menu" FontSize="16" FontWeight="Bold" Foreground="#3B82F6" Margin="0,0,0,10"/>
-         <CheckBox Name="chkShowSeconds" Content="06. Show Seconds in Taskbar Clock" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-         <CheckBox Name="chkDisableBingSearch" Content="07. Disable Bing Web Search in Start Menu" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-         <CheckBox Name="chkTaskbarLeft" Content="08. Align Taskbar Icons to Left (Win 11)" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-         <CheckBox Name="chkHideWidgets" Content="09. Hide Widgets Button on Taskbar" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-         <CheckBox Name="chkHideTaskView" Content="10. Hide Task View Icon" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-        </StackPanel>
-       </Border>
-
-       <!-- Group 3: File Explorer & Views (5 Tweaks) -->
-       <Border Background="#27272A" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="10" Padding="15" Margin="10" Width="410">
-        <StackPanel>
-         <TextBlock Text="3. File Explorer &amp; View" FontSize="16" FontWeight="Bold" Foreground="#3B82F6" Margin="0,0,0,10"/>
-         <CheckBox Name="chkHiddenFiles" Content="11. Show Hidden Files &amp; Extensions" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-         <CheckBox Name="chkOpenThisPC" Content="12. Open Explorer directly to 'This PC'" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-         <CheckBox Name="chkClassicContextMenu" Content="13. Restore Win 10 Classic Right-Click Menu" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-         <CheckBox Name="chkHideRecentFiles" Content="14. Hide Recent Files in Quick Access" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-         <CheckBox Name="chkSeparateFolderProcess" Content="15. Launch Folders in Separate Process" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-        </StackPanel>
-       </Border>
-
-       <!-- Group 4: System Behavior & Accessibility (4 Tweaks) -->
-       <Border Background="#27272A" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="10" Padding="15" Margin="10" Width="410">
-        <StackPanel>
-         <TextBlock Text="4. Behavior &amp; Accessibility" FontSize="16" FontWeight="Bold" Foreground="#3B82F6" Margin="0,0,0,10"/>
-         <CheckBox Name="chkDisableStickyKeys" Content="16. Disable Sticky Keys Shortcut Popup" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-         <CheckBox Name="chkDisableAutoRebootUpdate" Content="17. Prevent Auto Reboot on Windows Update" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-         <CheckBox Name="chkShowBSODDetails" Content="18. Show Detailed Information on BSOD" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-         <CheckBox Name="chkDisableShortcutSuffix" Content="19. Remove '- Shortcut' Suffix on New Icons" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-        </StackPanel>
-       </Border>
-
-       <!-- Group 5: Privacy & Diagnostics (4 Tweaks) -->
-       <Border Background="#27272A" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="10" Padding="15" Margin="10" Width="410">
-        <StackPanel>
-         <TextBlock Text="5. Privacy &amp; Tracking" FontSize="16" FontWeight="Bold" Foreground="#3B82F6" Margin="0,0,0,10"/>
-         <CheckBox Name="chkDisableAdvertisingID" Content="20. Disable Windows Advertising ID" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-         <CheckBox Name="chkDisableLocationTracking" Content="21. Disable Master Location Tracking" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-         <CheckBox Name="chkDisableFeedbackPrompts" Content="22. Disable Windows Feedback Requests" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-         <CheckBox Name="chkDisableTailoredExperiences" Content="23. Disable Diagnostic Tailored Experiences" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-        </StackPanel>
-       </Border>
-
-       <!-- Group 6: Performance & Gaming (4 Tweaks) -->
-       <Border Background="#27272A" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="10" Padding="15" Margin="10" Width="410">
-        <StackPanel>
-         <TextBlock Text="6. Performance &amp; Context Tools" FontSize="16" FontWeight="Bold" Foreground="#3B82F6" Margin="0,0,0,10"/>
-         <CheckBox Name="chkEnableGameMode" Content="24. Enable Windows Game Mode" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-         <CheckBox Name="chkDisableSearchIndexing" Content="25. Optimize Search Service Memory" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-         <CheckBox Name="chkAddTakeOwnership" Content="26. Add 'Take Ownership' to Context Menu" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-         <CheckBox Name="chkDisableHibernation" Content="27. Disable System Hibernation (Free Disk)" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
-        </StackPanel>
-       </Border>
-      </WrapPanel>
-      </StackPanel>
-     </ScrollViewer>
-     <Border Grid.Column="1" Background="#A6A6B0" Opacity="0.22" Margin="0,8"/>
-     <!-- Basic tweaks occupy the right half of the same Customize tab. -->
-     <ScrollViewer Grid.Column="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="8,0,4,8">
+    <TabControl Name="CustomizeSubTabs" SelectedIndex="0" Style="{StaticResource OverviewSubTabControlStyle}" TabStripPlacement="Right" ItemContainerStyle="{StaticResource OverviewSubTabItemStyle}" Background="#18181B" BorderThickness="0" Margin="0,0,0,0">
+     <TabItem Header="Tweaks" IsSelected="True">
+<ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="8,0,4,8">
       <StackPanel Name="BasicTweaksPanel">
        <Border Background="#18181B" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="10" Padding="12" Margin="0,10,0,12">
         <StackPanel>
@@ -3450,67 +3304,170 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
        <TextBlock Text="Preset selections are inspired by WinUtil categories, but are not claimed to be an exact copy of its live presets. Review all selected changes. Some policies vary by Windows edition/version; service and hibernation changes may affect features and require restart." Foreground="#FBBF24" TextWrapping="Wrap" Margin="2,0,2,12"/>
       </StackPanel>
      </ScrollViewer>
-    </Grid>
+     </TabItem>
+     <TabItem Header="Windows Customization">
+<ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="4,0,8,8">
+      <StackPanel Name="CustomizePanel">
+      <Grid Margin="0,10,0,15">
+       <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="Auto"/>
+       </Grid.ColumnDefinitions>
+       <StackPanel Grid.Column="0" Margin="0,0,8,0" VerticalAlignment="Center">
+        <TextBlock Text="Windows Customization" FontSize="11" FontWeight="Bold" Foreground="#FFFFFF" TextWrapping="Wrap"/>
+        <TextBlock Text="Select the tweaks you want to apply safely." Foreground="#A1A1AA" FontSize="9" TextWrapping="Wrap" Margin="0,2,0,0"/>
+       </StackPanel>
+       <StackPanel Grid.Column="1" VerticalAlignment="Center" MinWidth="112">
+        <Button Name="ApplyCustomizeBtn" Content="⚡ Apply Tweaks" Background="#10B981" Foreground="#FFFFFF" BorderThickness="0" FontSize="9" FontWeight="Bold" Padding="7,5"/>
+        <Button Name="CancelCustomizeBtn" Content="✕ Cancel Tweaks" Background="#3F1D1D" Foreground="#FECACA" BorderBrush="#7F1D1D" FontSize="9" Padding="7,5" Margin="0,4,0,0" ToolTip="Clear selections in the left panel only"/>
+        <Button Name="RestoreDefaultsBtn" Content="↶ Restore Defaults" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F" FontSize="9" Padding="7,5" Margin="0,4,0,0" ToolTip="Restore Registry settings captured before the first tweak application"/>
+        <TextBlock Name="CustomizeSelectionCount" Text="0 selected on left" Foreground="#A1A1AA" FontSize="9" TextAlignment="Center" Margin="0,4,0,0"/>
+       </StackPanel>
+      </Grid>
+
+      <WrapPanel Orientation="Horizontal">
+       <!-- Group 1: Appearance & Visuals (5 Tweaks) -->
+       <Border Background="#27272A" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="10" Padding="15" Margin="10" Width="410">
+        <StackPanel>
+         <TextBlock Text="1. Appearance &amp; Visuals" FontSize="16" FontWeight="Bold" Foreground="#3B82F6" Margin="0,0,0,10"/>
+         <CheckBox Name="chkDarkMode" Content="01. Enable System Dark Mode" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+         <CheckBox Name="chkDisableTransparency" Content="02. Disable Transparency Effects" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+         <CheckBox Name="chkDisableAccentColor" Content="03. Disable Accent Color on Title Bars" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+         <CheckBox Name="chkClassicVolume" Content="04. Enable Classic Volume Control Flyout" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+         <CheckBox Name="chkDisableAnimations" Content="05. Minimize Window Animation Overhead" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+        </StackPanel>
+       </Border>
+
+       <!-- Group 2: Taskbar & Start Menu (5 Tweaks) -->
+       <Border Background="#27272A" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="10" Padding="15" Margin="10" Width="410">
+        <StackPanel>
+         <TextBlock Text="2. Taskbar &amp; Start Menu" FontSize="16" FontWeight="Bold" Foreground="#3B82F6" Margin="0,0,0,10"/>
+         <CheckBox Name="chkShowSeconds" Content="06. Show Seconds in Taskbar Clock" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+         <CheckBox Name="chkDisableBingSearch" Content="07. Disable Bing Web Search in Start Menu" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+         <CheckBox Name="chkTaskbarLeft" Content="08. Align Taskbar Icons to Left (Win 11)" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+         <CheckBox Name="chkHideWidgets" Content="09. Hide Widgets Button on Taskbar" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+         <CheckBox Name="chkHideTaskView" Content="10. Hide Task View Icon" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+        </StackPanel>
+       </Border>
+
+       <!-- Group 3: File Explorer & Views (5 Tweaks) -->
+       <Border Background="#27272A" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="10" Padding="15" Margin="10" Width="410">
+        <StackPanel>
+         <TextBlock Text="3. File Explorer &amp; View" FontSize="16" FontWeight="Bold" Foreground="#3B82F6" Margin="0,0,0,10"/>
+         <CheckBox Name="chkHiddenFiles" Content="11. Show Hidden Files &amp; Extensions" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+         <CheckBox Name="chkOpenThisPC" Content="12. Open Explorer directly to 'This PC'" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+         <CheckBox Name="chkClassicContextMenu" Content="13. Restore Win 10 Classic Right-Click Menu" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+         <CheckBox Name="chkHideRecentFiles" Content="14. Hide Recent Files in Quick Access" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+         <CheckBox Name="chkSeparateFolderProcess" Content="15. Launch Folders in Separate Process" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+        </StackPanel>
+       </Border>
+
+       <!-- Group 4: System Behavior & Accessibility (4 Tweaks) -->
+       <Border Background="#27272A" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="10" Padding="15" Margin="10" Width="410">
+        <StackPanel>
+         <TextBlock Text="4. Behavior &amp; Accessibility" FontSize="16" FontWeight="Bold" Foreground="#3B82F6" Margin="0,0,0,10"/>
+         <CheckBox Name="chkDisableStickyKeys" Content="16. Disable Sticky Keys Shortcut Popup" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+         <CheckBox Name="chkDisableAutoRebootUpdate" Content="17. Prevent Auto Reboot on Windows Update" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+         <CheckBox Name="chkShowBSODDetails" Content="18. Show Detailed Information on BSOD" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+         <CheckBox Name="chkDisableShortcutSuffix" Content="19. Remove '- Shortcut' Suffix on New Icons" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+        </StackPanel>
+       </Border>
+
+       <!-- Group 5: Privacy & Diagnostics (4 Tweaks) -->
+       <Border Background="#27272A" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="10" Padding="15" Margin="10" Width="410">
+        <StackPanel>
+         <TextBlock Text="5. Privacy &amp; Tracking" FontSize="16" FontWeight="Bold" Foreground="#3B82F6" Margin="0,0,0,10"/>
+         <CheckBox Name="chkDisableAdvertisingID" Content="20. Disable Windows Advertising ID" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+         <CheckBox Name="chkDisableLocationTracking" Content="21. Disable Master Location Tracking" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+         <CheckBox Name="chkDisableFeedbackPrompts" Content="22. Disable Windows Feedback Requests" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+         <CheckBox Name="chkDisableTailoredExperiences" Content="23. Disable Diagnostic Tailored Experiences" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+        </StackPanel>
+       </Border>
+
+       <!-- Group 6: Performance & Gaming (4 Tweaks) -->
+       <Border Background="#27272A" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="10" Padding="15" Margin="10" Width="410">
+        <StackPanel>
+         <TextBlock Text="6. Performance &amp; Context Tools" FontSize="16" FontWeight="Bold" Foreground="#3B82F6" Margin="0,0,0,10"/>
+         <CheckBox Name="chkEnableGameMode" Content="24. Enable Windows Game Mode" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+         <CheckBox Name="chkDisableSearchIndexing" Content="25. Optimize Search Service Memory" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+         <CheckBox Name="chkAddTakeOwnership" Content="26. Add 'Take Ownership' to Context Menu" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+         <CheckBox Name="chkDisableHibernation" Content="27. Disable System Hibernation (Free Disk)" Foreground="#E4E4E7" FontSize="14" Margin="0,4"/>
+        </StackPanel>
+       </Border>
+      </WrapPanel>
+      </StackPanel>
+     </ScrollViewer>
+     </TabItem>
+    </TabControl>
    </TabItem>
 
    <!-- CLEANUP -->
    <TabItem Header="Cleanup">
-    <Grid Margin="18">
-     <Grid.ColumnDefinitions><ColumnDefinition Width="1.08*"/><ColumnDefinition Width="0.92*"/></Grid.ColumnDefinitions>
-     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-     <StackPanel Grid.Row="0" Grid.ColumnSpan="2" Margin="2,0,2,16">
-      <TextBlock Text="CLEANUP CENTER" FontSize="21" FontWeight="Bold" Foreground="#F4F4F5"/>
-      <TextBlock Text="Review safe cleanup candidates on the left, and run disk diagnostics on the right." FontSize="12" Foreground="#A1A1AA" Margin="0,4,0,0"/>
-     </StackPanel>
-     <Border Grid.Row="1" Grid.Column="0" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="12" Padding="14" Margin="0,0,9,0">
-      <Grid>
-       <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-       <Grid Grid.Row="0" Margin="0,0,0,10">
-        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-        <StackPanel>
-         <TextBlock Text="SAFE CLEANUP" FontSize="14" FontWeight="SemiBold" Foreground="#E4E4E7"/>
-         <TextBlock Name="CleanupScanSummary" Text="No scan performed yet." Foreground="#A1A1AA" FontSize="11" Margin="0,3,0,0" TextWrapping="Wrap"/>
-        </StackPanel>
-        <Button Name="CleanupScanBtn" Grid.Column="1" Content="Scan Now" Width="105" Height="32" Background="#263B36" Foreground="#A7F3D0" BorderBrush="#36594D"/>
-       </Grid>
-       <TextBlock Grid.Row="1" Text="Select the categories you want to review" FontSize="11" Foreground="#A1A1AA" Margin="0,0,0,8"/>
-       <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
-        <StackPanel>
-         <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupUserTempCheck" Content="User temporary files" FontWeight="SemiBold"/><TextBlock Text="Temporary files in your Windows user profile." Foreground="#A1A1AA" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupUserTempInfo" Grid.Column="1" Text="Not scanned" Foreground="#A1A1AA" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
-         <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupWindowsTempCheck" Content="Windows temporary files" FontWeight="SemiBold"/><TextBlock Text="Temporary files under the Windows Temp folder." Foreground="#A1A1AA" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupWindowsTempInfo" Grid.Column="1" Text="Not scanned" Foreground="#A1A1AA" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
-         <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupUpdateCheck" Content="Windows Update download cache" FontWeight="SemiBold"/><TextBlock Text="Downloaded update files; service is paused only during cleanup." Foreground="#A1A1AA" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupUpdateInfo" Grid.Column="1" Text="Not scanned" Foreground="#A1A1AA" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
-         <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupWerCheck" Content="Windows error reports" FontWeight="SemiBold"/><TextBlock Text="Archived and queued Windows Error Reporting files." Foreground="#A1A1AA" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupWerInfo" Grid.Column="1" Text="Not scanned" Foreground="#A1A1AA" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
-         <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupShaderCheck" Content="DirectX shader cache" FontWeight="SemiBold"/><TextBlock Text="Temporary graphics cache; Windows and apps can rebuild it." Foreground="#A1A1AA" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupShaderInfo" Grid.Column="1" Text="Not scanned" Foreground="#A1A1AA" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
-         <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupDeliveryCheck" Content="Delivery Optimization cache" FontWeight="SemiBold"/><TextBlock Text="Cached update delivery files that Windows can download again." Foreground="#A1A1AA" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupDeliveryInfo" Grid.Column="1" Text="Not scanned" Foreground="#A1A1AA" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
-        </StackPanel>
-       </ScrollViewer>
-       <StackPanel Grid.Row="3" Margin="0,10,0,8">
-        <ProgressBar Name="CleanupProgress" Height="7" Minimum="0" Maximum="100" Value="0" Background="#292933" Foreground="#6FC6A5"/>
-        <Grid Margin="0,5,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Name="CleanupProgressText" Text="Ready" Foreground="#A1A1AA" FontSize="11"/><TextBlock Name="CleanupSelectedSummary" Grid.Column="1" Text="Selected: 0 files • 0 MB" Foreground="#8BDCC5" FontSize="11" FontWeight="SemiBold"/></Grid>
+    <TabControl Name="CleanupSubTabs" Style="{StaticResource OverviewSubTabControlStyle}" TabStripPlacement="Right" ItemContainerStyle="{StaticResource OverviewSubTabItemStyle}" Background="#18181B" BorderThickness="0" Margin="0,0,0,0">
+     <TabItem Header="Clean Up Center" IsSelected="True">
+      <Grid Margin="18">
+       <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+       <StackPanel Grid.Row="0" Margin="2,0,2,16">
+        <TextBlock Text="CLEANUP CENTER" FontSize="21" FontWeight="Bold" Foreground="#F4F4F5"/>
+        <TextBlock Text="Review safe cleanup candidates and remove selected temporary files after scanning." FontSize="12" Foreground="#A1A1AA" Margin="0,4,0,0" TextWrapping="Wrap"/>
        </StackPanel>
-       <Button Name="CleanupRunBtn" Grid.Row="4" Content="Clean Selected" Height="36" HorizontalAlignment="Stretch" Background="#28483E" Foreground="#C7F9E8" BorderBrush="#416B5D" IsEnabled="False"/>
+       <Border Grid.Row="1" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="12" Padding="14">
+        <Grid>
+         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+         <Grid Grid.Row="0" Margin="0,0,0,10">
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+          <StackPanel>
+           <TextBlock Text="SAFE CLEANUP" FontSize="14" FontWeight="SemiBold" Foreground="#E4E4E7"/>
+           <TextBlock Name="CleanupScanSummary" Text="No scan performed yet." Foreground="#A1A1AA" FontSize="11" Margin="0,3,0,0" TextWrapping="Wrap"/>
+          </StackPanel>
+          <Button Name="CleanupScanBtn" Grid.Column="1" Content="Scan Now" Width="105" Height="32" Background="#263B36" Foreground="#A7F3D0" BorderBrush="#36594D"/>
+         </Grid>
+         <TextBlock Grid.Row="1" Text="Select the categories you want to review" FontSize="11" Foreground="#A1A1AA" Margin="0,0,0,8"/>
+         <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
+          <StackPanel>
+           <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupUserTempCheck" Content="User temporary files" FontWeight="SemiBold"/><TextBlock Text="Temporary files in your Windows user profile." Foreground="#A1A1AA" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupUserTempInfo" Grid.Column="1" Text="Not scanned" Foreground="#A1A1AA" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+           <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupWindowsTempCheck" Content="Windows temporary files" FontWeight="SemiBold"/><TextBlock Text="Temporary files under the Windows Temp folder." Foreground="#A1A1AA" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupWindowsTempInfo" Grid.Column="1" Text="Not scanned" Foreground="#A1A1AA" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+           <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupUpdateCheck" Content="Windows Update download cache" FontWeight="SemiBold"/><TextBlock Text="Downloaded update files; service is paused only during cleanup." Foreground="#A1A1AA" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupUpdateInfo" Grid.Column="1" Text="Not scanned" Foreground="#A1A1AA" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+           <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupWerCheck" Content="Windows error reports" FontWeight="SemiBold"/><TextBlock Text="Archived and queued Windows Error Reporting files." Foreground="#A1A1AA" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupWerInfo" Grid.Column="1" Text="Not scanned" Foreground="#A1A1AA" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+           <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupShaderCheck" Content="DirectX shader cache" FontWeight="SemiBold"/><TextBlock Text="Temporary graphics cache; Windows and apps can rebuild it." Foreground="#A1A1AA" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupShaderInfo" Grid.Column="1" Text="Not scanned" Foreground="#A1A1AA" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+           <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupDeliveryCheck" Content="Delivery Optimization cache" FontWeight="SemiBold"/><TextBlock Text="Cached update delivery files that Windows can download again." Foreground="#A1A1AA" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupDeliveryInfo" Grid.Column="1" Text="Not scanned" Foreground="#A1A1AA" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+          </StackPanel>
+         </ScrollViewer>
+         <StackPanel Grid.Row="3" Margin="0,10,0,8">
+          <ProgressBar Name="CleanupProgress" Height="7" Minimum="0" Maximum="100" Value="0" Background="#292933" Foreground="#6FC6A5"/>
+          <Grid Margin="0,5,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Name="CleanupProgressText" Text="Ready" Foreground="#A1A1AA" FontSize="11"/><TextBlock Name="CleanupSelectedSummary" Grid.Column="1" Text="Selected: 0 files • 0 MB" Foreground="#8BDCC5" FontSize="11" FontWeight="SemiBold"/></Grid>
+         </StackPanel>
+         <Button Name="CleanupRunBtn" Grid.Row="4" Content="Clean Selected" Height="36" HorizontalAlignment="Stretch" Background="#28483E" Foreground="#C7F9E8" BorderBrush="#416B5D" IsEnabled="False"/>
+        </Grid>
+       </Border>
       </Grid>
-     </Border>
-     <Border Grid.Row="1" Grid.Column="1" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="12" Padding="14" Margin="9,0,0,0">
-      <Grid>
-       <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-       <StackPanel Grid.Row="0" Margin="0,0,0,12">
-        <TextBlock Text="DISK TOOLS &amp; DIAGNOSTICS" FontSize="14" FontWeight="SemiBold" Foreground="#E4E4E7"/>
-        <TextBlock Text="Analysis tools are read-only unless a clearly marked repair action is selected." FontSize="11" Foreground="#A1A1AA" TextWrapping="Wrap" Margin="0,4,0,0"/>
+     </TabItem>
+     <TabItem Header="Disk Tools">
+      <Grid Margin="18">
+       <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+       <StackPanel Grid.Row="0" Margin="2,0,2,16">
+        <TextBlock Text="DISK TOOLS &amp; DIAGNOSTICS" FontSize="21" FontWeight="Bold" Foreground="#F4F4F5"/>
+        <TextBlock Text="Analyze fixed drives and Windows components. Analysis is read-only unless a clearly marked repair action is selected." FontSize="12" Foreground="#A1A1AA" TextWrapping="Wrap" Margin="0,4,0,0"/>
        </StackPanel>
-       <StackPanel Grid.Row="1">
-        <Button Name="CleanupDriveAnalyzeBtn" Content="Analyze Drives" Height="36" Margin="0,0,0,8" Background="#293746" Foreground="#C7DDF5" BorderBrush="#40566D" HorizontalContentAlignment="Left" Padding="12,0"/>
-        <Button Name="CleanupComponentAnalyzeBtn" Content="Analyze Windows Components" Height="36" Margin="0,0,0,8" Background="#343044" Foreground="#DDD2F5" BorderBrush="#51466A" HorizontalContentAlignment="Left" Padding="12,0"/>
-        <Button Name="CleanupComponentRunBtn" Content="Clean Component Store (DISM)" Height="36" Margin="0,0,0,12" Background="#493B2B" Foreground="#F4DFC0" BorderBrush="#70583A" HorizontalContentAlignment="Left" Padding="12,0" IsEnabled="False"/>
-       </StackPanel>
-       <Grid Grid.Row="2">
-        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-        <TextBlock Grid.Row="0" Text="ANALYSIS REPORT" FontSize="11" FontWeight="SemiBold" Foreground="#A1A1AA" Margin="0,0,0,7"/>
-        <TextBox Name="CleanupAdvancedReport" Grid.Row="1" Text="Advanced analysis has not been run." IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" Background="#111116" Foreground="#D4D4D8" BorderBrush="#383842" Padding="10"/>
-       </Grid>
+       <Border Grid.Row="1" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="12" Padding="14">
+        <Grid>
+         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+         <StackPanel Grid.Row="0" Margin="0,0,0,12">
+          <TextBlock Text="DIAGNOSTIC TOOLS" FontSize="14" FontWeight="SemiBold" Foreground="#E4E4E7" Margin="0,0,0,10"/>
+          <Button Name="CleanupDriveAnalyzeBtn" Content="Analyze Drives" Height="36" Margin="0,0,0,8" Background="#293746" Foreground="#C7DDF5" BorderBrush="#40566D" HorizontalContentAlignment="Left" Padding="12,0"/>
+          <Button Name="CleanupComponentAnalyzeBtn" Content="Analyze Windows Components" Height="36" Margin="0,0,0,8" Background="#343044" Foreground="#DDD2F5" BorderBrush="#51466A" HorizontalContentAlignment="Left" Padding="12,0"/>
+          <Button Name="CleanupComponentRunBtn" Content="Clean Component Store (DISM)" Height="36" Margin="0,0,0,12" Background="#493B2B" Foreground="#F4DFC0" BorderBrush="#70583A" Padding="12,0" IsEnabled="False"/>
+         </StackPanel>
+         <Grid Grid.Row="1">
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+          <TextBlock Grid.Row="0" Text="ANALYSIS REPORT" FontSize="11" FontWeight="SemiBold" Foreground="#A1A1AA" Margin="0,0,0,7"/>
+          <TextBox Name="CleanupAdvancedReport" Grid.Row="1" Text="Advanced analysis has not been run." IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" Background="#111116" Foreground="#D4D4D8" BorderBrush="#383842" Padding="10"/>
+         </Grid>
+        </Grid>
+       </Border>
       </Grid>
-     </Border>
-    </Grid>
+     </TabItem>
+    </TabControl>
    </TabItem>
 
    <!-- 9. BACKUP -->
