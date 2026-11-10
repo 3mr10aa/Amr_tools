@@ -1,16 +1,19 @@
-#requires -Version 5.1
 <#
-Amr | windows_utility - Phase 9 Advanced Software Installation Architecture
+Amr | AMR Driver Center - Phase 6.8 Direct Vendor Adapters & Full Multi-Source Discovery
 Windows 10/11 | Windows PowerShell 5.1 | WPF | Administrator
 Developer: عمرو أحمد عبد الفتاح | Phone: 01014716301 | Email: 3mr10aa@gmail.com
 #>
-[CmdletBinding()]
-param()
 
-# --- 0. Force STA Mode for WPF Stability & Prevent Freeze ---
+# --- Phase 6.8 | Direct Vendor Adapters & Full Multi-Source Discovery (built on Phase 6.7) ---
+# --- 0. Verify STA Mode for WPF Stability ---
+# This version can be pasted into the PowerShell ISE script editor and run with F5.
+# When pasted, $PSCommandPath may be empty, so do not attempt to relaunch an unknown/old file.
 if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') {
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -Command "& '$PSCommandPath'"
-    exit
+    if (-not [string]::IsNullOrWhiteSpace($PSCommandPath) -and (Test-Path -LiteralPath $PSCommandPath)) {
+        Start-Process powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-File',('"{0}"' -f $PSCommandPath))
+        exit
+    }
+    throw 'AMR Utility requires an STA PowerShell host. Open Windows PowerShell ISE, paste the complete script into the script editor, and press F5.'
 }
 
 Set-StrictMode -Version 2
@@ -24,8 +27,11 @@ function Test-AMRAdmin {
 }
 
 if (-not (Test-AMRAdmin)) {
-    Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -STA -File `"$PSCommandPath`"" -Verb RunAs
-    exit
+    if (-not [string]::IsNullOrWhiteSpace($PSCommandPath) -and (Test-Path -LiteralPath $PSCommandPath)) {
+        Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -STA -File `"$PSCommandPath`"" -Verb RunAs
+        exit
+    }
+    throw 'AMR Utility needs administrator permissions. Close this ISE window, reopen Windows PowerShell ISE using Run as administrator, paste the complete script into the script editor, and press F5.'
 }
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml
@@ -42,11 +48,56 @@ $script:DownloadDir = Join-Path $script:AppRoot 'Downloads'
 New-Item -ItemType Directory -Force -Path $script:BackupDir,$script:LogDir,$script:ExportDir,$script:IconDir,$script:DownloadDir | Out-Null
 $script:LogFile = Join-Path $script:LogDir ("AMR_{0}.log" -f (Get-Date -Format 'yyyyMMdd'))
 $script:DiagnosticFile = Join-Path $script:LogDir ("AMR_Diagnostics_{0}.jsonl" -f (Get-Date -Format 'yyyyMMdd'))
+$script:DriverHistoryFile = Join-Path $script:LogDir 'DriverCenterHistory.csv'
+$script:DriverRestorePointStateFile = Join-Path $script:LogDir 'DriverCenterRestorePoint.json'
 $script:AMRSessionId = [guid]::NewGuid().ToString()
 
 $script:Window = $null
 # Initialize refresh state before registering WPF handlers (StrictMode is enabled).
 $script:OverviewRefreshing = $false
+$script:DriverScanJob = $null
+$script:DriverScanTimer = $null
+$script:DriverScanPartialShown = $false
+$script:DriverActionJob = $null
+$script:DriverActionTimer = $null
+# Phase 6.4: one coordinated background-operation slot for professional driver work.
+$script:DriverManagedJob = $null
+$script:DriverManagedTimer = $null
+$script:DriverManagedProgressTimer = $null
+$script:DriverManagedProgressFile = $null
+$script:DriverManagedWorkerId = $null
+$script:DriverOperationState = [pscustomobject]@{ Name='Idle'; State='Idle'; StartedAt=$null; Generation=0; CanCancel=$false; Status='Ready' }
+$script:DriverScanGeneration = 0
+$script:DriverActionProgressFile = $null
+$script:DriverActionUpdateId = $null
+$script:DriverActionType = $null
+$script:DriverActionDeviceName = $null
+$script:DriverActionUpdateTitle = $null
+$script:DriverActionVersion = $null
+$script:DriverBatchActive = $false
+$script:DriverBatchQueue = @()
+$script:DriverBatchTotal = 0
+$script:DriverBatchCompleted = 0
+$script:DriverBatchResults = @()
+$script:DriverBatchRestorePointStatus = $null
+$script:DriverSupportUrl = $null
+$script:DriverSupportName = $null
+$script:DriverComputerModel = ''
+$script:DriverBoardModel = ''
+$script:DriverOEMModelProfile = $null
+$script:DriverWindowsContext = ''
+$script:DriverExperienceMode = 'Smart'
+$script:DriverAllDeviceRows = @()
+$script:DriverProfessionalCandidateSelection = $null
+$script:DriverProfessionalSourceContext = $null
+$script:DriverProfessionalDiscoveryResults = @()
+$script:DriverSmartQueueActive = $false
+$script:DriverSmartDownloadQueue = @()
+$script:DriverSmartDownloadTotal = 0
+$script:DriverSmartDownloadCompleted = 0
+$script:DriverSmartSelectionReady = $false
+$script:DriverSmartSelectedKeys = @()
+$script:DriverSmartSelectionTime = $null
 $script:Status = $null
 $script:ProgressBar = $null
 $script:ProgressText = $null
@@ -1923,55 +1974,115 @@ $RawApps = @(
     [pscustomobject]@{ Name='KStars Planetarium'; Category='34. Data Science & Scientific Tools'; Id='KDE.KStars'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='KDE' }
 )
 
-# --- SOFTWARE ICONS: DOWNLOAD/CACHE THE PUBLISHED ICON PACK ---
-# Only affects the Software catalog's icon files; no installer or other UI logic is changed.
-$script:IconArchiveUrl = 'https://raw.githubusercontent.com/3mr10aa/Amr_tools/91d4c6047478238e8fd9ddd421ea5bd4c54769e0/icons.zip'
+# --- SOFTWARE ICONS: LOCAL-FIRST CACHE WITH GITHUB VERSION CHECK ---
+# Icons are downloaded/extracted only on first use or when the published archive changes.
+$script:IconArchiveUrl = 'https://raw.githubusercontent.com/3mr10aa/Amr_tools/main/icons.zip'
+$script:IconArchiveApiUrl = 'https://api.github.com/repos/3mr10aa/Amr_tools/commits?path=icons.zip&per_page=1'
 $script:IconArchivePath = Join-Path $script:DownloadDir 'amr-software-icons.zip'
+$script:IconArchiveMarkerPath = Join-Path $script:DownloadDir 'amr-software-icons.cache'
 
 function Initialize-AMRSoftwareIcons {
     param([Parameter(Mandatory = $true)][object[]]$Apps)
 
-    # Avoid network and extraction work when all catalog icons are already cached.
-    $missingIcons = @($Apps | Where-Object {
-        $candidateIds = @([string]$_.Id)
-        if ($_.PSObject.Properties['IconAliases'] -and $_.IconAliases) {
-            $candidateIds += @($_.IconAliases | ForEach-Object { [string]$_ })
+    $downloadTemp = "$($script:IconArchivePath).download"
+    $stagingDir = Join-Path $script:DownloadDir 'AMR_Icons_Staging'
+    $cacheValid = $true
+    $missingIcons = 0
+    $catalogIds = New-Object System.Collections.Generic.List[string]
+
+    # Build a stable catalog fingerprint and verify that every app already has a usable local icon.
+    foreach ($app in $Apps) {
+        $candidateIds = @([string]$app.Id)
+        if ($app.PSObject.Properties['IconAliases'] -and $app.IconAliases) {
+            $candidateIds += @($app.IconAliases | ForEach-Object { [string]$_ })
         }
+        foreach ($candidateId in $candidateIds) {
+            if (-not [string]::IsNullOrWhiteSpace($candidateId)) { $catalogIds.Add($candidateId) }
+        }
+
         $hasCachedIcon = $false
         foreach ($candidateId in $candidateIds) {
             foreach ($extension in @('.png', '.jpg', '.jpeg')) {
-                if (Test-Path -LiteralPath (Join-Path $script:IconDir ($candidateId + $extension)) -PathType Leaf) {
+                $candidatePath = Join-Path $script:IconDir ($candidateId + $extension)
+                if ((Test-Path -LiteralPath $candidatePath -PathType Leaf) -and (Get-Item -LiteralPath $candidatePath).Length -gt 128) {
                     $hasCachedIcon = $true
                     break
                 }
             }
             if ($hasCachedIcon) { break }
         }
-        -not $hasCachedIcon
-    }).Count
-    if ($missingIcons -eq 0) {
-        Write-AMRLog "All $($Apps.Count) software icons are already cached; skipping icon download." INFO Software
+        if (-not $hasCachedIcon) { $missingIcons++ ; $cacheValid = $false }
+    }
+
+    $fingerprintText = (($catalogIds | Sort-Object -Unique) -join "`n")
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $catalogFingerprint = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($fingerprintText)))).Replace('-', '').ToLowerInvariant()
+    }
+    finally { $sha.Dispose() }
+
+    $cachedCommit = ''
+    $cachedFingerprint = ''
+    if (Test-Path -LiteralPath $script:IconArchiveMarkerPath -PathType Leaf) {
+        try {
+            $markerLines = @(Get-Content -LiteralPath $script:IconArchiveMarkerPath -ErrorAction Stop)
+            if ($markerLines.Count -ge 2) {
+                $cachedCommit = [string]$markerLines[0]
+                $cachedFingerprint = [string]$markerLines[1]
+            }
+        }
+        catch { Write-AMRLog "Could not read the local icon-cache marker: $($_.Exception.Message)" WARNING Software }
+    }
+
+    # A tiny GitHub API request checks whether icons.zip has a newer published commit.
+    # If GitHub is unavailable, a complete local cache remains usable and startup continues offline.
+    $remoteCommit = ''
+    try {
+        try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+        $commitInfo = Invoke-RestMethod -Uri $script:IconArchiveApiUrl -Headers @{ 'User-Agent' = 'AMR-Windows-Utility' } -TimeoutSec 3 -ErrorAction Stop
+        if ($commitInfo -and $commitInfo.Count -gt 0 -and $commitInfo[0].sha) {
+            $remoteCommit = [string]$commitInfo[0].sha
+        }
+    }
+    catch {
+        Write-AMRLog 'GitHub icon-version check unavailable; using the local icon cache when complete.' INFO Software
+    }
+
+    $sourceMatches = ($remoteCommit -and $cachedCommit -and ($remoteCommit -eq $cachedCommit))
+    $catalogMatches = ($cachedFingerprint -eq $catalogFingerprint)
+    if ($cacheValid -and $catalogMatches -and (($sourceMatches) -or (-not $remoteCommit))) {
+        Write-AMRLog "All $($Apps.Count) software icons are cached locally and validated; no archive download or extraction is needed." SUCCESS Software
         return
     }
 
-    $downloadTemp = "$($script:IconArchivePath).download"
-    $stagingDir = Join-Path $script:DownloadDir 'AMR_Icons_Staging'
+    $needsArchiveRefresh = (-not (Test-Path -LiteralPath $script:IconArchivePath -PathType Leaf)) -or
+        ($remoteCommit -and ($remoteCommit -ne $cachedCommit))
+
     try {
-        if (-not (Test-Path -LiteralPath $script:IconArchivePath -PathType Leaf)) {
-            Write-AMRLog "Downloading the software icon pack ($missingIcons catalog icons missing)..." INFO Software
-            # Windows PowerShell 5.1 may otherwise negotiate an older TLS protocol.
-            try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+        if ($needsArchiveRefresh) {
+            Write-AMRLog "Downloading the software icon pack ($missingIcons catalog icons missing or source updated)..." INFO Software
             Remove-Item -LiteralPath $downloadTemp -Force -ErrorAction SilentlyContinue
-            Invoke-WebRequest -Uri $script:IconArchiveUrl -OutFile $downloadTemp -UseBasicParsing -TimeoutSec 45 -ErrorAction Stop
+            $archiveUrl = $script:IconArchiveUrl
+            if ($remoteCommit) { $archiveUrl = '{0}?v={1}' -f $script:IconArchiveUrl,$remoteCommit }
+            Invoke-WebRequest -Uri $archiveUrl -OutFile $downloadTemp -UseBasicParsing -TimeoutSec 90 -ErrorAction Stop
             if (-not (Test-Path -LiteralPath $downloadTemp -PathType Leaf) -or (Get-Item -LiteralPath $downloadTemp).Length -lt 1024) {
                 throw 'The downloaded icon archive is empty or too small.'
             }
-            # Validate the ZIP before replacing the cached copy.
+
             Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
             $zipCheck = [System.IO.Compression.ZipFile]::OpenRead($downloadTemp)
-            try { if ($zipCheck.Entries.Count -lt 1) { throw 'The icon ZIP contains no files.' } }
+            try {
+                $zipImages = @($zipCheck.Entries | Where-Object { $_.FullName -match '(?i)\.(png|jpe?g)$' })
+                $zipUniqueNames = @($zipImages | ForEach-Object { [System.IO.Path]::GetFileNameWithoutExtension($_.Name).ToLowerInvariant() } | Sort-Object -Unique)
+                if ($zipImages.Count -lt 1000 -or $zipUniqueNames.Count -lt 1000) {
+                    throw ("The icon ZIP failed validation: found {0} images and {1} unique names; expected at least 1000 of each." -f $zipImages.Count,$zipUniqueNames.Count)
+                }
+            }
             finally { $zipCheck.Dispose() }
             Move-Item -LiteralPath $downloadTemp -Destination $script:IconArchivePath -Force
+        }
+        elseif (-not (Test-Path -LiteralPath $script:IconArchivePath -PathType Leaf)) {
+            throw 'No local icon archive is available and GitHub could not be reached.'
         }
 
         if (Test-Path -LiteralPath $stagingDir) {
@@ -1981,11 +2092,10 @@ function Initialize-AMRSoftwareIcons {
         Expand-Archive -LiteralPath $script:IconArchivePath -DestinationPath $stagingDir -Force -ErrorAction Stop
 
         $imageFiles = @(Get-ChildItem -LiteralPath $stagingDir -Recurse -File -ErrorAction Stop | Where-Object {
-            $_.Extension -match '^\.(png|jpe?g)$'
+            $_.Extension -match '(?i)^\.(png|jpe?g)$'
         })
-        if ($imageFiles.Count -eq 0) { throw 'No PNG/JPG icons were found in the downloaded archive.' }
+        if ($imageFiles.Count -lt 1000) { throw ("The cached icon archive contains only {0} image files; expected at least 1000." -f $imageFiles.Count) }
 
-        # Index by exact filename first; the archive was prepared with application IDs as filenames.
         $byBaseName = @{}
         foreach ($file in $imageFiles) {
             $key = [System.IO.Path]::GetFileNameWithoutExtension($file.Name).ToLowerInvariant()
@@ -2001,16 +2111,11 @@ function Initialize-AMRSoftwareIcons {
                 $candidateIds += @($app.IconAliases | ForEach-Object { [string]$_ })
             }
 
-            # Resolve the current package ID first, then legacy icon filenames.
             foreach ($candidateId in $candidateIds) {
                 $exactKey = $candidateId.ToLowerInvariant()
-                if ($byBaseName.ContainsKey($exactKey)) {
-                    $sourceIcon = $byBaseName[$exactKey]
-                    break
-                }
+                if ($byBaseName.ContainsKey($exactKey)) { $sourceIcon = $byBaseName[$exactKey]; break }
             }
             if ($null -eq $sourceIcon) {
-                # Be tolerant of filenames where punctuation in either current or legacy IDs was normalized.
                 foreach ($candidateId in $candidateIds) {
                     $normalizedId = ($candidateId -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
                     foreach ($file in $imageFiles) {
@@ -2028,35 +2133,48 @@ function Initialize-AMRSoftwareIcons {
                 $copied++
             }
             elseif ($app.PSObject.Properties['IconUrl'] -and -not [string]::IsNullOrWhiteSpace([string]$app.IconUrl)) {
-                # Per-app fallback for catalog entries whose published icon filename differs
-                # from every package-ID alias in the shared icon archive.
                 $fallbackPath = Join-Path $stagingDir (([Guid]::NewGuid().ToString('N')) + '.png')
                 try {
                     Invoke-WebRequest -Uri ([string]$app.IconUrl) -OutFile $fallbackPath -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
                     if ((Test-Path -LiteralPath $fallbackPath -PathType Leaf) -and (Get-Item -LiteralPath $fallbackPath).Length -gt 128) {
-                        $targetPath = Join-Path $script:IconDir ($appId + '.png')
-                        Copy-Item -LiteralPath $fallbackPath -Destination $targetPath -Force -ErrorAction Stop
+                        Copy-Item -LiteralPath $fallbackPath -Destination (Join-Path $script:IconDir ($appId + '.png')) -Force -ErrorAction Stop
                         $copied++
-                        Write-AMRLog "Downloaded dedicated icon fallback for $($app.Name)." SUCCESS Software
                     }
                 }
-                catch {
-                    Write-AMRLog "Dedicated icon fallback failed for $($app.Name): $($_.Exception.Message)" WARNING Software
-                }
-                finally {
-                    if (Test-Path -LiteralPath $fallbackPath) { Remove-Item -LiteralPath $fallbackPath -Force -ErrorAction SilentlyContinue }
-                }
+                catch { Write-AMRLog "Dedicated icon fallback failed for $($app.Name): $($_.Exception.Message)" WARNING Software }
+                finally { if (Test-Path -LiteralPath $fallbackPath) { Remove-Item -LiteralPath $fallbackPath -Force -ErrorAction SilentlyContinue } }
             }
         }
-        Write-AMRLog "Icon pack processed: matched and cached $copied of $($Apps.Count) catalog applications." $(if ($copied -gt 0) { 'SUCCESS' } else { 'WARNING' }) Software
+
+        # Save the marker only after the catalog is fully populated, so failed updates retry next launch.
+        $remainingMissing = 0
+        foreach ($app in $Apps) {
+            $found = $false
+            $idsToCheck = @([string]$app.Id)
+            if ($app.PSObject.Properties['IconAliases'] -and $app.IconAliases) { $idsToCheck += @($app.IconAliases | ForEach-Object { [string]$_ }) }
+            foreach ($idToCheck in $idsToCheck) {
+                foreach ($ext in @('.png','.jpg','.jpeg')) {
+                    $localPath = Join-Path $script:IconDir ($idToCheck + $ext)
+                    if ((Test-Path -LiteralPath $localPath -PathType Leaf) -and (Get-Item -LiteralPath $localPath).Length -gt 128) { $found = $true; break }
+                }
+                if ($found) { break }
+            }
+            if (-not $found) { $remainingMissing++ }
+        }
+
+        if ($remainingMissing -eq 0) {
+            $commitToSave = if ($remoteCommit) { $remoteCommit } elseif ($cachedCommit) { $cachedCommit } else { 'offline-local-archive' }
+            @($commitToSave,$catalogFingerprint,$imageFiles.Count,(Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK')) |
+                Set-Content -LiteralPath $script:IconArchiveMarkerPath -Encoding UTF8 -Force -ErrorAction Stop
+            Write-AMRLog "Software icon cache is ready: $copied icons copied/updated; all $($Apps.Count) catalog entries now have local icons." SUCCESS Software
+        }
+        else {
+            Write-AMRLog "Software icon cache remains incomplete: $remainingMissing catalog icons are missing; another refresh will be attempted next launch." WARNING Software
+        }
     }
     catch {
-        Write-AMRLog "Could not initialize the online software icon pack: $($_.Exception.Message). Existing local icons will still be used." WARNING Software
-        # Do not keep a broken/incomplete download that would block future attempts.
+        Write-AMRLog "Could not refresh the software icon cache: $($_.Exception.Message). Existing local icons will still be used." WARNING Software
         if (Test-Path -LiteralPath $downloadTemp) { Remove-Item -LiteralPath $downloadTemp -Force -ErrorAction SilentlyContinue }
-        if ((Test-Path -LiteralPath $script:IconArchivePath) -and (Get-Item -LiteralPath $script:IconArchivePath).Length -lt 1024) {
-            Remove-Item -LiteralPath $script:IconArchivePath -Force -ErrorAction SilentlyContinue
-        }
     }
     finally {
         if (Test-Path -LiteralPath $stagingDir) {
@@ -2064,11 +2182,11 @@ function Initialize-AMRSoftwareIcons {
         }
     }
 }
-
-Initialize-AMRSoftwareIcons -Apps @($RawApps)
+# IMPORTANT: Icon archive checks/downloads are intentionally deferred until AFTER
+# the main WPF window has rendered. Startup must never wait for GitHub or ZIP work.
 
 # --- TARGETED ICON HOTFIX: REFRESH ONLY THE THREE REPLACED FILES FROM GITHUB ---
-# The general 500-icon archive remains unchanged. These three files are published
+# The general 1,000-icon archive remains unchanged. These three files are published
 # individually in the repository's Icons folder and must override any stale local
 # cache copies (and any older copies contained in the general archive).
 $script:IconFixBaseUrl = 'https://raw.githubusercontent.com/3mr10aa/Amr_tools/main/Icons'
@@ -2173,9 +2291,8 @@ function Update-AMRFixedSoftwareIcons {
     }
 }
 
-# Run AFTER the general archive initializer so these three current files always win
-# over older copies in the archive or in ProgramData\AMR-Utility\Icons.
-Update-AMRFixedSoftwareIcons
+# The three targeted icon fixes are also refreshed by the isolated background worker
+# after the main window is visible. No network request is allowed in this startup path.
 
 # Convert icon files to frozen WPF ImageSource objects.
 # WPF Image.Source expects an ImageSource, not a plain filesystem path string.
@@ -2233,22 +2350,8 @@ $RawApps | ForEach-Object {
         if ($null -ne $iconSource) { break }
     }
 
-    # Last-resort runtime fallback: also cover a stale/corrupt archive image that
-    # matched by filename but could not be decoded by WPF.
-    if ($null -eq $iconSource -and $_.PSObject.Properties['IconUrl'] -and -not [string]::IsNullOrWhiteSpace([string]$_.IconUrl)) {
-        $fallbackAppName = [string]$_.Name
-        $fallbackIconPath = Join-Path $script:IconDir ([string]$_.Id + '.png')
-        try {
-            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            Invoke-WebRequest -Uri ([string]$_.IconUrl) -OutFile $fallbackIconPath -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
-            if ((Test-Path -LiteralPath $fallbackIconPath -PathType Leaf) -and (Get-Item -LiteralPath $fallbackIconPath).Length -gt 128) {
-                $iconSource = Get-AMRIconImageSource -Path $fallbackIconPath
-            }
-        }
-        catch {
-            Write-AMRLog "Runtime icon fallback failed for ${fallbackAppName}: $($_.Exception.Message)" WARNING Software
-        }
-    }
+    # Startup is local-only: if an icon is not cached yet, show the existing
+    # initials placeholder. The background refresh will populate it after render.
 
     $script:SoftwareCatalog.Add([pscustomobject]@{
         IsSelected    = $false
@@ -2303,19 +2406,22 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
    </Setter>
   </Style>
   
+  <!-- Main navigation tabs: clean software-style rounded rectangles with consistent spacing. -->
   <Style TargetType="TabControl">
    <Setter Property="Background" Value="#18181B"/>
    <Setter Property="BorderThickness" Value="0"/>
+   <Setter Property="ClipToBounds" Value="False"/>
+   <Setter Property="SnapsToDevicePixels" Value="True"/>
    <Setter Property="Template">
     <Setter.Value>
      <ControlTemplate TargetType="TabControl">
-      <Grid>
+      <Grid ClipToBounds="False" SnapsToDevicePixels="True">
        <Grid.RowDefinitions>
         <RowDefinition Height="Auto"/>
         <RowDefinition Height="*"/>
        </Grid.RowDefinitions>
-       <UniformGrid Grid.Row="0" Rows="1" Columns="12" IsItemsHost="True" Margin="0,0,0,10"/>
-       <Border Grid.Row="1" Background="{TemplateBinding Background}">
+       <UniformGrid Grid.Row="0" Rows="1" Columns="12" IsItemsHost="True" Margin="0,0,0,12" ClipToBounds="False"/>
+       <Border Grid.Row="1" Background="{TemplateBinding Background}" ClipToBounds="False">
         <ContentPresenter ContentSource="SelectedContent"/>
        </Border>
       </Grid>
@@ -2325,33 +2431,101 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
   </Style>
 
   <Style TargetType="TabItem">
-   <Setter Property="Padding" Value="0,10"/>
-   <Setter Property="Margin" Value="2,0"/>
-   <Setter Property="Foreground" Value="#A1A1AA"/>
-   <Setter Property="Background" Value="#27272A"/>
+   <Setter Property="Padding" Value="8,10"/>
+   <Setter Property="Margin" Value="3,2"/>
+   <Setter Property="MinHeight" Value="42"/>
+   <Setter Property="Foreground" Value="#B8B8C2"/>
+   <Setter Property="Background" Value="#242832"/>
    <Setter Property="BorderThickness" Value="1"/>
-   <Setter Property="BorderBrush" Value="#3F3F46"/>
+   <Setter Property="BorderBrush" Value="#3A414E"/>
    <Setter Property="FontSize" Value="13"/>
+   <Setter Property="FontWeight" Value="SemiBold"/>
    <Setter Property="HorizontalContentAlignment" Value="Center"/>
+   <Setter Property="VerticalContentAlignment" Value="Center"/>
+   <Setter Property="SnapsToDevicePixels" Value="True"/>
    <Setter Property="Template">
     <Setter.Value>
      <ControlTemplate TargetType="TabItem">
-      <Border Name="Border" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="8" Padding="{TemplateBinding Padding}" Margin="{TemplateBinding Margin}">
-       <ContentPresenter x:Name="ContentSite" VerticalAlignment="Center" HorizontalAlignment="Center" ContentSource="Header"/>
+      <Border x:Name="TabSurface" Background="{TemplateBinding Background}"
+              BorderBrush="{TemplateBinding BorderBrush}"
+              BorderThickness="{TemplateBinding BorderThickness}"
+              CornerRadius="9" Padding="{TemplateBinding Padding}"
+              SnapsToDevicePixels="True" UseLayoutRounding="True">
+       <ContentPresenter x:Name="ContentSite" VerticalAlignment="Center"
+                         HorizontalAlignment="Center" ContentSource="Header"
+                         RecognizesAccessKey="True"/>
       </Border>
       <ControlTemplate.Triggers>
-       <!-- Subtle hover feedback using the existing main-tab blue palette. -->
        <Trigger Property="IsMouseOver" Value="True">
-        <Setter TargetName="Border" Property="Background" Value="#334B75"/>
-        <Setter TargetName="Border" Property="BorderBrush" Value="#4B78C2"/>
+        <Setter TargetName="TabSurface" Property="Background" Value="#303B4D"/>
+        <Setter TargetName="TabSurface" Property="BorderBrush" Value="#5878A5"/>
         <Setter Property="Foreground" Value="#EAF2FF"/>
        </Trigger>
-       <!-- Keep the selected tab's original appearance above the hover state. -->
        <Trigger Property="IsSelected" Value="True">
-        <Setter TargetName="Border" Property="Background" Value="#2563EB"/>
-        <Setter TargetName="Border" Property="BorderBrush" Value="#3B82F6"/>
+        <Setter TargetName="TabSurface" Property="Background" Value="#24558A"/>
+        <Setter TargetName="TabSurface" Property="BorderBrush" Value="#5B9BE0"/>
         <Setter Property="Foreground" Value="#FFFFFF"/>
-        <Setter Property="FontWeight" Value="Bold"/>
+        <Setter Property="FontWeight" Value="SemiBold"/>
+       </Trigger>
+       <Trigger Property="IsEnabled" Value="False">
+        <Setter TargetName="TabSurface" Property="Opacity" Value="0.55"/>
+       </Trigger>
+      </ControlTemplate.Triggers>
+     </ControlTemplate>
+    </Setter.Value>
+   </Setter>
+  </Style>
+
+  <Style x:Key="OverviewSubTabControlStyle" TargetType="TabControl">
+   <Setter Property="Background" Value="#18181B"/>
+   <Setter Property="BorderThickness" Value="0"/>
+   <Setter Property="Template">
+    <Setter.Value>
+     <ControlTemplate TargetType="TabControl">
+      <Grid>
+       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="190"/></Grid.ColumnDefinitions>
+       <Border Grid.Column="0" Background="{TemplateBinding Background}" Padding="0,0,10,0">
+        <ContentPresenter ContentSource="SelectedContent"/>
+       </Border>
+       <Border Grid.Column="1" Background="#202B3B" BorderBrush="#30445F" BorderThickness="1" CornerRadius="10" Padding="8,8,8,14" Margin="8,8,4,12" ClipToBounds="False">
+        <TabPanel IsItemsHost="True" KeyboardNavigation.TabIndex="1" ClipToBounds="False"/>
+       </Border>
+      </Grid>
+     </ControlTemplate>
+    </Setter.Value>
+   </Setter>
+  </Style>
+  <!-- Match the Overview tiles to the Software Categories tiles: equal width, spacing and corner radius. -->
+  <Style x:Key="OverviewSubTabItemStyle" TargetType="TabItem" BasedOn="{StaticResource {x:Type TabItem}}">
+   <Setter Property="Width" Value="160"/>
+   <Setter Property="MinHeight" Value="42"/>
+   <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+   <Setter Property="VerticalContentAlignment" Value="Center"/>
+   <Setter Property="Padding" Value="10,8"/>
+   <Setter Property="Margin" Value="0,0,0,8"/>
+   <Setter Property="Foreground" Value="#C9D8EA"/>
+   <Setter Property="Background" Value="#26364B"/>
+   <Setter Property="BorderThickness" Value="0"/>
+   <Setter Property="Template">
+    <Setter.Value>
+     <ControlTemplate TargetType="TabItem">
+      <Border Name="OverviewSubTabTile" Background="{TemplateBinding Background}"
+              BorderBrush="#344B68" BorderThickness="1" CornerRadius="9"
+              Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+       <ContentPresenter HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                         ContentSource="Header" RecognizesAccessKey="True"/>
+      </Border>
+      <ControlTemplate.Triggers>
+       <Trigger Property="IsMouseOver" Value="True">
+        <Setter TargetName="OverviewSubTabTile" Property="Background" Value="#304A6B"/>
+        <Setter TargetName="OverviewSubTabTile" Property="BorderBrush" Value="#527AA8"/>
+        <Setter Property="Foreground" Value="#EAF2FF"/>
+       </Trigger>
+       <Trigger Property="IsSelected" Value="True">
+        <Setter TargetName="OverviewSubTabTile" Property="Background" Value="#24558A"/>
+        <Setter TargetName="OverviewSubTabTile" Property="BorderBrush" Value="#5B9BE0"/>
+        <Setter Property="Foreground" Value="#FFFFFF"/>
+        <Setter Property="FontWeight" Value="SemiBold"/>
        </Trigger>
       </ControlTemplate.Triggers>
      </ControlTemplate>
@@ -2399,6 +2573,8 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
    
    <!-- 1. OVERVIEW -->
    <TabItem Header="Overview">
+    <TabControl Name="OverviewSubTabs" Style="{StaticResource OverviewSubTabControlStyle}" TabStripPlacement="Right" ItemContainerStyle="{StaticResource OverviewSubTabItemStyle}" Background="#18181B" BorderThickness="0" Margin="0,0,0,0">
+     <TabItem Header="System Overview">
     <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="10,0,10,20">
      <StackPanel>
       <Grid Margin="0,10,0,15">
@@ -2526,8 +2702,182 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
         </StackPanel>
        </Border>
       </WrapPanel>
+      <TextBlock Text="DRIVER RECOVERY &amp; RESTORE" FontSize="15" FontWeight="Bold" Foreground="#60A5FA" Margin="10,12,10,2"/>
+      <Border Background="#182638" BorderBrush="#35506D" BorderThickness="1" CornerRadius="14" Padding="18" Margin="8" MaxWidth="820" HorizontalAlignment="Left">
+       <StackPanel>
+        <TextBlock Text="AMR Driver Safety Point" FontSize="15" FontWeight="Bold" Foreground="#7DD3FC" Margin="0,0,0,6"/>
+        <TextBlock Text="Create a Windows restore point before driver changes. AMR also attempts to export the current OEM driver package before replacing it; Professional users can review retained packages and use Windows rollback tools when supported. Smart Restore validates the exact AMR point." Foreground="#CBD5E1" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,10"/>
+        <WrapPanel>
+         <Button Name="DriverCreateRestorePointBtn" Content="Create Restore Point" Background="#244A70" Foreground="#EAF2FF" BorderBrush="#4B83B8" Padding="14,8" FontSize="11" Margin="0,0,8,8"/>
+         <Button Name="DriverSmartRestoreBtn" Content="Smart Restore" IsEnabled="False" Background="#65412B" Foreground="#FFF1E6" BorderBrush="#A66B45" Padding="14,8" FontSize="11" Margin="0,0,8,8"/>
+        </WrapPanel>
+        <TextBlock Name="DriverRestorePointStatus" Text="Restore point status: checking Windows System Protection…" Foreground="#94A3B8" FontSize="11" TextWrapping="Wrap"/>
+       </StackPanel>
+      </Border>
      </StackPanel>
     </ScrollViewer>
+     </TabItem>
+     <TabItem Header="Driver Center">
+      <ScrollViewer Name="DriverCenterScrollViewer" VerticalScrollBarVisibility="Auto" Padding="10,8,10,16">
+       <StackPanel Name="DriverCenterMainPanel">
+        <Grid Name="DriverCenterHeader" Margin="0,4,0,16">
+         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+         <StackPanel Grid.Column="0">
+          <TextBlock Text="DRIVER CENTER" FontSize="24" FontWeight="Bold" Foreground="#F8FAFC"/>
+          <TextBlock Text="Detect your PC, motherboard, Windows version and connected hardware. Find the correct official driver source." Foreground="#94A3B8" FontSize="12" TextWrapping="Wrap" Margin="0,5,12,0"/>
+         </StackPanel>
+         <Button Name="ScanDriversBtn" Grid.Column="1" Content="⌕  Scan Device" Background="#2563EB" Foreground="#FFFFFF" BorderBrush="#60A5FA" BorderThickness="1" Padding="17,10" FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center"/>
+        </Grid>
+        <Border Background="#151E2B" BorderBrush="#334155" BorderThickness="1" CornerRadius="10" Padding="11" Margin="0,0,0,12">
+         <Grid>
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+          <StackPanel Grid.Column="0" Margin="0,0,10,0" VerticalAlignment="Center">
+           <TextBlock Text="DRIVER EXPERIENCE" Foreground="#7DD3FC" FontSize="10" FontWeight="Bold"/>
+           <TextBlock Name="DriverModeDescription" Text="Smart View: review AMR recommendations first with Smart Select, then prepare and install only the choices you approve." Foreground="#CBD5E1" FontSize="11" TextWrapping="Wrap" Margin="0,4,0,0"/>
+          </StackPanel>
+          <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+           <Button Name="DriverSmartModeBtn" Content="✦ Smart View" Background="#176B50" Foreground="#FFFFFF" BorderBrush="#34D399" Padding="13,8" FontSize="11" FontWeight="Bold" Margin="0,0,6,0"/>
+           <Button Name="DriverAdvancedModeBtn" Content="Professional" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" Padding="13,8" FontSize="11"/>
+          </StackPanel>
+         </Grid>
+        </Border>
+        <Button Name="DriverIdentityToggleBtn" Content="Show system identity &amp; platform details" Visibility="Collapsed" HorizontalAlignment="Left" Background="#243449" Foreground="#CBD5E1" BorderBrush="#52677F" Padding="10,6" FontSize="10" Margin="0,0,0,8"/>
+        <Border Name="DriverComputerSummaryCard" Background="#1B2432" BorderBrush="#334155" BorderThickness="1" CornerRadius="12" Padding="15" Margin="0,0,0,12">
+         <Grid>
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+          <StackPanel Grid.Row="0" Grid.Column="0" Margin="4">
+           <TextBlock Text="COMPUTER / OEM" Foreground="#8FB8E8" FontSize="11" FontWeight="Bold"/>
+           <TextBlock Name="DriverComputerModel" Text="Not scanned yet" Foreground="#F1F5F9" FontSize="14" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,5,8,0"/>
+           <TextBlock Name="DriverComputerManufacturer" Text="Manufacturer: --" Foreground="#CBD5E1" FontSize="12" Margin="0,4,0,0" TextWrapping="Wrap"/>
+          </StackPanel>
+          <StackPanel Grid.Row="0" Grid.Column="1" Margin="4">
+           <TextBlock Text="MOTHERBOARD" Foreground="#8FB8E8" FontSize="11" FontWeight="Bold"/>
+           <TextBlock Name="DriverBoardModel" Text="Not scanned yet" Foreground="#F1F5F9" FontSize="14" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,5,8,0"/>
+           <TextBlock Name="DriverBoardManufacturer" Text="Manufacturer: --" Foreground="#CBD5E1" FontSize="12" Margin="0,4,0,0" TextWrapping="Wrap"/>
+          </StackPanel>
+          <StackPanel Grid.Row="1" Grid.ColumnSpan="2" Margin="4,12,4,0">
+           <TextBlock Text="SYSTEM IDENTITY &amp; PLATFORM TYPE" Foreground="#8FB8E8" FontSize="10" FontWeight="Bold"/>
+           <TextBlock Name="DriverSystemIdentitySummary" Text="Not scanned yet" Foreground="#CBD5E1" FontSize="11" Margin="0,4,0,0" TextWrapping="Wrap"/>
+          </StackPanel>
+         </Grid>
+        </Border>
+        <Grid Name="DriverSummaryMetrics" Margin="0,0,0,12">
+         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+         <Border Grid.Column="0" Background="#182638" BorderBrush="#35506D" BorderThickness="1" CornerRadius="10" Padding="13" Margin="0,0,6,0">
+          <StackPanel><TextBlock Text="WINDOWS" Foreground="#7DD3FC" FontSize="11" FontWeight="Bold"/><TextBlock Name="DriverWindowsInfo" Text="Not scanned" Foreground="#F1F5F9" FontSize="12" Margin="0,6,0,0" TextWrapping="Wrap"/></StackPanel>
+         </Border>
+         <Border Grid.Column="1" Background="#182638" BorderBrush="#35506D" BorderThickness="1" CornerRadius="10" Padding="13" Margin="3,0">
+          <StackPanel><TextBlock Text="DETECTED DEVICES" Foreground="#7DD3FC" FontSize="11" FontWeight="Bold"/><TextBlock Name="DriverDeviceCount" Text="--" Foreground="#F1F5F9" FontSize="20" FontWeight="Bold" Margin="0,4,0,0"/></StackPanel>
+         </Border>
+         <Border Grid.Column="2" Background="#182638" BorderBrush="#35506D" BorderThickness="1" CornerRadius="10" Padding="13" Margin="6,0,0,0">
+          <StackPanel><TextBlock Text="DEVICE ISSUES" Foreground="#FCA5A5" FontSize="11" FontWeight="Bold"/><TextBlock Name="DriverProblemCount" Text="--" Foreground="#F1F5F9" FontSize="20" FontWeight="Bold" Margin="0,4,0,0"/></StackPanel>
+         </Border>
+        </Grid>
+        <Grid Margin="0,0,0,10">
+         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+         <StackPanel Grid.Column="0"><TextBlock Text="HARDWARE &amp; DRIVER STATUS" Foreground="#60A5FA" FontSize="14" FontWeight="Bold"/><TextBlock Name="DriverScanStatus" Text="Select Scan Device to inspect this computer. No driver will be downloaded or installed automatically." Foreground="#94A3B8" FontSize="11" TextWrapping="Wrap" Margin="0,4,8,0"/></StackPanel>
+         <Button Name="OpenOfficialSupportBtn" Grid.Column="1" Content="Official Support ↗" IsEnabled="False" Background="#263B3A" Foreground="#A7D8CE" BorderBrush="#456B65" Padding="12,8" FontSize="11" VerticalAlignment="Center"/>
+        </Grid>
+        <WrapPanel Margin="0,0,0,10" HorizontalAlignment="Left">
+         <Button Name="DriverDownloadSelectedBtn" Content="Download &amp; Save Package" IsEnabled="False" Background="#244A70" Foreground="#EAF2FF" BorderBrush="#4B83B8" Padding="13,8" FontSize="11" Margin="0,0,8,0"/>
+         <Button Name="DriverInstallSelectedBtn" Content="Install Ready Update" IsEnabled="False" Background="#245B46" Foreground="#E8FFF3" BorderBrush="#3B8B69" Padding="13,8" FontSize="11" Margin="0,0,8,0"/>
+         <Button Name="DriverSmartSelectBtn" Content="✦ Smart Select" IsEnabled="False" Background="#315B82" Foreground="#FFFFFF" BorderBrush="#60A5FA" Padding="15,8" FontSize="11" FontWeight="Bold" Margin="0,0,8,0"/>
+         <Button Name="DriverStartSmartInstallBtn" Content="Start Smart Install" IsEnabled="False" Background="#176B50" Foreground="#FFFFFF" BorderBrush="#34D399" Padding="15,8" FontSize="11" FontWeight="Bold" Margin="0,0,8,0"/>
+         <Button Name="DriverSelectReadyBtn" Content="Select All Ready" IsEnabled="False" Background="#34445A" Foreground="#E2E8F0" BorderBrush="#526176" Padding="13,8" FontSize="11" Margin="0,0,8,0"/>
+         <Button Name="DriverClearSelectionBtn" Content="Clear Selection" IsEnabled="False" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" Padding="13,8" FontSize="11" Margin="0,0,8,0"/>
+         <Button Name="DriverInstallBatchBtn" Content="Install Selected Ready (0)" IsEnabled="False" Background="#28634D" Foreground="#E8FFF3" BorderBrush="#55A987" Padding="13,8" FontSize="11" Margin="0,0,8,0"/>
+         <Button Name="DriverInstallPlanBtn" Content="Preview Install Plan" IsEnabled="False" Background="#3A4660" Foreground="#E2E8F0" BorderBrush="#64748B" Padding="13,8" FontSize="11" Margin="0,0,8,0"/>
+         <Button Name="DriverCandidateManagerBtn" Content="Compare Driver Candidates" IsEnabled="False" Background="#344B69" Foreground="#E2E8F0" BorderBrush="#6689B5" Padding="13,8" FontSize="11"/>
+         <Button Name="DriverSourceManagerBtn" Content="Driver Source Manager" IsEnabled="False" Background="#344B69" Foreground="#E2E8F0" BorderBrush="#6689B5" Padding="13,8" FontSize="11" Margin="8,0,0,0"/>
+         <Button Name="DriverCatalogSearchBtn" Content="Search Microsoft Catalog ↗" IsEnabled="False" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" Padding="13,8" FontSize="11" Margin="8,0,0,0"/>
+         <Button Name="DriverRollbackCheckBtn" Content="Check Driver Rollback" IsEnabled="False" Background="#65412B" Foreground="#FFF1E6" BorderBrush="#A66B45" Padding="13,8" FontSize="11" Margin="8,0,0,0"/>
+         <Button Name="DriverOpenRecoveryBtn" Content="Open Driver Recovery Backups" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" Padding="13,8" FontSize="11" Margin="8,0,0,0"/>
+        </WrapPanel>
+        <TextBlock Name="DriverRollbackStatus" Text="Select a device to check for retained driver alternatives. Windows determines whether Roll Back Driver is available." Foreground="#D6B58C" FontSize="10" TextWrapping="Wrap" Margin="3,0,3,8"/>
+        <Grid Margin="3,0,3,8">
+         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+         <StackPanel Grid.Column="0" Margin="0,0,10,0">
+          <TextBlock Name="DriverActionStatus" Text="Select a device row to view available actions. Downloads and installs require your confirmation." Foreground="#94A3B8" FontSize="10" TextWrapping="Wrap" Margin="0,0,0,3"/>
+          <TextBlock Name="DriverSelectionSummary" Text="Selection: 0 selected • 0 ready to install • 0 unique updates available" Foreground="#7DD3FC" FontSize="10" TextWrapping="Wrap" Margin="0,0,0,5"/>
+          <ProgressBar Name="DriverOperationProgress" Height="5" IsIndeterminate="True" Visibility="Collapsed" Background="#263548" Foreground="#60A5FA" BorderThickness="0"/>
+          <Button Name="DriverCancelManagedOperationBtn" Content="Cancel background operation" Visibility="Collapsed" IsEnabled="False" HorizontalAlignment="Left" Background="#7F1D1D" Foreground="#FEE2E2" BorderBrush="#991B1B" Padding="8,3" FontSize="9" Margin="0,4,0,0"/>
+         </StackPanel>
+         <StackPanel Grid.Column="1" Orientation="Horizontal">
+          <Button Name="DriverExportReportBtn" Content="Export Scan Report" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" Padding="10,5" FontSize="10" VerticalAlignment="Center" Margin="0,0,6,0"/>
+          <Button Name="DriverExportHistoryBtn" Content="Export History" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" Padding="10,5" FontSize="10" VerticalAlignment="Center" Margin="0,0,6,0"/>
+          <Button Name="DriverOpenDownloadsBtn" Content="Open Driver Downloads" Background="#263B52" Foreground="#DBEAFE" BorderBrush="#456B8A" Padding="10,5" FontSize="10" VerticalAlignment="Center"/>
+         </StackPanel>
+        </Grid>
+        <Border Background="#151E2B" BorderBrush="#334155" BorderThickness="1" CornerRadius="10" Padding="6">
+         <ListView Name="DriverDeviceList" SelectionMode="Extended" Background="Transparent" Foreground="#E4E4E7" BorderThickness="0" MinHeight="260" MaxHeight="100000" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.CanContentScroll="True" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling">
+          <ListView.Resources>
+           <!-- Explicit dark row states prevent the default white hover/selection background from hiding text. -->
+           <Style TargetType="ListViewItem">
+            <Setter Property="Foreground" Value="#E4E4E7"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="5,7"/>
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Setter Property="Template">
+             <Setter.Value>
+              <ControlTemplate TargetType="ListViewItem">
+               <Border Name="DriverRowBorder" Background="{TemplateBinding Background}"
+                       BorderBrush="#35506D" BorderThickness="0,0,0,1"
+                       Padding="{TemplateBinding Padding}">
+                <GridViewRowPresenter Content="{TemplateBinding Content}"
+                 Columns="{Binding View.Columns, RelativeSource={RelativeSource AncestorType={x:Type ListView}}}"
+                 VerticalAlignment="Center"/>
+               </Border>
+               <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                 <Setter TargetName="DriverRowBorder" Property="Background" Value="#263B52"/>
+                 <Setter Property="Foreground" Value="#F1F5F9"/>
+                </Trigger>
+                <Trigger Property="IsSelected" Value="True">
+                 <Setter TargetName="DriverRowBorder" Property="Background" Value="#1E4975"/>
+                 <Setter TargetName="DriverRowBorder" Property="BorderBrush" Value="#4B83B8"/>
+                 <Setter Property="Foreground" Value="#FFFFFF"/>
+                </Trigger>
+                <MultiTrigger>
+                 <MultiTrigger.Conditions>
+                  <Condition Property="IsSelected" Value="True"/>
+                  <Condition Property="IsMouseOver" Value="True"/>
+                 </MultiTrigger.Conditions>
+                 <Setter TargetName="DriverRowBorder" Property="Background" Value="#285B8E"/>
+                 <Setter Property="Foreground" Value="#FFFFFF"/>
+                </MultiTrigger>
+               </ControlTemplate.Triggers>
+              </ControlTemplate>
+             </Setter.Value>
+            </Setter>
+           </Style>
+          </ListView.Resources>
+          <ListView.View>
+           <GridView>
+            <GridViewColumn Header="Device" Width="245" DisplayMemberBinding="{Binding DeviceName}"/>
+            <GridViewColumn Header="Class" Width="105" DisplayMemberBinding="{Binding DeviceClass}"/>
+            <GridViewColumn Header="Manufacturer" Width="145" DisplayMemberBinding="{Binding Manufacturer}"/>
+            <GridViewColumn Header="Status" Width="115" DisplayMemberBinding="{Binding StatusText}"/>
+            <GridViewColumn Header="Driver Provider" Width="150" DisplayMemberBinding="{Binding DriverProvider}"/>
+            <GridViewColumn Header="Installed Version" Width="135" DisplayMemberBinding="{Binding DriverVersion}"/>
+            <GridViewColumn Header="Driver Date" Width="95" DisplayMemberBinding="{Binding DriverDate}"/>
+            <GridViewColumn Header="Update Check" Width="190" DisplayMemberBinding="{Binding UpdateStatus}"/>
+            <GridViewColumn Header="Match Confidence" Width="190" DisplayMemberBinding="{Binding MatchConfidence}"/>
+            <GridViewColumn Header="Alternatives" Width="75" DisplayMemberBinding="{Binding MatchCandidateCount}"/>
+            <GridViewColumn Header="Available Update" Width="250" DisplayMemberBinding="{Binding AvailableUpdate}"/>
+            <GridViewColumn Header="Available Version" Width="130" DisplayMemberBinding="{Binding AvailableVersion}"/>
+            <GridViewColumn Header="Code" Width="55" DisplayMemberBinding="{Binding ErrorCode}"/>
+           </GridView>
+          </ListView.View>
+         </ListView>
+        </Border>
+        <TextBlock Text="Tip: select multiple device rows with Ctrl or Shift. Select All Ready marks every downloaded update; Install Selected Ready processes them one at a time after one confirmation. No automatic restart." Foreground="#8FB8E8" FontSize="10" TextWrapping="Wrap" Margin="4,8,4,0"/>
+        <TextBlock Text="Driver updates are matched through Microsoft's Windows Update Agent. AMR compares all returned candidates: exact Hardware ID and more-specific IDs rank first, Compatible IDs rank lower, then model/manufacturer hints, driver version and date break ties. The best candidate is selected automatically and its confidence/alternative count are shown. Windows Update remains the authority on applicability. Check Driver Rollback reports matching Driver Store packages only; Device Manager's Roll Back Driver control is the authority for actual rollback availability. Review results before downloading or installing." Foreground="#94A3B8" FontSize="10" TextWrapping="Wrap" Margin="4,6,4,0"/>
+       </StackPanel>
+      </ScrollViewer>
+     </TabItem>
+    </TabControl>
    </TabItem>
 
    <!-- 2. SOFTWARE WITH INTEGRATED PROGRESS BAR -->
@@ -2574,11 +2924,11 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
       
       <Grid Grid.Row="1" Margin="0,0,0,4">
        <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="190"/>
         <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="205"/>
        </Grid.ColumnDefinitions>
 
-       <Border Grid.Column="0" Margin="0,5,12,5" Background="#202B3B"
+       <Border Grid.Column="1" Margin="12,5,0,5" Background="#202B3B"
                BorderBrush="#30445F" BorderThickness="1" CornerRadius="10" Padding="10">
         <DockPanel LastChildFill="True">
          <TextBlock DockPanel.Dock="Top" Text="CATEGORIES" FontSize="11"
@@ -2595,7 +2945,7 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
            <Style TargetType="ListBoxItem">
             <Setter Property="Foreground" Value="#C9D8EA"/>
             <Setter Property="Background" Value="#26364B"/>
-            <Setter Property="Padding" Value="10,9"/>
+            <Setter Property="Padding" Value="8,7"/>
             <Setter Property="Margin" Value="0,0,0,7"/>
             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
             <Setter Property="FontSize" Value="12"/>
@@ -2605,7 +2955,7 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
                <Border Name="CategoryTileBorder" Background="{TemplateBinding Background}"
                        BorderBrush="#344B68" BorderThickness="1" CornerRadius="7"
                        Padding="{TemplateBinding Padding}">
-                <ContentPresenter HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                <ContentPresenter HorizontalAlignment="Stretch" VerticalAlignment="Center"/>
                </Border>
                <ControlTemplate.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
@@ -2628,15 +2978,64 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
         </DockPanel>
        </Border>
 
-       <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-       <ItemsControl Name="SoftwareGrid" Margin="0,5,0,0">
+       <ScrollViewer Grid.Column="0" FlowDirection="RightToLeft" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <ScrollViewer.Resources>
+         <!-- Category-blue scrollbar for the Software catalog -->
+         <Style TargetType="ScrollBar">
+          <Setter Property="Width" Value="14"/>
+          <Setter Property="Background" Value="Transparent"/>
+          <Setter Property="Foreground" Value="#8FB8E8"/>
+          <Setter Property="Template">
+           <Setter.Value>
+            <ControlTemplate TargetType="ScrollBar">
+             <Grid Background="Transparent" SnapsToDevicePixels="True">
+              <Track Name="PART_Track" IsDirectionReversed="True">
+               <Track.DecreaseRepeatButton>
+                <RepeatButton Command="ScrollBar.LineUpCommand" Opacity="0" Focusable="False" IsHitTestVisible="False"/>
+               </Track.DecreaseRepeatButton>
+               <Track.Thumb>
+                <Thumb Width="10" MinHeight="10" MaxHeight="10" Background="#8FB8E8" HorizontalAlignment="Center">
+                 <Thumb.Template>
+                  <ControlTemplate TargetType="Thumb">
+                   <Grid Width="10" Height="10" HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <Ellipse x:Name="ThumbCircle" Width="10" Height="10" Fill="{TemplateBinding Background}"/>
+                   </Grid>
+                   <ControlTemplate.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True">
+                     <Setter TargetName="ThumbCircle" Property="Fill" Value="#A9CCF2"/>
+                    </Trigger>
+                    <Trigger Property="IsDragging" Value="True">
+                     <Setter TargetName="ThumbCircle" Property="Fill" Value="#C3DDF8"/>
+                    </Trigger>
+                   </ControlTemplate.Triggers>
+                  </ControlTemplate>
+                 </Thumb.Template>
+                </Thumb>
+               </Track.Thumb>
+               <Track.IncreaseRepeatButton>
+                <RepeatButton Command="ScrollBar.LineDownCommand" Opacity="0" Focusable="False" IsHitTestVisible="False"/>
+               </Track.IncreaseRepeatButton>
+              </Track>
+             </Grid>
+             <ControlTemplate.Triggers>
+              <Trigger Property="Orientation" Value="Horizontal">
+               <Setter Property="Height" Value="8"/>
+               <Setter Property="Width" Value="Auto"/>
+              </Trigger>
+             </ControlTemplate.Triggers>
+            </ControlTemplate>
+           </Setter.Value>
+          </Setter>
+         </Style>
+        </ScrollViewer.Resources>
+       <ItemsControl Name="SoftwareGrid" FlowDirection="LeftToRight" Margin="0,5,0,0">
         <ItemsControl.ItemsPanel>
-         <ItemsPanelTemplate><WrapPanel Orientation="Horizontal"/></ItemsPanelTemplate>
+         <ItemsPanelTemplate><UniformGrid Columns="3"/></ItemsPanelTemplate>
         </ItemsControl.ItemsPanel>
         
         <ItemsControl.ItemTemplate>
          <DataTemplate>
-          <Border Background="#27272A" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="10" Padding="15" Margin="10" Width="330">
+          <Border Background="#27272A" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="9" Padding="10" Margin="6" MaxWidth="260" HorizontalAlignment="Stretch" VerticalAlignment="Center">
            <Grid>
             <Grid.ColumnDefinitions>
              <ColumnDefinition Width="Auto"/>
@@ -2646,9 +3045,9 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
             <CheckBox IsChecked="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" VerticalAlignment="Center" Margin="0,0,15,0">
              <CheckBox.LayoutTransform><ScaleTransform ScaleX="1.2" ScaleY="1.2"/></CheckBox.LayoutTransform>
             </CheckBox>
-            <Grid Grid.Column="1" Width="48" Height="48" Margin="0,0,15,0">
+            <Grid Grid.Column="1" Width="40" Height="40" Margin="0,0,10,0">
              <Border Background="#3F3F46" CornerRadius="10"/>
-             <TextBlock Text="{Binding Initials}" Foreground="#A1A1AA" FontSize="20" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center">
+             <TextBlock Text="{Binding Initials}" Foreground="#A1A1AA" FontSize="17" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center">
               <TextBlock.Style>
                <Style TargetType="TextBlock">
                 <Setter Property="Visibility" Value="Collapsed"/>
@@ -2660,11 +3059,11 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
                </Style>
               </TextBlock.Style>
              </TextBlock>
-             <Image Source="{Binding Icon, Mode=OneWay, TargetNullValue={x:Null}, FallbackValue={x:Null}}" Width="36" Height="36" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center" SnapsToDevicePixels="True" RenderOptions.BitmapScalingMode="HighQuality"/>
+             <Image Source="{Binding Icon, Mode=OneWay, TargetNullValue={x:Null}, FallbackValue={x:Null}}" Width="32" Height="32" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center" SnapsToDevicePixels="True" RenderOptions.BitmapScalingMode="HighQuality"/>
             </Grid>
             <StackPanel Grid.Column="2" VerticalAlignment="Center">
-             <TextBlock Text="{Binding Name}" FontSize="16" FontWeight="Bold" Foreground="#FFFFFF" TextWrapping="Wrap"/>
-             <TextBlock Text="{Binding Id}" FontSize="12" Foreground="#71717A" TextWrapping="Wrap" Margin="0,4,0,0"/>
+             <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold" Foreground="#FFFFFF" TextWrapping="Wrap"/>
+             <TextBlock Text="{Binding Id}" FontSize="10" Foreground="#71717A" TextWrapping="Wrap" Margin="0,3,0,0"/>
             </StackPanel>
            </Grid>
           </Border>
@@ -3861,6 +4260,7 @@ function Refresh-AMROverview {
         (C 'WingetHeader').Text = 'WINGET NOT FOUND'
     }
     Update-AMROverviewData
+    Update-AMRDriverRestorePointStatus
 }
 
 (C 'RefreshOverviewBtn').Add_Click({
@@ -3879,25 +4279,5163 @@ function Refresh-AMROverview {
     }
 })
 
+# --- AMR DRIVER RESTORE POINT MANAGEMENT ---
+function Get-AMRComputerRestorePoints {
+    $command = Get-Command -Name Get-ComputerRestorePoint -ErrorAction SilentlyContinue
+    if (-not $command) { throw 'Get-ComputerRestorePoint is unavailable on this Windows installation.' }
+    return @(Get-ComputerRestorePoint -ErrorAction Stop)
+}
+
+function New-AMRDriverSafetyRestorePoint {
+    param([string]$Reason = 'Before driver changes')
+    $checkpointCommand = Get-Command -Name Checkpoint-Computer -ErrorAction SilentlyContinue
+    if (-not $checkpointCommand) { throw 'Checkpoint-Computer is unavailable. Windows System Protection may be disabled or the System Restore module is unavailable.' }
+    $stamp = Get-Date
+    $description = 'AMR Driver Safety - ' + $script:AMRSessionId.Substring(0,8) + ' - ' + $stamp.ToString('yyyyMMdd-HHmmss')
+    Checkpoint-Computer -Description $description -RestorePointType 'DEVICE_DRIVER_INSTALL' -ErrorAction Stop
+    Start-Sleep -Seconds 2
+    $points = @(Get-AMRComputerRestorePoints | Where-Object { [string]$_.Description -eq $description } | Sort-Object { [long]$_.SequenceNumber } -Descending)
+    if ($points.Count -lt 1) {
+        throw 'Windows accepted the restore-point request, but AMR could not verify the resulting restore point. No restore target has been recorded.'
+    }
+    $point = $points[0]
+    $state = [pscustomobject]@{
+        Product = 'AMR Windows Utility - Driver Center'
+        SessionId = [string]$script:AMRSessionId
+        SequenceNumber = [long]$point.SequenceNumber
+        Description = [string]$point.Description
+        CreationTime = [string]$point.CreationTime
+        Reason = [string]$Reason
+        RecordedAt = (Get-Date).ToString('o')
+    }
+    $state | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $script:DriverRestorePointStateFile -Encoding UTF8 -ErrorAction Stop
+    return $state
+}
+
+function Get-AMRRecordedDriverRestorePoint {
+    if (-not (Test-Path -LiteralPath $script:DriverRestorePointStateFile -PathType Leaf)) {
+        throw 'AMR has not recorded a verified driver restore point yet. Create one first.'
+    }
+    $state = Get-Content -LiteralPath $script:DriverRestorePointStateFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    if ([string]::IsNullOrWhiteSpace([string]$state.SequenceNumber) -or [string]$state.Description -notmatch '^AMR Driver Safety - ') {
+        throw 'The saved AMR restore-point record is invalid. Create a new restore point.'
+    }
+    $matches = @(Get-AMRComputerRestorePoints | Where-Object {
+        [long]$_.SequenceNumber -eq [long]$state.SequenceNumber -and [string]$_.Description -eq [string]$state.Description
+    })
+    if ($matches.Count -ne 1) {
+        throw 'The exact AMR restore point is no longer present in Windows System Restore. It may have been removed by Windows or disk-space cleanup. No other restore point will be selected automatically.'
+    }
+    return [pscustomobject]@{ State=$state; Point=$matches[0] }
+}
+
+function Update-AMRDriverRestorePointStatus {
+    try {
+        $record = Get-AMRRecordedDriverRestorePoint
+        $when = [string]$record.State.CreationTime
+        (C 'DriverRestorePointStatus').Text = ('Verified AMR restore point #{0} • {1} • {2}' -f $record.State.SequenceNumber,$record.State.Description,$when)
+        (C 'DriverSmartRestoreBtn').IsEnabled = $true
+    } catch {
+        (C 'DriverRestorePointStatus').Text = 'No verified AMR driver restore point is currently recorded. Create one before changing drivers.'
+        (C 'DriverSmartRestoreBtn').IsEnabled = $false
+    }
+}
+
+function Invoke-AMRDriverSmartRestore {
+    if($script:DriverManagedJob -or $script:DriverActionJob -or $script:DriverScanJob -or $script:DriverBatchActive -or $script:DriverSmartQueueActive -or $script:DriverOperationState.State -eq 'Running'){Show-AMRMessage 'System Restore cannot be started while another driver operation is active. Wait for it to finish first.' 'Driver Operation Busy' OK Warning | Out-Null;return}
+    try {
+        $record = Get-AMRRecordedDriverRestorePoint
+        $sequence = [long]$record.Point.SequenceNumber
+        $description = [string]$record.Point.Description
+        $created = [string]$record.Point.CreationTime
+        $message = "AMR found and verified the exact restore point it created:`n`n$description`nSequence: $sequence`nCreated: $created`n`nWindows will start System Restore using this exact sequence number. This can close applications and restart Windows. Save your work before continuing. Other restore points will not be deleted.`n`nStart restoring now?"
+        if ((Show-AMRMessage $message 'Confirm Smart Restore' YesNo Warning) -ne 'Yes') { return }
+        $restoreCommand = Get-Command -Name Restore-Computer -ErrorAction SilentlyContinue
+        if (-not $restoreCommand) {
+            Show-AMRMessage 'This Windows PowerShell installation does not expose Restore-Computer. AMR verified the target point but cannot safely invoke an exact-point restore on this system. No restore point was changed.' 'Smart Restore Unavailable' OK Warning | Out-Null
+            return
+        }
+        Show-AMRMessage 'AMR is now handing the exact restore-point sequence to Windows. Windows System Restore will restart the computer; the restore completes during startup. Do not power off the computer during the process.' 'Starting Smart Restore' OK Warning | Out-Null
+        Write-AMRLog ("Smart Restore requested for AMR restore point #{0} ({1})." -f $sequence,$description) WARNING Overview
+        Restore-Computer -RestorePoint ([int]$sequence) -Confirm:$false -ErrorAction Stop
+    } catch {
+        Show-AMRMessage ('Smart Restore could not continue: ' + [string]$_.Exception.Message + "`n`nNo alternative restore point will be selected automatically.") 'Smart Restore Error' OK Error | Out-Null
+        Write-AMRLog ('Smart Restore validation/invocation failed: ' + [string]$_.Exception.Message) ERROR Overview
+    }
+}
+
+(C 'DriverCreateRestorePointBtn').Add_Click({
+    $button = C 'DriverCreateRestorePointBtn'
+    if ($script:DriverManagedJob -or $script:DriverActionJob -or $script:DriverScanJob -or $script:DriverBatchActive -or $script:DriverSmartQueueActive -or $script:DriverOperationState.State -eq 'Running') { Show-AMRMessage 'Wait for the current driver operation to finish before creating a restore point.' 'Driver Operation Busy' OK Information | Out-Null; return }
+    if ((Show-AMRMessage 'Create a Windows System Restore point now? Windows System Protection must be enabled. This does not install or change any driver.' 'Create AMR Driver Restore Point' YesNo Warning) -ne 'Yes') { return }
+    try {
+        $null=Start-AMRDriverManagedWorker -Operation RestorePoint -Device ([pscustomobject]@{DeviceName='System Overview';DeviceId='System'}) -Candidate 'Manually created from System Overview'
+        $button.IsEnabled=$false; $button.Content='Creating…'
+        $poll=New-Object System.Windows.Threading.DispatcherTimer
+        $poll.Interval=[TimeSpan]::FromMilliseconds(500)
+        $poll.Add_Tick(({
+            if(-not $script:DriverManagedJob){$poll.Stop();$button.Content='Create Restore Point';$button.IsEnabled=$true;return}
+            if($script:DriverManagedJob.State -in @('Completed','Failed','Stopped')){
+                $poll.Stop()
+                try {
+                    $created=Complete-AMRDriverManagedWorker
+                    if(-not $created -or -not $created.Success){throw $(if($created.Failure){[string]$created.Failure}else{'Restore point creation did not return a verified result.'})}
+                    $state=$created.RestoreState
+                    (C 'DriverRestorePointStatus').Text=('Verified AMR restore point #{0} created: {1}' -f $state.SequenceNumber,$state.Description)
+                    (C 'DriverSmartRestoreBtn').IsEnabled=$true
+                    Show-AMRMessage ("AMR created and verified the Windows restore point successfully.`n`nSequence: $($state.SequenceNumber)`nDescription: $($state.Description)") 'Restore Point Created' OK Information | Out-Null
+                    Write-AMRLog ("Created AMR driver restore point #{0}." -f $state.SequenceNumber) SUCCESS Overview
+                } catch {
+                    (C 'DriverRestorePointStatus').Text='Restore point creation failed. Check System Protection and available restore-point storage.'
+                    Show-AMRMessage ('AMR could not create and verify a restore point: '+[string]$_.Exception.Message) 'Restore Point Failed' OK Error | Out-Null
+                    Write-AMRLog ('AMR driver restore point creation failed: '+[string]$_.Exception.Message) ERROR Overview
+                } finally {$button.Content='Create Restore Point';$button.IsEnabled=$true}
+            }
+        }).GetNewClosure())
+        $script:DriverManagedTimer=$poll; $poll.Start()
+    } catch {
+        $button.Content='Create Restore Point';$button.IsEnabled=$true
+        Show-AMRMessage ('Could not start restore point creation: '+[string]$_.Exception.Message) 'Restore Point Failed' OK Error | Out-Null
+    }
+})
+(C 'DriverSmartRestoreBtn').Add_Click({ Invoke-AMRDriverSmartRestore })
+
+# --- Phase 6.10.3 | ASUS routing + ASRock Latest Driver Catalog metadata (building on MSI + GIGABYTE) (based on Phase 6.10.1) ---
+# Phase 6.10.1 universal 72-vendor support routing is preserved below.
+# --- Phase 6.10.1 | Universal Vendor Coverage Completion (based on Phase 6.10) ---
+# --- Phase 6.5: Universal Hardware Coverage & OEM Model Matching ---
+# Phase 6.6A: bounded multi-ID discovery and transparent candidate comparison.
+# Phase 6.7: expanded offline hardware-ID coverage, evidence confidence and source-manager diagnostics.
+# The registry is intentionally local/offline. It identifies vendors and routes users to
+# official support portals; a portal reference is never represented as a verified package.
+function Get-AMRDriverVendorRegistry {
+    return @(
+        [pscustomobject]@{Vendor='Dell';Role='OEM';Aliases=@('Dell Inc','Dell Computer','Alienware','OptiPlex','Latitude','Precision','Vostro','Inspiron','XPS');Url='https://www.dell.com/support/home/en-us?app=drivers';Mode='Official OEM support portal';Note='Prefer exact Service Tag or product model. Dell Driver Pack Catalog is a separate system-pack source.'},
+        [pscustomobject]@{Vendor='HP';Role='OEM';Aliases=@('HP','Hewlett-Packard','HP Inc','Hewlett Packard','EliteBook','ProBook','ZBook','Pavilion','OMEN','Victus','EliteDesk','ProDesk','Z2','Z4','Z6','Z8');Url='https://support.hp.com/drivers';Mode='Official OEM support portal';Note='Use exact product name, product number or serial number; customized component packages may differ from generic vendor drivers.'},
+        [pscustomobject]@{Vendor='Lenovo';Role='OEM';Aliases=@('Lenovo','ThinkPad','ThinkCentre','IdeaPad','Legion','Yoga');Url='https://pcsupport.lenovo.com/';Mode='Official OEM support portal';Note='Use exact machine type/model (MTM) or serial number; regional variants may share a family name but differ by MTM.'},
+        [pscustomobject]@{Vendor='ASUS';Role='OEM / Motherboard';Aliases=@('ASUS','ASUSTeK','ROG Zephyrus','ROG Strix G','ROG Strix Scar','Republic of Gamers','ZenBook','VivoBook','ExpertBook');Url='https://www.asus.com/support/Download-Center/';Mode='Official model support portal';Note='ASUS publishes model-selected downloads through its interactive Download Center; no public documented driver catalog API is assumed. Use exact laptop/board model and OS; do not infer system model from board alone.'},
+        [pscustomobject]@{Vendor='Acer';Role='OEM';Aliases=@('Acer','Predator','Gateway','Packard Bell','TravelMate','Aspire','Swift','Extensa','Veriton');Url='https://www.acer.com/ae-en/support/drivers-and-manuals';Mode='Official OEM support portal';Note='Use exact model/SNID; regional model suffixes matter.'},
+        [pscustomobject]@{Vendor='MSI';Role='OEM / Motherboard';Aliases=@('Micro-Star','Microstar','MSI','Stealth','Raider','Creator','Prestige','Modern','Titan','Katana','Cyborg');Url='https://www.msi.com/support';Mode='Official model support portal';Note='Select the exact laptop, desktop or motherboard model and OS.'},
+        [pscustomobject]@{Vendor='GIGABYTE';Role='OEM / Motherboard';Aliases=@('Gigabyte','GIGABYTE','AORUS','AERO');Url='https://www.gigabyte.com/Support';Mode='Official model support portal';Note='Exact board or system revision may affect available packages.'},
+        [pscustomobject]@{Vendor='ASRock';Role='Motherboard';Aliases=@('ASRock','ASROCK');Url='https://www.asrock.com/support/';Mode='Official motherboard support portal';Note='Match the complete motherboard model and PCB revision when supplied.'},
+        [pscustomobject]@{Vendor='Biostar';Role='Motherboard';Aliases=@('Biostar','BIOSTAR');Url='https://www.biostar.com.tw/app/en/support/download.php';Mode='Official motherboard support portal';Note='Use exact board model and OS.'},
+        [pscustomobject]@{Vendor='Supermicro';Role='Motherboard / Workstation / Server';Aliases=@('Supermicro','Super Micro Computer');Url='https://www.supermicro.com/en/support/resources/downloadcenter';Mode='Official product support portal';Note='Match board/system SKU and platform generation.'},
+        [pscustomobject]@{Vendor='Intel';Role='Component / Motherboard';Aliases=@('Intel Corporation','Intel');Url='https://www.intel.com/content/www/us/en/download-center/home.html';Mode='Official component support portal';Note='Use Intel product family/model; OEM-customized wireless, graphics and chipset packages may be preferred.'},
+        [pscustomobject]@{Vendor='NVIDIA';Role='Component';Aliases=@('NVIDIA','NVIDIA Corporation','GeForce','Quadro','RTX');Url='https://www.nvidia.com/Download/index.aspx';Mode='Official GPU driver portal';Note='GPU family, exact product and Windows version must match.'},
+        [pscustomobject]@{Vendor='AMD';Role='Component';Aliases=@('Advanced Micro Devices','AMD','ATI Technologies','Radeon','Ryzen');Url='https://www.amd.com/en/support/download/drivers.html';Mode='Official component support portal';Note='Select exact CPU/GPU/chipset family; laptop OEM packages may include platform customizations.'},
+        [pscustomobject]@{Vendor='Realtek';Role='Component';Aliases=@('Realtek','Realtek Semiconductor');Url='https://www.realtek.com/Download/ToDownload';Mode='Official component download portal';Note='Generic Realtek packages may omit OEM audio/network customizations; prefer exact system or board OEM package when needed.'},
+        [pscustomobject]@{Vendor='Broadcom';Role='Component';Aliases=@('Broadcom','Broadcom Inc','BRCM');Url='https://www.broadcom.com/support/download-search';Mode='Official component support portal';Note='Some products require product-family selection or customer portal access; many Windows components are OEM-supported.'},
+        [pscustomobject]@{Vendor='Qualcomm';Role='Component – OEM routed';Aliases=@('Qualcomm','Atheros','QCA','Killer Networking');Url='https://www.qualcomm.com/drivers';Mode='OEM-first official support routing';Note='Qualcomm states most Windows component drivers/support are provided by the computer or module OEM; do not treat this page as a direct package catalog.'},
+        [pscustomobject]@{Vendor='MediaTek';Role='Component – OEM routed';Aliases=@('MediaTek','Mediatek','Ralink','MTK');Url='https://www.mediatek.com/';Mode='OEM-first support routing';Note='Many Windows Wi-Fi/Bluetooth packages are distributed by the laptop or motherboard OEM.'},
+        [pscustomobject]@{Vendor='Marvell';Role='Component';Aliases=@('Marvell','Marvell Semiconductor','Aquantia','QLogic');Url='https://www.marvell.com/support/downloads.html';Mode='Official public driver downloads portal';Note='Some controller packages are distributed through system OEMs and enterprise partners.'},
+        [pscustomobject]@{Vendor='VIA';Role='Component';Aliases=@('VIA Technologies','VIA');Url='https://www.viatech.com/en/support/';Mode='Official component support portal';Note='Confirm exact chipset/controller family and OS.'},
+        [pscustomobject]@{Vendor='ASIX';Role='Component';Aliases=@('ASIX','ASIX Electronics');Url='https://www.asix.com.tw/en/support/download';Mode='Official component download portal';Note='Match exact USB Ethernet/serial chipset.'},
+        [pscustomobject]@{Vendor='Silicon Labs';Role='Component';Aliases=@('Silicon Laboratories','Silicon Labs','Silabs');Url='https://www.silabs.com/software-and-tools/usb-to-uart-bridge-vcp-drivers';Mode='Official component driver portal';Note='Use exact bridge family and Windows architecture.'},
+        [pscustomobject]@{Vendor='FTDI';Role='Component';Aliases=@('FTDI','Future Technology Devices International');Url='https://ftdichip.com/drivers/';Mode='Official component driver portal';Note='Match exact FTDI interface family.'},
+        [pscustomobject]@{Vendor='WCH';Role='Component';Aliases=@('WCH','Nanjing Qinheng','QinHeng');Url='https://www.wch-ic.com/downloads';Mode='Official component download portal';Note='Match exact USB bridge/controller model.'},
+        [pscustomobject]@{Vendor='Samsung';Role='OEM / Storage';Aliases=@('Samsung','Samsung Electronics','Galaxy Book');Url='https://www.samsung.com/us/support/';Mode='Official OEM / storage support portal';Note='For Samsung SSD tools and firmware, confirm exact drive model and firmware applicability.'},
+        [pscustomobject]@{Vendor='Western Digital';Role='Storage';Aliases=@('Western Digital','WDC','SanDisk');Url='https://support-en.wd.com/';Mode='Official storage support portal';Note='Use exact drive model; firmware and utility packages are not interchangeable with device drivers.'},
+        [pscustomobject]@{Vendor='Seagate';Role='Storage';Aliases=@('Seagate','Seagate Technology');Url='https://www.seagate.com/support/downloads/';Mode='Official storage support portal';Note='Distinguish storage firmware/tools from Windows device drivers.'},
+        [pscustomobject]@{Vendor='Kingston';Role='Storage / Memory';Aliases=@('Kingston','Kingston Technology');Url='https://www.kingston.com/en/support';Mode='Official product support portal';Note='Use exact SSD/product model; many memory modules do not require a separate driver.'},
+        [pscustomobject]@{Vendor='Microsoft Surface';Role='OEM';Aliases=@('Microsoft Corporation','Surface');Url='https://support.microsoft.com/en-us/surface/drivers-firmware/download-drivers-and-firmware-for-surface';Mode='Official OEM firmware and driver support';Note='Use exact Surface model; Microsoft publishes model-specific driver/firmware bundles.'},
+        [pscustomobject]@{Vendor='Huawei';Role='OEM';Aliases=@('Huawei','HUAWEI','MateBook');Url='https://consumer.huawei.com/en/support/driver-list/';Mode='Official OEM support portal';Note='Use exact product/model and region.'},
+        [pscustomobject]@{Vendor='LG';Role='OEM';Aliases=@('LG Electronics','LG','LG gram');Url='https://www.lg.com/us/support';Mode='Official OEM support portal';Note='Use exact laptop/product model and regional support site.'},
+        [pscustomobject]@{Vendor='Dynabook';Role='OEM';Aliases=@('Dynabook','Toshiba Client Solutions','Toshiba');Url='https://support.dynabook.com/support/driversResults';Mode='Official OEM support portal';Note='Older Toshiba models may be supported through Dynabook archives; confirm exact model.'},
+        [pscustomobject]@{Vendor='Fujitsu';Role='OEM';Aliases=@('Fujitsu','Fujitsu Client Computing','LIFEBOOK','CELSIUS');Url='https://support.ts.fujitsu.com/IndexDownload.asp?lng=EN';Mode='Official OEM support portal';Note='Use exact regional model and product number.'},
+        [pscustomobject]@{Vendor='Panasonic';Role='OEM';Aliases=@('Panasonic','Panasonic Corporation','Toughbook','Toughpad');Url='https://global-pc-support.connect.panasonic.com/driver';Mode='Official OEM support portal';Note='Use exact Toughbook/PC model and regional variant.'},
+        [pscustomobject]@{Vendor='Razer';Role='OEM';Aliases=@('Razer','Blade');Url='https://mysupport.razer.com/';Mode='Official OEM support portal';Note='Use exact Blade/system model.'},
+        [pscustomobject]@{Vendor='Framework';Role='OEM';Aliases=@('Framework Computer','Framework','Framework Laptop');Url='https://frame.work/support';Mode='Official OEM support portal';Note='Use exact Framework generation and expansion-card configuration.'},
+        [pscustomobject]@{Vendor='Medion';Role='OEM';Aliases=@('Medion','MEDION','Erazer');Url='https://www.medion.com/';Mode='Official OEM support routing';Note='Regional product numbers can be essential for imported systems.'},
+        [pscustomobject]@{Vendor='Getac';Role='OEM';Aliases=@('Getac','B300','S410','F110');Url='https://www.getac.com/us/support/';Mode='Official OEM support portal';Note='Use exact rugged-device model and regional SKU.'},
+        [pscustomobject]@{Vendor='Clevo';Role='ODM / Barebone';Aliases=@('Clevo','Sager','Eurocom','XMG','Schenker');Url='https://www.clevo.com.tw/';Mode='ODM / reseller support routing';Note='Barebone systems are frequently rebranded; chassis model alone may not identify the final OEM driver package.'},
+        [pscustomobject]@{Vendor='ZOTAC';Role='GPU / Mini PC';Aliases=@('ZOTAC','Zotac Technology');Url='https://www.zotac.com/us/support';Mode='Official product support portal';Note='Use exact GPU or mini-PC model.'},
+        [pscustomobject]@{Vendor='Sapphire';Role='GPU';Aliases=@('Sapphire','SAPPHIRE Technology');Url='https://www.sapphiretech.com/en/support';Mode='Official GPU support portal';Note='AMD GPU driver packages are generally sourced from AMD; board-specific tools may be Sapphire-specific.'},
+        [pscustomobject]@{Vendor='PowerColor';Role='GPU';Aliases=@('PowerColor','TUL');Url='https://www.powercolor.com/';Mode='Official GPU support routing';Note='Core AMD GPU drivers are generally provided by AMD; confirm exact board model for vendor utilities.'},
+        [pscustomobject]@{Vendor='PNY';Role='GPU / Storage';Aliases=@('PNY','PNY Technologies');Url='https://www.pny.com/support';Mode='Official product support portal';Note='Use exact product family; GPU core drivers may be provided by NVIDIA.'},
+        [pscustomobject]@{Vendor='EVGA';Role='GPU / Motherboard';Aliases=@('EVGA');Url='https://www.evga.com/support/download/';Mode='Official legacy product support';Note='Some product lines are discontinued; check exact model and package date.'},
+        [pscustomobject]@{Vendor='NZXT';Role='System / Motherboard';Aliases=@('NZXT');Url='https://support.nzxt.com/';Mode='Official product support portal';Note='Use exact system or motherboard model; component chipset drivers may come from the silicon vendor.'},
+        [pscustomobject]@{Vendor='MINISFORUM';Role='OEM / Mini PC';Aliases=@('MINISFORUM','Minis Forum');Url='https://www.minisforum.com/';Mode='Official mini-PC support routing';Note='Use exact model, board revision and regional SKU; barebone configurations can differ.'},
+        [pscustomobject]@{Vendor='Beelink';Role='OEM / Mini PC';Aliases=@('Beelink','Beelink Computer');Url='https://www.bee-link.com/';Mode='Official mini-PC support routing';Note='Use exact model and processor platform; check the vendor support/download area.'},
+        [pscustomobject]@{Vendor='GMKtec';Role='OEM / Mini PC';Aliases=@('GMKtec','GMK Tech');Url='https://gmktec.com/';Mode='Official mini-PC support routing';Note='Use exact model and hardware revision; regional bundles may differ.'},
+        [pscustomobject]@{Vendor='CHUWI';Role='OEM';Aliases=@('CHUWI','Chuwi');Url='https://www.chuwi.com/';Mode='Official OEM support routing';Note='Use exact product model and region; imported models may have different board revisions.'},
+        [pscustomobject]@{Vendor='Teclast';Role='OEM';Aliases=@('Teclast','TECLAST');Url='https://www.teclast.com/';Mode='Official OEM support routing';Note='Use exact product model and region; verify hardware IDs before using a package.'},
+        [pscustomobject]@{Vendor='Hasee';Role='OEM';Aliases=@('Hasee','HASEE');Url='https://www.hasee.com/';Mode='Official OEM support routing';Note='Regional and ODM-based models may share a chassis name; use the exact product code.'},
+        [pscustomobject]@{Vendor='Colorful';Role='OEM / Motherboard / GPU';Aliases=@('Colorful','Colorful Technology');Url='https://en.colorful.cn/';Mode='Official product support routing';Note='Use exact motherboard/GPU/mini-PC model and board revision.'},
+        [pscustomobject]@{Vendor='Corsair';Role='System / Peripheral';Aliases=@('Corsair','CORSAIR');Url='https://help.corsair.com/';Mode='Official product support portal';Note='Use exact system or peripheral model; component drivers may still come from the silicon OEM.'},
+        [pscustomobject]@{Vendor='Origin PC';Role='OEM / System Integrator';Aliases=@('Origin PC','ORIGINPC');Url='https://www.originpc.com/support/';Mode='Official system integrator support';Note='Use exact system configuration and serial number; individual components may have separate vendors.'},
+        [pscustomobject]@{Vendor='iBUYPOWER';Role='OEM / System Integrator';Aliases=@('iBUYPOWER','IBUYPOWER');Url='https://www.ibuypower.com/support';Mode='Official system integrator support';Note='Use exact system model/serial and identify each component independently.'},
+        [pscustomobject]@{Vendor='CyberPowerPC';Role='OEM / System Integrator';Aliases=@('CyberPowerPC','CyberPower');Url='https://www.cyberpowerpc.com/support';Mode='Official system integrator support';Note='Use exact system model/serial; component manufacturers remain authoritative for some updates.'},
+        [pscustomobject]@{Vendor='MAINGEAR';Role='OEM / System Integrator';Aliases=@('MAINGEAR','Maingear');Url='https://maingear.com/support/';Mode='Official system integrator support';Note='Use exact system configuration and component identities.'},
+        [pscustomobject]@{Vendor='System76';Role='OEM / Workstation';Aliases=@('System76');Url='https://support.system76.com/';Mode='Official OEM support portal';Note='Confirm exact model and OS; Windows driver availability can differ from Linux support.'},
+        [pscustomobject]@{Vendor='ASRock Industrial';Role='Industrial Motherboard / System';Aliases=@('ASRock Industrial','ASRock Industrial Computer');Url='https://www.asrockind.com/';Mode='Official industrial product support routing';Note='Use exact board/system SKU and revision.'},
+        [pscustomobject]@{Vendor='Logitech';Role='Peripheral';Aliases=@('Logitech','Logi');Url='https://support.logi.com/';Mode='Official peripheral support portal';Note='Use exact peripheral model; optional utilities are not device drivers.'},
+        [pscustomobject]@{Vendor='SteelSeries';Role='Peripheral';Aliases=@('SteelSeries');Url='https://support.steelseries.com/';Mode='Official peripheral support portal';Note='Use exact device model; companion software is distinct from core Windows drivers.'},
+        [pscustomobject]@{Vendor='Elgato';Role='Peripheral / Capture';Aliases=@('Elgato');Url='https://help.elgato.com/';Mode='Official peripheral support portal';Note='Use exact capture/card model and software generation.'},
+        [pscustomobject]@{Vendor='Infineon';Role='Component';Aliases=@('Infineon','Cypress Semiconductor','Cypress');Url='https://www.infineon.com/support';Mode='Official component support portal';Note='Confirm exact controller/bridge family; OEM-specific packages may be required.'},
+        [pscustomobject]@{Vendor='Synaptics';Role='Component';Aliases=@('Synaptics');Url='https://www.synaptics.com/';Mode='Official component support routing';Note='Touchpad/fingerprint packages are often customized and distributed by the laptop OEM.'},
+        [pscustomobject]@{Vendor='Goodix';Role='Component';Aliases=@('Goodix');Url='https://www.goodix.com/';Mode='Official component support routing';Note='Fingerprint/touch controller drivers are usually supplied by the system OEM.'},
+        [pscustomobject]@{Vendor='ELAN';Role='Component';Aliases=@('ELAN','ELAN Microelectronics');Url='https://www.emc.com.tw/';Mode='Official component support routing';Note='Touchpad packages are often customized and distributed by the laptop OEM.'},
+        [pscustomobject]@{Vendor='Nuvoton';Role='Component';Aliases=@('Nuvoton','Nuvoton Technology');Url='https://www.nuvoton.com/';Mode='Official component support routing';Note='Use exact controller model; system firmware/EC packages are OEM-specific.'},
+        [pscustomobject]@{Vendor='ITE';Role='Component';Aliases=@('ITE Tech','ITE Tech. Inc','ITE');Url='https://www.ite.com.tw/';Mode='Official component support routing';Note='Embedded controller and platform packages are normally supplied by the system or motherboard OEM.'},
+        [pscustomobject]@{Vendor='ASMedia';Role='Component';Aliases=@('ASMedia','ASMedia Technology');Url='https://www.asmedia.com.tw/';Mode='Official component support routing';Note='USB/SATA controller drivers may be integrated into the motherboard OEM package.'},
+        [pscustomobject]@{Vendor='Genesys Logic';Role='Component';Aliases=@('Genesys Logic');Url='https://www.genesyslogic.com.tw/';Mode='Official component support routing';Note='USB hub/card-reader drivers may be distributed through the computer OEM.'},
+        [pscustomobject]@{Vendor='Prolific';Role='Component';Aliases=@('Prolific','Prolific Technology');Url='https://www.prolific.com.tw/en/products/smart-i-o-solution-en/usb-1-1-to-uart-serial-printer/';Mode='Official component support routing';Note='Match exact USB serial chipset and avoid unrelated legacy revisions.'},
+        [pscustomobject]@{Vendor='C-Media';Role='Component';Aliases=@('C-Media','Cmedia');Url='https://www.cmedia.com.tw/';Mode='Official component support routing';Note='Audio codec drivers may be customized by the motherboard or computer OEM.'},
+        [pscustomobject]@{Vendor='AverMedia';Role='Peripheral / Capture';Aliases=@('AverMedia','AVerMedia');Url='https://www.avermedia.com/support';Mode='Official peripheral support portal';Note='Use exact capture/tuner model and hardware revision.'}
+    )
+}
+
+function Resolve-AMRDriverVendorName {
+    param([string]$Text,[string]$Role='')
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    $registry = @(Get-AMRDriverVendorRegistry)
+    $matchesFound = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($entry in $registry) {
+        if ($Role -and $entry.Role -notmatch [regex]::Escape($Role)) { continue }
+        foreach ($alias in @($entry.Aliases)) {
+            $escaped = [regex]::Escape([string]$alias)
+            if ($Text -match ('(?i)(^|[^A-Z0-9])' + $escaped + '([^A-Z0-9]|$)')) {
+                $matchesFound.Add([pscustomobject]@{Entry=$entry;AliasLength=([string]$alias).Length})
+            }
+        }
+    }
+    $best = $matchesFound | Sort-Object @{Expression={$_.AliasLength};Descending=$true} | Select-Object -First 1
+    if ($best) { return $best.Entry }
+    return $null
+}
+
+function Get-AMRDriverOEMModelProfile {
+    param([string]$ComputerManufacturer,[string]$ComputerModel,[string]$SystemSKU,[string]$SystemFamily,[string]$ProductVendor,[string]$ProductName,[string]$ProductVersion,[string]$BoardManufacturer,[string]$BoardProduct,[string[]]$BoardInventory)
+    $generic = '(?i)to be filled|default string|system manufacturer|system product name|unknown|not specified|o\.e\.m\.|base board product|product name|not applicable|none'
+    $systemEvidence = @($ComputerManufacturer,$ComputerModel,$SystemSKU,$SystemFamily,$ProductVendor,$ProductName,$ProductVersion) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) -and [string]$_ -notmatch $generic }
+    $productNameIsBoard = $false
+    if($ProductName -and $BoardProduct){
+        if(([string]$ProductName).Trim().Equals(([string]$BoardProduct).Trim(),[StringComparison]::OrdinalIgnoreCase)){$productNameIsBoard=$true}
+        elseif(([string]$ProductName).Trim() -match '(?i)^MS-[A-Z0-9]{3,}$' -and ([string]$BoardProduct).Trim() -match '(?i)^MS-[A-Z0-9]{3,}$'){$productNameIsBoard=$true}
+    }
+    $oem = Resolve-AMRDriverVendorName -Text $ComputerManufacturer -Role 'OEM'
+    $oemEvidence = 'Win32_ComputerSystem Manufacturer'
+    if (-not $oem -and $ProductVendor -and $ProductName -and $ProductName -notmatch $generic -and -not $productNameIsBoard) {
+        $oem = Resolve-AMRDriverVendorName -Text $ProductVendor -Role 'OEM'
+        $oemEvidence = 'Win32_ComputerSystemProduct Vendor + distinct product name'
+    }
+    if (-not $oem -and $ProductName -and $ProductName -notmatch $generic -and -not $productNameIsBoard) {
+        $oem = Resolve-AMRDriverVendorName -Text $ProductName -Role 'OEM'
+        $oemEvidence = 'SMBIOS product name / system product-line alias'
+    }
+    if (-not $oem -and $ComputerModel -and $ComputerModel -notmatch $generic) {
+        $oem = Resolve-AMRDriverVendorName -Text $ComputerModel -Role 'OEM'
+        $oemEvidence = 'Computer model/product-line alias (supporting evidence only)'
+    }
+    if (-not $oem -and $SystemFamily -and $SystemFamily -notmatch $generic) {
+        $oem = Resolve-AMRDriverVendorName -Text $SystemFamily -Role 'OEM'
+        $oemEvidence = 'System family/product-line alias (supporting evidence only)'
+    }
+    $board = Resolve-AMRDriverVendorName -Text $BoardManufacturer -Role 'Motherboard'
+    if (-not $board) { $board = Resolve-AMRDriverVendorName -Text $BoardManufacturer -Role 'OEM' }
+    if (-not $board) { $board = Resolve-AMRDriverVendorName -Text $BoardProduct -Role 'Motherboard' }
+    $hasModel = (-not [string]::IsNullOrWhiteSpace($ComputerModel) -and $ComputerModel -notmatch $generic) -or ($ProductName -and $ProductName -notmatch $generic -and -not $productNameIsBoard)
+    $hasSku = -not [string]::IsNullOrWhiteSpace($SystemSKU) -and $SystemSKU -notmatch $generic
+    $identityClass = if ($oem -and $hasModel) { 'Branded OEM system' } elseif ($board -and (-not $oem -or -not $hasModel)) { 'Custom-built / motherboard-led system' } else { 'System identity incomplete' }
+    $confidence = if ($oem -and $hasModel -and $hasSku -and $oemEvidence -notmatch 'product-line alias') { 'High' } elseif ($oem -and $hasModel -and $oemEvidence -notmatch 'product-line alias') { 'Moderate' } elseif ($oem -and $hasModel -and $oemEvidence -match 'product-line alias') { 'Limited – product-line inference; verify exact SKU' } elseif ($board -and $BoardProduct -and $BoardProduct -notmatch $generic) { 'Moderate – motherboard only' } elseif ($systemEvidence.Count -gt 0) { 'Limited' } else { 'Low' }
+    $modelTerms = @($ComputerManufacturer,$ComputerModel,$SystemSKU,$SystemFamily,$ProductVendor,$ProductName,$ProductVersion) | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -and $_ -notmatch $generic } | Select-Object -Unique
+    $boardTerms = @($BoardManufacturer,$BoardProduct) | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -and $_ -notmatch $generic } | Select-Object -Unique
+    $boardMatches=New-Object 'System.Collections.Generic.List[object]'
+    foreach($boardEntryText in @($BoardInventory)){
+        $matchedBoard=Resolve-AMRDriverVendorName -Text ([string]$boardEntryText) -Role 'Motherboard'
+        if(-not $matchedBoard){$matchedBoard=Resolve-AMRDriverVendorName -Text ([string]$boardEntryText) -Role 'OEM'}
+        $existingBoardMatch=@($boardMatches | Where-Object {$_.Vendor -eq $matchedBoard.Vendor -and $_.InventoryText -eq [string]$boardEntryText})
+        if($matchedBoard -and $existingBoardMatch.Count -eq 0){$boardMatches.Add([pscustomobject]@{Vendor=$matchedBoard.Vendor;Url=$matchedBoard.Url;InventoryText=[string]$boardEntryText})}
+    }
+    return [pscustomobject]@{IdentityClass=$identityClass;Confidence=$confidence;OEMVendor=$(if($oem){$oem.Vendor}else{''});OEMUrl=$(if($oem){$oem.Url}else{''});OEMMode=$(if($oem){$oem.Mode}else{''});OEMEvidence=$oemEvidence;ComputerManufacturer=$ComputerManufacturer;ComputerModel=$ComputerModel;SystemSKU=$SystemSKU;SystemFamily=$SystemFamily;ProductVendor=$ProductVendor;ProductName=$ProductName;ProductVersion=$ProductVersion;BoardVendor=$(if($board){$board.Vendor}else{''});BoardUrl=$(if($board){$board.Url}else{''});BoardProduct=$BoardProduct;ProductNameIsBoard=$productNameIsBoard;BoardVendorMatches=@($boardMatches.ToArray());ModelSearchTerms=($modelTerms -join ' ');BoardSearchTerms=($boardTerms -join ' ');BoardInventory=@($BoardInventory);SystemEvidence=@($systemEvidence)}
+}
+
+function Get-AMRDriverHardwareCoverage {
+    param([Parameter(Mandatory=$true)][object]$Device)
+
+    # Offline identification only. PCI/USB numeric IDs are stronger evidence than
+    # subsystem IDs, ACPI strings or the generic PnP manufacturer label.
+    $pciMap = @{
+        '8086'='Intel'; '8087'='Intel'; '10DE'='NVIDIA'; '1002'='AMD'; '1022'='AMD';
+        '10EC'='Realtek'; '14E4'='Broadcom'; '168C'='Qualcomm / Atheros'; '17CB'='Qualcomm';
+        '14C3'='MediaTek'; '1AE9'='Qualcomm'; '1969'='Qualcomm / Atheros'; '1B4B'='Marvell'; '11AB'='Marvell';
+        '1D6A'='Aquantia / Marvell'; '15B3'='Mellanox'; '1106'='VIA'; '1AF4'='VirtIO'; '15AD'='VMware';
+        '80EE'='VirtualBox'; '1234'='QEMU'; '1D0F'='Amazon'; '1B21'='ASMedia'; '1C5C'='SK hynix';
+        '144D'='Samsung'; '126F'='Silicon Motion'; '1E4B'='MAXIO'; '1987'='Phison'; '15B7'='SanDisk';
+        '1462'='MSI'; '1043'='ASUS'; '1458'='GIGABYTE'; '1849'='ASRock'; '1565'='Biostar';
+        '15D9'='Supermicro'; '3842'='EVGA'; '1028'='Dell'; '103C'='HP'; '17AA'='Lenovo'; '1025'='Acer';
+        '104D'='Sony'; '10B7'='3Com'; '1A03'='ASPEED'; '1B36'='Red Hat / QEMU'; '1344'='Micron';
+        '1B73'='Fresco Logic'; '1B6F'='Etron'; '1C2C'='SK hynix'; '1CFA'='Corsair'
+    }
+    $usbMap = @{
+        '8087'='Intel'; '0BDA'='Realtek'; '0A5C'='Broadcom'; '0CF3'='Qualcomm / Atheros'; '0489'='Foxconn / OEM module';
+        '0E8D'='MediaTek'; '04E8'='Samsung'; '1058'='Western Digital'; '0BC2'='Seagate'; '0951'='Kingston';
+        '0781'='SanDisk'; '046D'='Logitech'; '045E'='Microsoft'; '04F2'='Chicony'; '04CA'='Lite-On';
+        '1BCF'='Sunplus'; '5986'='Bison'; '13D3'='IMC Networks'; '0403'='FTDI'; '10C4'='Silicon Labs';
+        '1A86'='WCH'; '067B'='Prolific'; '05E3'='Genesys Logic'; '2109'='VIA Labs'; '174C'='ASMedia';
+        '0B05'='ASUS'; '0461'='Primax'; '093A'='Pixart'; '04D9'='Holtek'; '04B4'='Cypress / Infineon';
+        '0D8C'='C-Media'; '07CA'='AverMedia'; '1D6B'='Linux Foundation'; '152D'='JMicron';
+        '1B1C'='Corsair'; '05AC'='Apple'; '18D1'='Google'; '1199'='Sierra Wireless'; '2C7C'='Quectel';
+        '2CB7'='Fibocom'; '04A9'='Canon'; '04B8'='Epson'; '04F9'='Brother'; '1A40'='Terminus Technology'
+    }
+    $acpiMap = @{
+        'INT'='Intel'; 'INTC'='Intel'; 'AMD'='AMD'; 'AMDI'='AMD'; 'ELAN'='ELAN'; 'SYNA'='Synaptics';
+        'GOOD'='Goodix'; 'NTN'='Nuvoton'; 'ITE'='ITE'; 'HPE'='HP'; 'HPQ'='HP'
+    }
+
+    $deviceName=''; $deviceClass=''; $deviceManufacturer=''; $existingVendorHint=''
+    if($Device.PSObject.Properties['DeviceName']){$deviceName=[string]$Device.DeviceName}
+    if($Device.PSObject.Properties['DeviceClass']){$deviceClass=[string]$Device.DeviceClass}
+    if($Device.PSObject.Properties['Manufacturer']){$deviceManufacturer=[string]$Device.Manufacturer}
+    if($Device.PSObject.Properties['HardwareIdVendorHint']){$existingVendorHint=[string]$Device.HardwareIdVendorHint}
+    $hardwareIds=@(); $compatibleIds=@()
+    if($Device.PSObject.Properties['HardwareIds']){$hardwareIds=@($Device.HardwareIds)}
+    if($Device.PSObject.Properties['CompatibleIds']){$compatibleIds=@($Device.CompatibleIds)}
+    $ids = @($hardwareIds + $compatibleIds | ForEach-Object { ([string]$_).Trim().ToUpperInvariant() } | Where-Object { $_ } | Select-Object -Unique)
+    $pciVendor=''; $pciDevice=''; $subsystemVendor=''; $subsystemVendorName=''; $usbVendor=''; $usbProduct=''
+    $acpiVendor=''; $acpiVendorName=''; $vendor=''; $source=''; $subsystemId=''; $evidenceLevel='Unknown'
+    $families = New-Object 'System.Collections.Generic.List[string]'
+    $unresolved = New-Object 'System.Collections.Generic.List[string]'
+
+    foreach ($id in $ids) {
+        $family = ''
+        if ($id -match '^PCI\\') { $family='PCI' }
+        elseif ($id -match '^USB\\') { $family='USB' }
+        elseif ($id -match '^HDAUDIO\\') { $family='HD Audio' }
+        elseif ($id -match '^ACPI\\') { $family='ACPI' }
+        elseif ($id -match '^BTH\\') { $family='Bluetooth' }
+        elseif ($id -match '^SCSI\\') { $family='SCSI' }
+        elseif ($id -match '^IDE\\') { $family='IDE' }
+        elseif ($id -match '^ROOT\\') { $family='Root-enumerated' }
+        elseif ($id -match '^SWD\\') { $family='Software device' }
+        elseif ($id -match '^HID\\') { $family='HID' }
+        elseif ($id -match '^DISPLAY\\') { $family='Display' }
+        elseif ($id -match '^USBSTOR\\') { $family='USB Storage' }
+        elseif ($id -match '^STORAGE\\') { $family='Storage' }
+        else { $family='Other PnP' }
+        if (-not $families.Contains($family)) { $families.Add($family) }
+
+        if (-not $pciVendor -and $id -match '(?:^|\\)PCI\\VEN_([0-9A-F]{4})&DEV_([0-9A-F]{4})') {
+            $pciVendor=$Matches[1]; $pciDevice=$Matches[2]
+            if ($pciMap.ContainsKey($pciVendor)) { $vendor=$pciMap[$pciVendor]; $source='PCI Vendor ID'; $evidenceLevel='High' }
+        }
+        if (-not $subsystemVendor -and $id -match 'SUBSYS_([0-9A-F]{4})([0-9A-F]{4})') {
+            $subsystemId=$Matches[1]; $subsystemVendor=$Matches[2]
+            if ($pciMap.ContainsKey($subsystemVendor)) { $subsystemVendorName=$pciMap[$subsystemVendor] }
+        }
+        if (-not $usbVendor -and $id -match '^USB\\VID_([0-9A-F]{4})&PID_([0-9A-F]{4})') {
+            $usbVendor=$Matches[1]; $usbProduct=$Matches[2]
+            if (-not $vendor -and $usbMap.ContainsKey($usbVendor)) { $vendor=$usbMap[$usbVendor]; $source='USB VID/PID'; $evidenceLevel='High' }
+        }
+        if (-not $vendor -and $id -match '^HDAUDIO\\FUNC_[0-9A-F]+&VEN_([0-9A-F]{4})') {
+            $code=$Matches[1]
+            if ($pciMap.ContainsKey($code)) { $vendor=$pciMap[$code]; $source='HD Audio codec vendor ID'; $evidenceLevel='High' }
+        }
+        if (-not $acpiVendor -and $id -match '^ACPI\\(?:VEN_)?([A-Z0-9]{3,4})&DEV_') {
+            $acpiVendor=$Matches[1]
+            if ($acpiMap.ContainsKey($acpiVendor)) { $acpiVendorName=$acpiMap[$acpiVendor] }
+        }
+        if (-not $acpiVendor -and $id -match '^ACPI\\(INTC|AMDI|ELAN|SYNA|GOOD|NTN|ITE)[A-Z0-9_]*') {
+            $acpiVendor=$Matches[1]
+            if ($acpiMap.ContainsKey($acpiVendor)) { $acpiVendorName=$acpiMap[$acpiVendor] }
+        }
+    }
+
+    if (-not $vendor -and $acpiVendorName) { $vendor=$acpiVendorName; $source='ACPI vendor identifier'; $evidenceLevel='Moderate' }
+    if (-not $vendor -and $subsystemVendorName) { $vendor=$subsystemVendorName; $source='PCI subsystem vendor ID (secondary evidence)'; $evidenceLevel='Low – subsystem only' }
+    if (-not $vendor) {
+        $manufacturerMatch=Resolve-AMRDriverVendorName -Text $deviceManufacturer
+        if ($manufacturerMatch) { $vendor=$manufacturerMatch.Vendor; $source='PnP manufacturer string'; $evidenceLevel='Low – manufacturer string' }
+    }
+    if (-not $vendor -and $existingVendorHint) { $vendor=$existingVendorHint; $source='Existing vendor hint'; $evidenceLevel='Low – prior hint' }
+
+    $classText=$deviceClass.Trim().ToLowerInvariant()
+    $nameText=$deviceName.ToLowerInvariant()
+    $haystack=($classText+' '+$nameText)
+    $component='Other'
+    if ($classText -match '^(display|monitor)$' -or $haystack -match 'display|video|graphics|vga|3d controller') { $component='Graphics' }
+    elseif ($classText -match '^(net|network)$' -or $haystack -match 'ethernet|wireless|wi-?fi|wlan|lan adapter|network controller') { $component='Network' }
+    elseif ($classText -match '^bluetooth$' -or $haystack -match 'bluetooth') { $component='Bluetooth' }
+    elseif ($classText -match '^(media|sound|audio)$' -or $haystack -match 'audio|sound|hdaudio|codec') { $component='Audio' }
+    elseif ($classText -match '^(scsiadapter|diskdrive|hdc)$' -or $haystack -match 'scsi|storage|disk drive|nvme|raid|sata|mass storage') { $component='Storage' }
+    elseif ($classText -match '^(system|processor|system devices)$' -or $haystack -match 'smbus|pci bridge|chipset|processor|serial io|management engine') { $component='Chipset / System' }
+    elseif ($classText -match '^usb$' -or $haystack -match 'usb controller|usb hub|usb root') { $component='USB / Controller' }
+    elseif ($classText -match '^(camera|image)$' -or $haystack -match 'camera|webcam|imaging') { $component='Camera / Imaging' }
+    elseif ($classText -match '^firmware$' -or $haystack -match 'firmware|system firmware') { $component='Firmware' }
+    elseif ($classText -match '^(hidclass|keyboard|mouse)$' -or $haystack -match 'hid|keyboard|mouse|touchpad|trackpad') { $component='Input / HID' }
+    elseif ($classText -match '^(biometric|smartcardreader)$' -or $haystack -match 'fingerprint|biometric|smart card') { $component='Biometric / Smart Card' }
+    elseif ($classText -match '^ports$' -or $haystack -match 'serial port|com port|uart') { $component='Ports / Serial' }
+    elseif ($classText -match '^battery$' -or $haystack -match 'battery|ac adapter') { $component='Power / Battery' }
+
+    if ($vendor -and $evidenceLevel -eq 'Unknown') { $evidenceLevel='Low' }
+    $coverage = if ($pciVendor -and $pciMap.ContainsKey($pciVendor)) { 'PCI vendor identified' }
+                elseif ($usbVendor -and $usbMap.ContainsKey($usbVendor)) { 'USB vendor identified' }
+                elseif ($vendor -and $source -eq 'HD Audio codec vendor ID') { 'Audio codec vendor identified' }
+                elseif ($vendor -and $source -eq 'ACPI vendor identifier') { 'ACPI vendor identified' }
+                elseif ($vendor -and $source -like '*subsystem*') { 'Subsystem partner identified – chip vendor unresolved' }
+                elseif ($vendor) { 'Manufacturer identified – direct hardware ID not resolved' }
+                else { 'Unknown vendor – all reported IDs retained' }
+
+    if ($ids.Count -gt 0) {
+        foreach ($id in $ids) {
+            $idVendorKnown=$false
+            if($id -match '^PCI\\VEN_([0-9A-F]{4})' -and $pciMap.ContainsKey($Matches[1])){$idVendorKnown=$true}
+            elseif($id -match '^USB\\VID_([0-9A-F]{4})' -and $usbMap.ContainsKey($Matches[1])){$idVendorKnown=$true}
+            elseif($id -match '^HDAUDIO\\FUNC_[0-9A-F]+&VEN_([0-9A-F]{4})' -and $pciMap.ContainsKey($Matches[1])){$idVendorKnown=$true}
+            elseif($id -match '^ACPI\\(?:VEN_)?([A-Z0-9]{3,4})' -and $acpiMap.ContainsKey($Matches[1])){$idVendorKnown=$true}
+            elseif($id -match '^ACPI\\(INTC|AMDI|ELAN|SYNA|GOOD|NTN|ITE)[A-Z0-9_]*' -and $acpiMap.ContainsKey($Matches[1])){$idVendorKnown=$true}
+            if(-not $idVendorKnown){$unresolved.Add($id)}
+        }
+    }
+    return [pscustomobject]@{
+        HardwareVendorName=$vendor; HardwareVendorEvidence=$source; HardwareVendorEvidenceLevel=$evidenceLevel
+        SubsystemVendorName=$subsystemVendorName; AcpiVendorName=$acpiVendorName; HardwareCoverageStatus=$coverage
+        ComponentCategory=$component; PciVendorId=$pciVendor; PciDeviceId=$pciDevice
+        SubsystemDeviceId=$subsystemId; SubsystemVendorId=$subsystemVendor; UsbVendorId=$usbVendor; UsbProductId=$usbProduct
+        AcpiVendorCode=$acpiVendor; HardwareIdFamilies=@($families.ToArray()); UnresolvedHardwareIds=@($unresolved.ToArray())
+        HardwareIdCount=$ids.Count; HardwareIdSummary=(@($ids | Select-Object -First 5) -join ' | ')
+    }
+}
+function Get-AMRDriverVendorSourceAdapters {
+    param([Parameter(Mandatory=$true)][object]$Device,[object]$OEMProfile,[string]$WindowsContext='')
+    $registry=@(Get-AMRDriverVendorRegistry)
+    $leads=New-Object 'System.Collections.Generic.List[object]'
+    $seen=@{}
+    $hardware=@(@($Device.HardwareIds)+@($Device.CompatibleIds) | ForEach-Object {([string]$_).Trim()} | Where-Object {$_} | Select-Object -Unique)
+    $compatible=@(@($Device.CompatibleIds) | ForEach-Object {([string]$_).Trim()} | Where-Object {$_} | Select-Object -Unique)
+    $idTerms=@($hardware | Select-Object -First 6) -join ' '
+    $compatibleTerms=@($compatible | Select-Object -First 3) -join ' '
+    $baseTerms=@([string]$Device.DeviceName,[string]$Device.Manufacturer,[string]$Device.HardwareVendorName,$idTerms,$compatibleTerms,$WindowsContext) | Where-Object {$_} | Select-Object -Unique
+    $searchTerms=($baseTerms -join ' ').Trim()
+    $addLead={param($entry,$reason,$priority,$terms)
+        if(-not $entry){return}
+        $key=([string]$entry.Vendor+'|'+[string]$entry.Url).ToLowerInvariant()
+        if($seen.ContainsKey($key)){
+            $existing=$seen[$key]
+            $mergedTerms=@([string]$existing.SearchTerms,[string]$terms) | Where-Object {$_} | Select-Object -Unique
+            $existing.SearchTerms=$mergedTerms -join ' | '
+            if([string]$existing.MatchReason -notlike ('*'+[string]$reason+'*')){$existing.MatchReason=([string]$existing.MatchReason+'; '+[string]$reason).Trim('; ')}
+            if([int]$priority -lt [int]$existing.Priority){$existing.Priority=[int]$priority;$existing.Rank=[int]$priority}
+            return
+        }
+        $lead=[pscustomobject]@{Rank=$priority;Name=[string]$entry.Vendor;Source=[string]$entry.Vendor;Type=[string]$entry.Role;Url=[string]$entry.Url;Mode=[string]$entry.Mode;Role=[string]$entry.Note;MatchReason=$reason;SearchTerms=$terms;SourceAdapter='OfficialVendorPortal';IsInstallable=$false;VerificationState='Official source lead only – no driver package/version has been retrieved or verified';Priority=$priority}
+        $leads.Add($lead);$seen[$key]=$lead
+    }.GetNewClosure()
+    $category=[string]$Device.ComponentCategory
+    $componentVendor=Resolve-AMRDriverVendorName -Text ([string]$Device.HardwareVendorName)
+    if(-not $componentVendor){$componentVendor=Resolve-AMRDriverVendorName -Text ([string]$Device.Manufacturer)}
+    $isOemRouted=($componentVendor -and $componentVendor.Vendor -in @('Qualcomm','MediaTek','Broadcom'))
+    if($OEMProfile -and [string]$OEMProfile.OEMVendor){
+        $oemEntry=$registry | Where-Object { $_.Vendor -eq [string]$OEMProfile.OEMVendor } | Select-Object -First 1
+        if($oemEntry){& $addLead $oemEntry ('System OEM/model context: '+[string]$OEMProfile.Confidence+' identity; '+[string]$OEMProfile.OEMEvidence) 1 ([string]$OEMProfile.ModelSearchTerms+' '+$searchTerms).Trim()}
+    }
+    if($OEMProfile -and [string]$OEMProfile.BoardVendor){
+        $boardEntry=$registry | Where-Object { $_.Vendor -eq [string]$OEMProfile.BoardVendor } | Select-Object -First 1
+        if($boardEntry){& $addLead $boardEntry ('Motherboard manufacturer/model match: '+[string]$OEMProfile.BoardVendor+' '+[string]$OEMProfile.BoardProduct) 2 ([string]$OEMProfile.BoardSearchTerms+' '+$searchTerms).Trim()}
+    }
+    if($OEMProfile){foreach($boardMatch in @($OEMProfile.BoardVendorMatches)){$boardEntry=$registry | Where-Object { $_.Vendor -eq [string]$boardMatch.Vendor } | Select-Object -First 1;if($boardEntry){& $addLead $boardEntry ('Detected motherboard inventory entry: '+[string]$boardMatch.InventoryText) 2 (([string]$boardMatch.InventoryText+' '+$searchTerms).Trim())}}}
+    $subsystemVendor=Resolve-AMRDriverVendorName -Text ([string]$Device.SubsystemVendorName)
+    if($subsystemVendor -and (!$componentVendor -or $subsystemVendor.Vendor -ne $componentVendor.Vendor)){
+        & $addLead $subsystemVendor ('PCI subsystem vendor ID '+[string]$Device.SubsystemVendorId+' identifies a board/system partner; secondary to the chip vendor Hardware ID') 2 $searchTerms
+    }
+    if($componentVendor){
+        $reason='Component vendor inferred from '+[string]$Device.HardwareVendorEvidence+'; class='+$category
+        if($isOemRouted){$reason+='; OEM-first because component drivers are commonly customized/distributed by the system or module OEM'}
+        & $addLead $componentVendor $reason $(if($isOemRouted){1}else{3}) $searchTerms
+    }
+    # If the device's reported PnP manufacturer differs from the ID vendor, retain it as
+    # a second lead rather than silently treating one identity as authoritative.
+    $pnpVendor=Resolve-AMRDriverVendorName -Text ([string]$Device.Manufacturer)
+    if($pnpVendor -and (!$componentVendor -or $pnpVendor.Vendor -ne $componentVendor.Vendor)){
+        & $addLead $pnpVendor ('PnP manufacturer string (secondary evidence; hardware ID remains primary)') 4 $searchTerms
+    }
+    return @($leads | Sort-Object Priority,Name)
+}
+
+function Get-AMRDriverMultiSourceSummary {
+    param([object]$Device)
+    $wu=@($Device.CandidateOptions).Count
+    $catalog=@($Device.ProfessionalDiscoveredCandidates).Count
+    $vendor=@($Device.VendorSourceCandidates).Count
+    $vendorPackages=@($Device.VendorPackageCandidates).Count
+    return [pscustomobject]@{WindowsUpdateCandidates=$wu;CatalogCandidates=$catalog;OfficialVendorSourceLeads=$vendor;DirectVendorPackageCandidates=$vendorPackages;TotalPackageCandidates=($wu+$catalog+$vendorPackages);TotalSourcesWithLeads=($vendor + $(if($wu){1}else{0}) + $(if($catalog){1}else{0}) + $(if($vendorPackages){1}else{0}))}
+}
+
+# --- 6B. DRIVER CENTER: HARDWARE DISCOVERY & OFFICIAL SUPPORT ROUTING ---
+# Phase 5: conservative rollback availability check; no automatic package replacement/removal.
+function Get-AMRDriverSupportSource {
+    param([string]$ComputerManufacturer,[string]$BoardManufacturer)
+    $generic='(?i)to be filled|default string|system manufacturer|unknown|not specified|o\.e\.m\.'
+    $systemText=[string]$ComputerManufacturer
+    $matched=$null
+    if($systemText -and $systemText -notmatch $generic){$matched=Resolve-AMRDriverVendorName -Text $systemText -Role 'OEM'}
+    if(-not $matched -and $BoardManufacturer){$matched=Resolve-AMRDriverVendorName -Text $BoardManufacturer -Role 'Motherboard'}
+    if($matched){return [pscustomobject]@{Manufacturer=$(if($systemText -and $systemText -notmatch $generic){$systemText}else{$BoardManufacturer});Name=([string]$matched.Vendor+' Support');Url=[string]$matched.Url;IsFallback=$false;SupportMode=[string]$matched.Mode;SupportNote=[string]$matched.Note}}
+    return [pscustomobject]@{Manufacturer=$systemText;Name='Microsoft Update Catalog';Url='https://www.catalog.update.microsoft.com/';IsFallback=$true;SupportMode='Microsoft driver catalog fallback';SupportNote='No reliable OEM or motherboard manufacturer match was resolved; retain exact Hardware ID matching.'}
+}
+
+function Get-AMRDriverDeviceSupportSource {
+    param([string]$DeviceManufacturer,[string]$DeviceName,[string]$ComputerModel,[string]$BoardModel,[string]$WindowsContext,[string]$FallbackName,[string]$FallbackUrl)
+    $matched=Resolve-AMRDriverVendorName -Text $DeviceManufacturer
+    if(-not $matched){$matched=Resolve-AMRDriverVendorName -Text $DeviceName}
+    $directGraphicsVendor=$false
+    if($matched -and $matched.Vendor -in @('NVIDIA','AMD','Intel') -and ([string]$DeviceName -match '(?i)graphics|geforce|quadro|radeon|arc|display|video')){$directGraphicsVendor=$true}
+    $oemFirst=($matched -and ($matched.Vendor -in @('Qualcomm','MediaTek','Broadcom','Realtek') -or $matched.Role -match 'OEM'))
+    if($matched -and $matched.Vendor -in @('NVIDIA','AMD','Intel')){$useDeviceVendor=$directGraphicsVendor}
+    else{$useDeviceVendor=($null -ne $matched -and -not $oemFirst -and $matched.Role -notmatch 'OEM')}
+    $sourceName=if($useDeviceVendor){[string]$matched.Vendor}else{[string]$FallbackName}
+    $sourceUrl=if($useDeviceVendor){[string]$matched.Url}else{[string]$FallbackUrl}
+    $routeNote=if($useDeviceVendor){[string]$matched.Note}else{'OEM-first routing for customized/integrated components. Use Driver Source Manager to compare the chip vendor and subsystem/OEM alternatives.'}
+    $terms=@($ComputerModel,$BoardModel,$DeviceName,$DeviceManufacturer,$WindowsContext)|ForEach-Object{([string]$_).Trim()}|Where-Object{$_}|Select-Object -Unique
+    return [pscustomobject]@{Manufacturer=$DeviceManufacturer;Name=$sourceName;Url=$sourceUrl;IsDeviceVendor=$useDeviceVendor;SearchTerms=($terms -join ' ');RoutingNote=$routeNote}
+}
+
+
+# --- Phase 6.8: Direct OEM catalog adapters (public, documented feeds only) ---
+# Live package catalogs are supported only where the vendor publishes a stable,
+# unauthenticated catalog feed. Portal-only vendors remain clearly identified as leads.
+# --- Phase 6.9: Local Vendor API + Universal Adapter Manager ---
+# This is an in-process local API (no listening TCP port, web server, or external service).
+# All providers return a normalized candidate contract; provider-specific engines remain isolated.
+function Get-AMRVendorPortalProviderId {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][string]$Vendor)
+    switch -Regex ($Vendor) {
+        '^(Intel)$' { return 'Intel.DriverPortal' }
+        '^(NVIDIA)$' { return 'NVIDIA.DriverPortal' }
+        '^(AMD)$' { return 'AMD.DriverPortal' }
+        '^(Realtek)$' { return 'Realtek.DriverPortal' }
+        '^(Broadcom)$' { return 'Broadcom.DriverPortal' }
+        '^(Qualcomm)$' { return 'Qualcomm.DriverPortal' }
+        '^(MediaTek)$' { return 'MediaTek.DriverPortal' }
+        '^(Marvell)$' { return 'Marvell.DriverPortal' }
+        '^(Silicon Labs)$' { return 'SiliconLabs.DriverPortal' }
+        '^(FTDI)$' { return 'FTDI.DriverPortal' }
+        '^(WCH)$' { return 'WCH.DriverPortal' }
+        '^(ASIX)$' { return 'ASIX.DriverPortal' }
+        '^(Prolific)$' { return 'Prolific.DriverPortal' }
+        '^(C-Media)$' { return 'CMedia.DriverPortal' }
+        '^(Infineon)$' { return 'Infineon.DriverPortal' }
+        '^(Synaptics)$' { return 'Synaptics.DriverPortal' }
+        '^(Goodix)$' { return 'Goodix.DriverPortal' }
+        '^(ELAN)$' { return 'ELAN.DriverPortal' }
+        '^(Genesys Logic)$' { return 'GenesysLogic.DriverPortal' }
+        '^(ASMedia)$' { return 'ASMedia.DriverPortal' }
+        '^(Logitech|Logi)$' { return 'Logitech.DriverPortal' }
+        '^(SteelSeries)$' { return 'SteelSeries.DriverPortal' }
+        '^(Corsair)$' { return 'Corsair.DriverPortal' }
+        '^(Elgato)$' { return 'Elgato.DriverPortal' }
+        '^(AverMedia|AVerMedia)$' { return 'AVerMedia.DriverPortal' }
+        '^(Razer)$' { return 'Razer.DriverPortal' }
+        '^(Acer)$' { return 'Acer.DriverPortal' }
+        '^(Fujitsu)$' { return 'Fujitsu.DriverPortal' }
+        '^(Panasonic)$' { return 'Panasonic.DriverPortal' }
+        '^(Dynabook)$' { return 'Dynabook.DriverPortal' }
+        '^(Huawei)$' { return 'Huawei.DriverPortal' }
+        '^(Microsoft Surface)$' { return 'MicrosoftSurface.DriverPortal' }
+        '^(Dell)$' { return 'Dell.DriverPackCatalog' }
+        '^(HP)$' { return 'HP.ClientDriverPackCatalog' }
+        '^(Lenovo)$' { return 'Lenovo.CDRT' }
+        default {
+            $slug=($Vendor -replace '[^A-Za-z0-9]','')
+            if([string]::IsNullOrWhiteSpace($slug)) { throw 'Vendor name cannot be converted to a safe provider id.' }
+            return ('Vendor.'+$slug+'.OfficialPortal')
+        }
+    }
+}
+
+function Get-AMRLocalVendorAdapterRegistry {
+    [CmdletBinding()]
+    param()
+    $providers = @(
+        [pscustomobject]@{ ProviderId='Microsoft.WindowsUpdate'; DisplayName='Microsoft Windows Update'; AdapterType='Native'; SourceAdapter='WindowsUpdateAgent'; Enabled=$true; Capabilities=@('Discover','Search','Match','GetDetails'); Acquisition='WindowsUpdateEngine'; Verification='Existing AMR verification'; Notes='Native Windows Update Agent candidates.' },
+        [pscustomobject]@{ ProviderId='Microsoft.UpdateCatalog'; DisplayName='Microsoft Update Catalog'; AdapterType='Native'; SourceAdapter='MicrosoftUpdateCatalog'; Enabled=$true; Capabilities=@('Discover','Search','Match','GetDetails','ResolveDownload','Acquire','Verify'); Acquisition='AMRCatalogAcquisition'; Verification='INF/CAT/OS/architecture/hash + Driver Store staging'; Notes='Existing AMR Catalog pipeline.' },
+        [pscustomobject]@{ ProviderId='Dell.DriverPackCatalog'; DisplayName='Dell Driver Pack Catalog'; AdapterType='Dedicated'; SourceAdapter='DellDriverPackCatalog'; Enabled=$true; Capabilities=@('Discover','Search','Match','GetDetails','ResolveDownload'); Acquisition='AMRVendorAcquisition'; Verification='Pending package inspection before installability'; Notes='Signed Dell model/SystemID catalog.' },
+        [pscustomobject]@{ ProviderId='HP.ClientDriverPackCatalog'; DisplayName='HP Client Driver Pack Catalog'; AdapterType='Dedicated'; SourceAdapter='HPDriverPackCatalog'; Enabled=$true; Capabilities=@('Discover','Search','Match','GetDetails','ResolveDownload'); Acquisition='AMRVendorAcquisition'; Verification='Pending package inspection before installability'; Notes='HP Client Driver Pack / SoftPaq catalog.' },
+        [pscustomobject]@{ ProviderId='Lenovo.CDRT'; DisplayName='Lenovo CDRT'; AdapterType='Dedicated'; SourceAdapter='LenovoCDRTDriverPackCatalog'; Enabled=$true; Capabilities=@('Discover','Search','Match','GetDetails','ResolveDownload'); Acquisition='AMRVendorAcquisition'; Verification='Pending package inspection before installability'; Notes='Lenovo machine type/model catalog.' },
+        [pscustomobject]@{ ProviderId='MSI.DriverCatalog'; DisplayName='MSI Official Driver Catalog'; AdapterType='DedicatedMetadata'; SourceAdapter='MSIDriverCatalogMetadata'; Enabled=$true; Capabilities=@('Discover','Search','Match','GetDetails'); Acquisition='Official package URL only; manual download until archive verification is implemented'; Verification='MSI catalog metadata and published SHA-256 when available; package remains non-installable'; Notes='Model-specific MSI support panel endpoint; exact motherboard model required; no MSI Center automation.' },
+        [pscustomobject]@{ ProviderId='GIGABYTE.DriverCatalog'; DisplayName='GIGABYTE Official Driver Catalog'; AdapterType='DedicatedMetadata'; SourceAdapter='GigabyteDriverCatalogMetadata'; Enabled=$true; Capabilities=@('Discover','Search','Match','GetDetails'); Acquisition='Official package URL only; manual download until archive verification is implemented'; Verification='Official product tab metadata; package remains non-installable until package hash/signature and INF/CAT are checked'; Notes='Official product list and product-tab endpoints; exact board model required; query-string hash is not trusted.' },
+        [pscustomobject]@{ ProviderId='ASRock.DriverCatalog'; DisplayName='ASRock Latest Driver Catalog'; AdapterType='DedicatedMetadata'; SourceAdapter='ASRockLatestDriverCatalog'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='Official package URL only; manual download until archive verification is implemented'; Verification='Official latest-driver listing metadata; package remains non-installable until hash/signature and INF/CAT are checked'; Notes='Exact motherboard model is matched against ASRock public Latest Drivers Update rows; metadata-only adapter.' },
+        [pscustomobject]@{ ProviderId='Realtek.DriverPortal'; DisplayName='Realtek Official Download Center'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='Manual official download only; no package resolver'; Verification='Generic Realtek package may omit OEM customization; verify hardware IDs and OEM alternatives'; Notes='Official Download Center search; Realtek warns generic audio packages may lack OEM customizations.' },
+        [pscustomobject]@{ ProviderId='Broadcom.DriverPortal'; DisplayName='Broadcom Semiconductor Download Search'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='Portal/manual and entitlement-dependent'; Verification='Search result and entitlement required; no public direct package resolver'; Notes='Official keyword/product-family search; some downloads require customer portal access.' },
+        [pscustomobject]@{ ProviderId='Qualcomm.DriverPortal'; DisplayName='Qualcomm OEM Driver Guidance'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='OEM/Windows Update only; no direct package'; Verification='OEM-first; do not treat Qualcomm page as a driver catalog'; Notes='Qualcomm states most Windows component drivers are supplied by the PC OEM; Snapdragon graphics via OEM/Windows Update.' },
+        [pscustomobject]@{ ProviderId='MediaTek.DriverPortal'; DisplayName='MediaTek OEM Support Route'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='OEM-first; no public consumer driver catalog'; Verification='OEM package and exact device model required'; Notes='MediaTek component packages commonly arrive through the computer/module OEM; no unsupported direct endpoint.' },
+        [pscustomobject]@{ ProviderId='Marvell.DriverPortal'; DisplayName='Marvell Public Driver Downloads'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='User-assisted official portal; license acceptance may be required'; Verification='Part number/platform must match; download terms and OEM-specific packages must be reviewed'; Notes='Public portal searches by platform or part number and lists selected QLogic/FastLinQ products.' },
+        [pscustomobject]@{ ProviderId='SiliconLabs.DriverPortal'; DisplayName='Silicon Labs CP210x Driver Downloads'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='Official download page; no automated archive acquisition'; Verification='Only CP210x USB-to-UART devices; check architecture and package version'; Notes='Official CP210x Universal Windows Driver and legacy VCP downloads.' },
+        [pscustomobject]@{ ProviderId='FTDI.DriverPortal'; DisplayName='FTDI VCP Driver Downloads'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='Official download page; no automated archive acquisition'; Verification='FTDI packages only for FTDI-based devices; check architecture and interface type'; Notes='Official VCP page lists Windows 10/11 and Windows Server packages; no auto-install.' },
+        [pscustomobject]@{ ProviderId='WCH.DriverPortal'; DisplayName='WCH Official Downloads'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='User-assisted official download'; Verification='Exact CH34x/CH91xx controller family and OS required'; Notes='Official WCH download portal; exact USB bridge family must be confirmed.' },
+        [pscustomobject]@{ ProviderId='ASIX.DriverPortal'; DisplayName='ASIX Official Downloads'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='User-assisted official download'; Verification='Exact AX88179/AX88772 or other controller family and OS required'; Notes='Official ASIX download portal; exact USB Ethernet/serial chipset must be confirmed.' },
+        [pscustomobject]@{ ProviderId='Prolific.DriverPortal'; DisplayName='Prolific PL2303 Official Drivers'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='Official product support page; manual package selection only'; Verification='Exact PL2303 family, VID/PID, architecture and Windows release required; package remains non-installable until archive and INF/CAT verification'; Notes='Official Prolific product support pages publish Windows driver installers and distinguish chip families; legacy chip revisions may not support current Windows.' },
+        [pscustomobject]@{ ProviderId='CMedia.DriverPortal'; DisplayName='C-Media Official Support'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='User-assisted official/OEM support route'; Verification='Exact USB audio or codec model and OEM customization required; no public direct package resolver'; Notes='C-Media audio drivers may be customized by motherboard, headset or computer OEM; do not infer a package from vendor identity alone.' },
+        [pscustomobject]@{ ProviderId='Infineon.DriverPortal'; DisplayName='Infineon / Cypress Official Support'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='Official product support route; no automated archive acquisition'; Verification='Exact Infineon/Cypress controller family and product generation required; OEM package may be necessary'; Notes='Cypress legacy USB controller IDs can identify silicon vendor but do not establish a Windows driver match.' },
+        [pscustomobject]@{ ProviderId='Synaptics.DriverPortal'; DisplayName='Synaptics Touch and Input Support'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='OEM-first; no generic direct package'; Verification='Touchpad/fingerprint packages are commonly customized and supported by the notebook OEM'; Notes='Synaptics explicitly directs touchpad users to their notebook OEM for the correct customized driver.' },
+        [pscustomobject]@{ ProviderId='Goodix.DriverPortal'; DisplayName='Goodix Official Support'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='OEM-first; no public consumer package resolver'; Verification='Exact fingerprint/touch controller and system model required; use OEM package'; Notes='Goodix hardware identity is a lead only; fingerprint and touch drivers are commonly integrated into OEM platform packages.' },
+        [pscustomobject]@{ ProviderId='ELAN.DriverPortal'; DisplayName='ELAN Microelectronics Support'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='OEM-first; no automated package acquisition'; Verification='Exact touchpad/controller model and OEM customization required'; Notes='ELAN touchpad packages are often customized for the notebook model; use the computer OEM source first.' },
+        [pscustomobject]@{ ProviderId='GenesysLogic.DriverPortal'; DisplayName='Genesys Logic Official Support'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='OEM-first; user-assisted official support route'; Verification='Exact USB hub/card-reader controller and OEM platform package required'; Notes='Genesys Logic USB hub and card-reader drivers are commonly distributed by the system or peripheral OEM.' },
+        [pscustomobject]@{ ProviderId='ASMedia.DriverPortal'; DisplayName='ASMedia Official Support'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='Motherboard/OEM-first; no automated package acquisition'; Verification='Exact ASM controller model, board revision and OS required'; Notes='ASMedia USB/SATA controller drivers may be bundled or customized by the motherboard OEM.' },
+        [pscustomobject]@{ ProviderId='Logitech.DriverPortal'; DisplayName='Logitech / Logi Official Support'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='Exact-product support portal; no generic package acquisition'; Verification='Exact model/part number and Windows version required; Logitech Options+ / G HUB utilities are not automatically classified as device drivers'; Notes='Logitech support provides model-based downloads; distinguish companion software, firmware and actual device drivers.' },
+        [pscustomobject]@{ ProviderId='SteelSeries.DriverPortal'; DisplayName='SteelSeries Official Support'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='SteelSeries GG / exact-product support route; no generic package acquisition'; Verification='Exact device model and Windows version required; companion software is not assumed to be a driver'; Notes='Use official SteelSeries support and distinguish GG software from a signed device driver package.' },
+        [pscustomobject]@{ ProviderId='Corsair.DriverPortal'; DisplayName='CORSAIR Official Drivers and Software'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='Product-filtered official downloads; no automatic package acquisition'; Verification='Exact product model and supported device generation required; iCUE is companion software unless a specific driver package is identified'; Notes='CORSAIR publishes product-filtered drivers/software and iCUE; never treat iCUE itself as a device driver.' },
+        [pscustomobject]@{ ProviderId='Elgato.DriverPortal'; DisplayName='Elgato Official Downloads and Hardware Drivers'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='Manual official product-specific driver route'; Verification='Exact capture-device model and Windows version required; UVC devices should use inbox Windows drivers where specified'; Notes='Elgato publishes a hardware-driver matrix; some UVC devices need no separate driver, while selected legacy capture devices have manual packages.' },
+        [pscustomobject]@{ ProviderId='AVerMedia.DriverPortal'; DisplayName='AVerMedia Official Downloads'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='Product-filtered official downloads; manual package selection'; Verification='Exact capture/tuner model, hardware revision and Windows version required'; Notes='AVerMedia provides a product download catalog containing separate driver, firmware and application categories; do not confuse these package types.' },
+        [pscustomobject]@{ ProviderId='Razer.DriverPortal'; DisplayName='Razer Official Support'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='Exact-product support portal; no generic package acquisition'; Verification='Exact peripheral or Blade model and Windows version required; Synapse is companion software, not a universal device driver'; Notes='Use Razer model-specific support and keep Synapse/firmware distinct from driver packages.' },
+        [pscustomobject]@{ ProviderId='Acer.DriverPortal'; DisplayName='Acer Drivers and Manuals'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='Model/SNID-selected official portal; manual package selection'; Verification='Exact SNID, serial or model plus OS required; vendor-specific WLAN/audio variants must match the installed hardware'; Notes='Acer support exposes model-specific Drivers tabs and warns that the same device class may use different component vendors.' },
+        [pscustomobject]@{ ProviderId='Fujitsu.DriverPortal'; DisplayName='Fujitsu / Fsas Product Downloads'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='Exact product-selected portal or DeskUpdate; no unattended installer'; Verification='Exact regional product code and OS required; DeskUpdate is a utility, not itself a driver package'; Notes='Official product support lists drivers, BIOS and software for Fujitsu systems; select the exact product before considering a package.' },
+        [pscustomobject]@{ ProviderId='Panasonic.DriverPortal'; DisplayName='Panasonic TOUGHBOOK Drivers'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='Exact CF/FZ model page; manual package selection'; Verification='Exact model generation, regional variant and OS required; distinguish driver, BIOS, EC and firmware'; Notes='Official TOUGHBOOK driver pages are organized by CF/FZ product families; firmware is not classified as a driver.' },
+        [pscustomobject]@{ ProviderId='Dynabook.DriverPortal'; DisplayName='Dynabook Drivers and Software'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='Model/serial-selected official portal; manual package selection'; Verification='Exact Dynabook/Toshiba model and OS required; older Toshiba model support may differ by region'; Notes='Official support portal provides model-filtered drivers, software patches and updates.' },
+        [pscustomobject]@{ ProviderId='Huawei.DriverPortal'; DisplayName='HUAWEI PC Driver List'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='PC Manager recommended; serial-selected driver list where available'; Verification='Exact serial/model and region required; no result is not evidence that no driver exists'; Notes='Huawei recommends PC Manager and exposes a serial-number-based driver list; avoid guessing direct package URLs.' },
+        [pscustomobject]@{ ProviderId='MicrosoftSurface.DriverPortal'; DisplayName='Microsoft Surface Drivers and Firmware'; AdapterType='SpecializedPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='Model/OS-specific Microsoft Download Center MSI; manual acquisition pending AMR package verification'; Verification='Exact Surface model and Windows build/architecture required; MSI bundles can contain multiple drivers and firmware; inspect contents before installability'; Notes='Microsoft publishes model-specific Surface MSI bundles and recommends Windows Update for routine updates; bundle is not treated as an individual INF driver.' },
+        [pscustomobject]@{ ProviderId='Intel.DriverPortal'; DisplayName='Intel Official Driver Portal'; AdapterType='OfficialPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='None - user-assisted official portal'; Verification='No package resolved; exact model and OS must be confirmed on Intel'; Notes='Intel does not expose a documented public driver-catalog API for this adapter; links to Intel Download Center and DSA.' },
+        [pscustomobject]@{ ProviderId='NVIDIA.DriverPortal'; DisplayName='NVIDIA Official Driver Portal'; AdapterType='OfficialPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='None - user-assisted official portal'; Verification='No package resolved; exact GPU, OS, driver branch and notebook/desktop variant must be confirmed on NVIDIA'; Notes='NVIDIA driver search is provided as an official portal route; no unsupported private API is called.' },
+        [pscustomobject]@{ ProviderId='AMD.DriverPortal'; DisplayName='AMD Official Driver Portal'; AdapterType='OfficialPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true; Capabilities=@('Discover','Search','GetDetails'); Acquisition='None - user-assisted official portal'; Verification='No package resolved; exact product and OS must be confirmed on AMD'; Notes='AMD Product Selector and Auto-Detect documentation; portal route only.' },
+        [pscustomobject]@{ ProviderId='Generic.JSON'; DisplayName='Generic JSON Catalog Template'; AdapterType='Generic'; SourceAdapter='AMRGenericJSONCatalog'; Enabled=$false; Capabilities=@(); Acquisition='Not configured'; Verification='Metadata only until a provider is registered'; Notes='Template only; register a validated provider definition before use.' },
+        [pscustomobject]@{ ProviderId='Generic.XML'; DisplayName='Generic XML Catalog Template'; AdapterType='Generic'; SourceAdapter='AMRGenericXMLCatalog'; Enabled=$false; Capabilities=@(); Acquisition='Not configured'; Verification='Metadata only until a provider is registered'; Notes='Template only; register a validated provider definition before use.' }
+    )
+    # Register every known OEM/component/peripheral/ODM/system-integrator portal as a
+    # first-class source in the same Local Vendor API. Portal sources are discovery leads,
+    # never package candidates and never installable. Dedicated catalog providers above
+    # retain their stronger capabilities and are not duplicated here.
+    $dedicatedIds=@('Microsoft.WindowsUpdate','Microsoft.UpdateCatalog','Dell.DriverPackCatalog','HP.ClientDriverPackCatalog','Lenovo.CDRT','MSI.DriverCatalog','GIGABYTE.DriverCatalog','ASRock.DriverCatalog','Realtek.DriverPortal','Broadcom.DriverPortal','Qualcomm.DriverPortal','MediaTek.DriverPortal','Marvell.DriverPortal','SiliconLabs.DriverPortal','FTDI.DriverPortal','WCH.DriverPortal','ASIX.DriverPortal','Prolific.DriverPortal','CMedia.DriverPortal','Infineon.DriverPortal','Synaptics.DriverPortal','Goodix.DriverPortal','ELAN.DriverPortal','GenesysLogic.DriverPortal','ASMedia.DriverPortal','Logitech.DriverPortal','SteelSeries.DriverPortal','Corsair.DriverPortal','Elgato.DriverPortal','AVerMedia.DriverPortal','Razer.DriverPortal','Acer.DriverPortal','Fujitsu.DriverPortal','Panasonic.DriverPortal','Dynabook.DriverPortal','Huawei.DriverPortal','MicrosoftSurface.DriverPortal','Intel.DriverPortal','NVIDIA.DriverPortal','AMD.DriverPortal','Generic.JSON','Generic.XML')
+    foreach($vendorEntry in @(Get-AMRDriverVendorRegistry)) {
+        $portalId=Get-AMRVendorPortalProviderId -Vendor ([string]$vendorEntry.Vendor)
+        if($portalId -in $dedicatedIds) { continue }
+        if(@($providers | Where-Object {$_.ProviderId -eq $portalId}).Count -gt 0) { continue }
+        $providers += [pscustomobject]@{
+            ProviderId=$portalId; DisplayName=([string]$vendorEntry.Vendor+' Official Support Portal')
+            AdapterType='OfficialPortal'; SourceAdapter='OfficialVendorPortal'; Enabled=$true
+            Capabilities=@('Discover','Search','GetDetails')
+            Acquisition='None - user-assisted official support portal'
+            Verification='Portal lead only; no package/version/INF/CAT/signature has been resolved'
+            Notes=([string]$vendorEntry.Role+' | '+[string]$vendorEntry.Note)
+        }
+    }
+    # Append validated user-defined providers from the local manifest; never execute provider code.
+    try {
+        $manifest=Get-AMRLocalVendorProviderManifest
+        foreach($provider in @($manifest.providers)) {
+            $validation=Test-AMRLocalVendorProviderDefinition -Provider $provider
+            if(-not $validation.IsValid){continue}
+            $providers += [pscustomobject]@{
+                ProviderId=[string]$provider.id;DisplayName=[string]$provider.name;AdapterType=('Generic'+[string]$provider.type)
+                SourceAdapter=$(if([string]$provider.type -eq 'JSON'){'AMRGenericJSONCatalog'}else{'AMRGenericXMLCatalog'})
+                Enabled=[bool]$provider.enabled;Capabilities=@('Discover','Search','GetDetails')
+                Acquisition='Shared AMR acquisition only after explicit package resolver and verification';Verification='Metadata only until package is independently acquired and verified'
+                Notes='Validated local manifest provider; no arbitrary code execution.'
+            }
+        }
+    } catch { }
+    return @($providers)
+}
+
+function Get-AMRLocalVendorAdapterCapabilities {
+    [CmdletBinding()]
+    param([string]$ProviderId='')
+    $registry=@(Get-AMRLocalVendorAdapterRegistry)
+    if(-not [string]::IsNullOrWhiteSpace($ProviderId)) { return @($registry | Where-Object { $_.ProviderId -eq $ProviderId }) }
+    return $registry
+}
+
+function ConvertTo-AMRLocalVendorCandidate {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][object]$Candidate,[string]$ProviderId='')
+    $item=$Candidate | Select-Object *
+    $defaults=@{
+        ProviderId=$ProviderId; SourceAdapter=''; Source=''; Manufacturer=''; Model=''; Title=''; Version='Not supplied'; DriverDate='Not supplied'
+        MatchConfidence='Not assessed'; MatchReason='No device-match evidence supplied.'; SearchTerms=''; PackageUrl=''; Url=''; ExpectedHash=''; HashAlgorithm=''
+        IsDownloaded=$false; IsInstallable=$false; IsDownloadable=$false; VerificationState='Not verified'; Capabilities=@(); ProviderMetadata=$null
+    }
+    foreach($key in $defaults.Keys) { if(-not $item.PSObject.Properties[$key]) { $item | Add-Member -NotePropertyName $key -NotePropertyValue $defaults[$key] -Force } }
+    if($ProviderId -and -not $item.ProviderId) { $item.ProviderId=$ProviderId }
+    # Metadata-only candidates cannot silently become installable through normalization.
+    if([string]$item.SourceAdapter -in @('OfficialVendorPortal','AMRGenericJSONCatalog','AMRGenericXMLCatalog')) { $item.IsInstallable=$false }
+    return $item
+}
+
+function Get-AMRLocalManifestValue {
+    param([object]$InputObject,[string]$Path)
+    $value=$InputObject
+    foreach($segment in @($Path -split '\.' | Where-Object { $_ })) {
+        if($null -eq $value) { return $null }
+        if($value -is [System.Collections.IDictionary]) { $value=$value[$segment] }
+        else { $property=$value.PSObject.Properties[$segment]; if($property) { $value=$property.Value } else { return $null } }
+    }
+    return $value
+}
+
+
+# Phase 6.9 completion: provider manifest lifecycle and strict generic adapter contract.
+function Get-AMRLocalVendorManifestPath {
+    $driverRoot=Join-Path $script:DownloadDir 'Drivers'
+    $adapterRoot=Join-Path $driverRoot '_VendorAdapters'
+    if(-not (Test-Path -LiteralPath $adapterRoot -PathType Container)){New-Item -ItemType Directory -Path $adapterRoot -Force -ErrorAction Stop | Out-Null}
+    return (Join-Path $adapterRoot 'providers.json')
+}
+
+function Test-AMRLocalVendorProviderDefinition {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][object]$Provider)
+    $errors=New-Object 'System.Collections.Generic.List[string]'
+    $id=[string]$Provider.id; $name=[string]$Provider.name; $type=[string]$Provider.type; $endpoint=[string]$Provider.searchUrl
+    if($id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{2,79}$'){$errors.Add('Provider id must be 3-80 safe characters (letters, numbers, dot, underscore or hyphen).')}
+    if($id -in @('Microsoft.WindowsUpdate','Microsoft.UpdateCatalog','Dell.DriverPackCatalog','HP.ClientDriverPackCatalog','Lenovo.CDRT','MSI.DriverCatalog','GIGABYTE.DriverCatalog','ASRock.DriverCatalog','Realtek.DriverPortal','Broadcom.DriverPortal','Qualcomm.DriverPortal','MediaTek.DriverPortal','Marvell.DriverPortal','SiliconLabs.DriverPortal','FTDI.DriverPortal','WCH.DriverPortal','ASIX.DriverPortal','Prolific.DriverPortal','CMedia.DriverPortal','Infineon.DriverPortal','Synaptics.DriverPortal','Goodix.DriverPortal','ELAN.DriverPortal','GenesysLogic.DriverPortal','ASMedia.DriverPortal','Logitech.DriverPortal','SteelSeries.DriverPortal','Corsair.DriverPortal','Elgato.DriverPortal','AVerMedia.DriverPortal','Razer.DriverPortal','Acer.DriverPortal','Fujitsu.DriverPortal','Panasonic.DriverPortal','Dynabook.DriverPortal','Huawei.DriverPortal','MicrosoftSurface.DriverPortal','Intel.DriverPortal','NVIDIA.DriverPortal','AMD.DriverPortal','Generic.JSON','Generic.XML') -or $id -match '^Vendor\..+\.OfficialPortal$'){$errors.Add('Provider id is reserved by a built-in AMR adapter or generated official-vendor portal.')}
+    if([string]::IsNullOrWhiteSpace($name) -or $name.Length -gt 120){$errors.Add('Provider name is required and must be at most 120 characters.')}
+    if($type -notin @('JSON','XML')){$errors.Add('Only JSON and XML catalog adapters are supported by the generic engine.')}
+    $uri=$null
+    if(-not [uri]::TryCreate($endpoint,[UriKind]::Absolute,[ref]$uri) -or $null -eq $uri -or $uri.Scheme -ne 'https'){$errors.Add('Search URL must be an absolute HTTPS URL.')}
+    $hosts=@($Provider.allowedHosts | ForEach-Object {([string]$_).Trim().ToLowerInvariant()} | Where-Object {$_})
+    if($hosts.Count -eq 0){$errors.Add('At least one exact allowed host is required.')}
+    foreach($host in $hosts){if($host -notmatch '^(?=.{1,253}$)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$' -or $host.Contains('..') -or $host.StartsWith('.') -or $host.EndsWith('.')){$errors.Add(('Invalid allowed host: '+$host))}}
+    if($uri -and $uri.Host.ToLowerInvariant() -notin $hosts){$errors.Add('Search URL host must be included in allowedHosts.')}
+    if([string]$Provider.itemsPath -notmatch '^[A-Za-z0-9_.$\[\]-]{1,200}$'){$errors.Add('itemsPath is missing or contains unsupported path syntax.')}
+    foreach($field in @('title','version','downloadUrl','model','date','hash')){
+        $path=[string]$Provider.fields.$field
+        if($field -eq 'title' -and [string]::IsNullOrWhiteSpace($path)){$errors.Add('fields.title is required.')}
+        if($path -and $path -notmatch '^[A-Za-z0-9_.$\[\]-]{1,200}$'){$errors.Add(('Invalid field path: '+$field))}
+    }
+    if([string]$Provider.hashAlgorithm -and [string]$Provider.hashAlgorithm -notin @('SHA256','SHA384','SHA512','MD5')){$errors.Add('hashAlgorithm must be SHA256, SHA384, SHA512 or MD5.')}
+    return [pscustomobject]@{IsValid=($errors.Count -eq 0);Errors=@($errors.ToArray());ProviderId=$id;ProviderType=$type;AllowedHosts=@($hosts | Select-Object -Unique)}
+}
+
+function Get-AMRLocalVendorProviderManifest {
+    [CmdletBinding()]
+    param()
+    $path=Get-AMRLocalVendorManifestPath
+    if(-not (Test-Path -LiteralPath $path -PathType Leaf)){return [pscustomobject]@{schemaVersion=1;providers=@()}}
+    try{$data=Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop}catch{throw ('Vendor provider manifest is invalid JSON: '+$_.Exception.Message)}
+    if([int]$data.schemaVersion -ne 1){throw 'Unsupported vendor provider manifest schemaVersion.'}
+    if($null -eq $data.providers){$data.providers=@()}
+    return $data
+}
+
+function Save-AMRLocalVendorProviderManifest {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][object]$Manifest)
+    $path=Get-AMRLocalVendorManifestPath
+    $ids=@{}
+    foreach($provider in @($Manifest.providers)){
+        $check=Test-AMRLocalVendorProviderDefinition -Provider $provider
+        if(-not $check.IsValid){throw ('Provider '+[string]$provider.id+' rejected: '+($check.Errors -join ' '))}
+        $key=$check.ProviderId.ToLowerInvariant();if($ids.ContainsKey($key)){throw ('Duplicate provider id: '+$check.ProviderId)};$ids[$key]=$true
+    }
+    $temp=$path+'.tmp'
+    try{$Manifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $temp -Encoding UTF8 -ErrorAction Stop;Move-Item -LiteralPath $temp -Destination $path -Force -ErrorAction Stop}catch{Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue;throw}
+    return $path
+}
+
+function Register-AMRLocalVendorProvider {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][object]$Provider)
+    $check=Test-AMRLocalVendorProviderDefinition -Provider $Provider
+    if(-not $check.IsValid){throw ('Provider definition validation failed: '+($check.Errors -join ' '))}
+    $manifest=Get-AMRLocalVendorProviderManifest
+    $existing=@($manifest.providers | Where-Object {[string]$_.id -ne [string]$Provider.id})
+    $manifest.providers=@($existing)+@($Provider)
+    Save-AMRLocalVendorProviderManifest -Manifest $manifest | Out-Null
+    return [pscustomobject]@{ProviderId=[string]$Provider.id;Registered=$true;Enabled=[bool]$Provider.enabled;Validation=$check}
+}
+
+function Set-AMRLocalVendorProviderEnabled {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][string]$ProviderId,[Parameter(Mandatory=$true)][bool]$Enabled)
+    $manifest=Get-AMRLocalVendorProviderManifest;$found=$false
+    foreach($provider in @($manifest.providers)){if([string]$provider.id -eq $ProviderId){$provider.enabled=$Enabled;$found=$true}}
+    if(-not $found){throw ('Provider not found: '+$ProviderId)}
+    Save-AMRLocalVendorProviderManifest -Manifest $manifest | Out-Null
+    return [pscustomobject]@{ProviderId=$ProviderId;Enabled=$Enabled}
+}
+
+function Get-AMRGenericVendorManifestCandidates {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][object]$Device,[string]$ProviderId='')
+    $results=New-Object 'System.Collections.Generic.List[object]'
+    $errors=New-Object 'System.Collections.Generic.List[string]'
+    try{$manifest=Get-AMRLocalVendorProviderManifest}catch{return [pscustomobject]@{Results=@();Errors=@($_.Exception.Message)}}
+    foreach($provider in @($manifest.providers)) {
+        try {
+            if(-not [bool]$provider.enabled -or ($ProviderId -and [string]$provider.id -ne $ProviderId)){continue}
+            $validation=Test-AMRLocalVendorProviderDefinition -Provider $provider
+            if(-not $validation.IsValid){$errors.Add(([string]$provider.id+': '+($validation.Errors -join '; ')));continue}
+            $allowed=@($validation.AllowedHosts)
+            $endpoint=[string]$provider.searchUrl
+            $hardware=@($Device.HardwareIds | Select-Object -First 5)
+            $compatible=@($Device.CompatibleIds | Select-Object -First 2)
+            $queryParts=@([string]$Device.DeviceName)+$hardware+$compatible
+            $query=([uri]::EscapeDataString((@($queryParts | Where-Object {$_}) -join ' ')))
+            $requestUrl=$endpoint.Replace('{query}',$query).Replace('{model}',[uri]::EscapeDataString([string]$Device.DeviceName))
+            if($requestUrl -match '\{[^}]+\}'){$errors.Add(([string]$provider.id+': unsupported URL template token.'));continue}
+            $requestUri=[uri]$requestUrl
+            if($requestUri.Scheme -ne 'https' -or $requestUri.Host.ToLowerInvariant() -notin $allowed){$errors.Add(([string]$provider.id+': request URL failed host validation.'));continue}
+            $response=Invoke-WebRequest -Uri $requestUri.AbsoluteUri -UseBasicParsing -TimeoutSec 25 -MaximumRedirection 5 -ErrorAction Stop
+            $finalUri=$requestUri
+            try{if($response.BaseResponse -and $response.BaseResponse.ResponseUri){$finalUri=[uri]$response.BaseResponse.ResponseUri}}catch{}
+            if($finalUri.Scheme -ne 'https' -or $finalUri.Host.ToLowerInvariant() -notin $allowed){throw 'Redirect destination is not in the provider allowed-host list.'}
+            if([string]$provider.type -eq 'JSON'){$payload=$response.Content | ConvertFrom-Json -ErrorAction Stop}else{[xml]$payload=$response.Content}
+            $rows=Get-AMRLocalManifestValue -InputObject $payload -Path ([string]$provider.itemsPath)
+            $rowCount=0
+            foreach($row in @($rows)) {
+                if($rowCount -ge 100){break};$rowCount++
+                $title=[string](Get-AMRLocalManifestValue $row ([string]$provider.fields.title))
+                if([string]::IsNullOrWhiteSpace($title)){continue}
+                $version=[string](Get-AMRLocalManifestValue $row ([string]$provider.fields.version))
+                $downloadValue=[string](Get-AMRLocalManifestValue $row ([string]$provider.fields.downloadUrl))
+                $resolved=''
+                if($downloadValue){try{$resolved=([uri]::new($finalUri,$downloadValue)).AbsoluteUri}catch{}}
+                if($resolved){$downloadUri=[uri]$resolved;if($downloadUri.Scheme -ne 'https' -or $downloadUri.Host.ToLowerInvariant() -notin $allowed){$resolved=''}}
+                $modelValue=[string](Get-AMRLocalManifestValue $row ([string]$provider.fields.model))
+                $hashValue=[string](Get-AMRLocalManifestValue $row ([string]$provider.fields.hash))
+                $results.Add([pscustomobject]@{
+                    ProviderId=[string]$provider.id;Title=$title;Name=$title;Source=[string]$provider.name;Manufacturer=[string]$provider.name
+                    Model=$modelValue;Version=$(if($version){$version}else{'Not supplied'})
+                    DriverDate=[string](Get-AMRLocalManifestValue $row ([string]$provider.fields.date));PackageUrl=$resolved;Url=$resolved
+                    SourceAdapter=$(if([string]$provider.type -eq 'JSON'){'AMRGenericJSONCatalog'}else{'AMRGenericXMLCatalog'})
+                    MatchConfidence='Unverified catalog metadata';MatchReason='Generic provider metadata only; package contents, exact INF Hardware ID, OS compatibility and signature must be verified by the shared AMR acquisition pipeline.'
+                    SearchTerms=([uri]::UnescapeDataString($query));IsDownloaded=$false;IsInstallable=$false;IsDownloadable=[bool]$resolved
+                    VerificationState='Metadata only – not verified for installation';ExpectedHash=$hashValue;HashAlgorithm=[string]$provider.hashAlgorithm
+                    Capabilities=@('Discover','Search','GetDetails');ProviderMetadata=[pscustomobject]@{ProviderId=[string]$provider.id;CatalogType=[string]$provider.type;AllowedHosts=$allowed;ExpectedHash=$hashValue}
+                })
+            }
+        } catch {$errors.Add(([string]$provider.id+': '+[string]$_.Exception.Message))}
+    }
+    return [pscustomobject]@{Results=@($results.ToArray());Errors=@($errors.ToArray())}
+}
+
+# --- Phase 6.10.1 | Full OEM + component + peripheral + system-integrator portal coverage ---
+function Get-AMRAllVendorSupportPortalCandidates {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][object]$Device,[object]$OEMProfile,[string]$ProviderId='')
+    $results=New-Object 'System.Collections.Generic.List[object]'
+    $errors=New-Object 'System.Collections.Generic.List[string]'
+    $targets=New-Object 'System.Collections.Generic.List[object]'
+    $deviceName='';$manufacturer='';$hardwareSummary='';$evidence=''
+    try { if($Device.PSObject.Properties['DeviceName']){$deviceName=[string]$Device.DeviceName} } catch {}
+    try { if($Device.PSObject.Properties['Manufacturer']){$manufacturer=[string]$Device.Manufacturer} } catch {}
+    try { if($Device.PSObject.Properties['HardwareIdSummary']){$hardwareSummary=[string]$Device.HardwareIdSummary} } catch {}
+
+    # Explicit USB/PCI vendor-ID fallbacks for chip vendors whose friendly PnP
+    # manufacturer strings are frequently missing, generic, or OEM-branded.
+    # These IDs identify a silicon/bridge vendor only; they do not prove package compatibility.
+    $rawIds=@(@($Device.HardwareIds)+@($Device.CompatibleIds) | ForEach-Object {[string]$_} | Where-Object {$_})
+    $idVendorRules=@(
+        [pscustomobject]@{Pattern='(?i)(?:USB\\VID_10EC|PCI\\VEN_10EC)';Vendor='Realtek'},
+        [pscustomobject]@{Pattern='(?i)(?:USB\\VID_0BDA|PCI\\VEN_10EC)';Vendor='Realtek'},
+        [pscustomobject]@{Pattern='(?i)(?:USB\\VID_0A5C|PCI\\VEN_14E4)';Vendor='Broadcom'},
+        [pscustomobject]@{Pattern='(?i)(?:USB\\VID_0E8D|PCI\\VEN_14C3)';Vendor='MediaTek'},
+        [pscustomobject]@{Pattern='(?i)(?:USB\\VID_05C6|PCI\\VEN_17CB|PCI\\VEN_168C)';Vendor='Qualcomm'},
+        [pscustomobject]@{Pattern='(?i)(?:PCI\\VEN_11AB|PCI\\VEN_1B4B)';Vendor='Marvell'},
+        [pscustomobject]@{Pattern='(?i)USB\\VID_10C4';Vendor='Silicon Labs'},
+        [pscustomobject]@{Pattern='(?i)USB\\VID_0403';Vendor='FTDI'},
+        [pscustomobject]@{Pattern='(?i)USB\\VID_1A86';Vendor='WCH'},
+        [pscustomobject]@{Pattern='(?i)USB\\VID_0B95';Vendor='ASIX'},
+        [pscustomobject]@{Pattern='(?i)USB\\VID_067B';Vendor='Prolific'},
+        [pscustomobject]@{Pattern='(?i)USB\\VID_0D8C';Vendor='C-Media'},
+        [pscustomobject]@{Pattern='(?i)USB\\VID_04B4';Vendor='Infineon'},
+        [pscustomobject]@{Pattern='(?i)(?:USB\\VID_06CB|PCI\\VEN_06CB)';Vendor='Synaptics'},
+        [pscustomobject]@{Pattern='(?i)USB\\VID_27C6';Vendor='Goodix'},
+        [pscustomobject]@{Pattern='(?i)(?:USB\\VID_04F3|ACPI\\ELAN)';Vendor='ELAN'},
+        [pscustomobject]@{Pattern='(?i)USB\\VID_05E3';Vendor='Genesys Logic'},
+        [pscustomobject]@{Pattern='(?i)PCI\\VEN_1B21';Vendor='ASMedia'},
+        [pscustomobject]@{Pattern='(?i)USB\\VID_046D';Vendor='Logitech'},
+        [pscustomobject]@{Pattern='(?i)USB\\VID_1038';Vendor='SteelSeries'},
+        [pscustomobject]@{Pattern='(?i)USB\\VID_1B1C';Vendor='Corsair'},
+        [pscustomobject]@{Pattern='(?i)USB\\VID_0FD9';Vendor='Elgato'},
+        [pscustomobject]@{Pattern='(?i)(?:USB\\VID_07CA|PCI\\VEN_1461)';Vendor='AverMedia'},
+        [pscustomobject]@{Pattern='(?i)USB\\VID_1532';Vendor='Razer'}
+    )
+    foreach($rule in $idVendorRules) {
+        $matchedId=$rawIds | Where-Object {$_ -match $rule.Pattern} | Select-Object -First 1
+        if($matchedId) {
+            $idEntry=Resolve-AMRDriverVendorName -Text ([string]$rule.Vendor)
+            if($idEntry) {
+                $targets.Add([pscustomobject]@{
+                    Entry=$idEntry;Evidence=('Explicit hardware vendor ID '+$matchedId+' maps to '+$rule.Vendor+'; vendor identity only, not package compatibility')
+                    Model=$deviceName;Kind='Hardware ID vendor fallback'
+                })
+            }
+        }
+    }
+
+    # Chip / controller vendor from PCI, USB, HDAUDIO, ACPI or PnP evidence.
+    try {
+        $coverage=Get-AMRDriverHardwareCoverage -Device $Device
+        if($coverage -and $coverage.HardwareVendorName) {
+            $coverageVendor=[string]$coverage.HardwareVendorName
+            # A Microsoft USB peripheral is not evidence that the host is a Surface PC.
+            if($coverageVendor -match '(?i)^Microsoft$' -and $deviceName -notmatch '(?i)Surface') { $coverageVendor='' }
+            $entry=if($coverageVendor){Resolve-AMRDriverVendorName -Text $coverageVendor}else{$null}
+            if($entry) {
+                $evidence='Hardware ID: '+[string]$coverage.HardwareVendorEvidence+' ('+[string]$coverage.HardwareVendorEvidenceLevel+')'
+                $targets.Add([pscustomobject]@{Entry=$entry;Evidence=$evidence;Model=$deviceName;Kind='Component'})
+            }
+            # A SUBSYS vendor may identify the board/ODM partner (e.g. GPU board maker)
+            # independently from the silicon vendor in PCI VEN_. Keep it as secondary evidence.
+            if($coverage.SubsystemVendorName -and [string]$coverage.SubsystemVendorName -ne $coverageVendor) {
+                $partner=Resolve-AMRDriverVendorName -Text ([string]$coverage.SubsystemVendorName)
+                if($partner) {
+                    $partnerEvidence='PCI subsystem partner ID (secondary evidence; silicon vendor remains primary)'
+                    $targets.Add([pscustomobject]@{Entry=$partner;Evidence=$partnerEvidence;Model=$deviceName;Kind='Subsystem partner'})
+                }
+            }
+        }
+    } catch { $errors.Add('Hardware-vendor routing: '+[string]$_.Exception.Message) }
+
+    # Exact computer maker/model and board maker/model are independent sources.
+    if($OEMProfile) {
+        try {
+            $oemText=[string]$OEMProfile.OEMVendor
+            if(-not $oemText){$oemText=[string]$OEMProfile.ComputerManufacturer}
+            if($oemText) {
+                # The Surface portal is selected only when SMBIOS product identity supports it.
+                if($oemText -match '(?i)Microsoft' -and ([string]$OEMProfile.ComputerModel+' '+[string]$OEMProfile.ProductName) -notmatch '(?i)Surface') { $oemText='' }
+                $entry=if($oemText){Resolve-AMRDriverVendorName -Text $oemText -Role 'OEM'}else{$null}
+                if(-not $entry){$entry=Resolve-AMRDriverVendorName -Text $oemText}
+                if($entry) {
+                    $model=[string]$OEMProfile.ComputerModel
+                    if(-not $model){$model=[string]$OEMProfile.ProductName}
+                    $targets.Add([pscustomobject]@{Entry=$entry;Evidence=('System manufacturer/model identity: '+$oemText+'; '+[string]$OEMProfile.Confidence);Model=$model;Kind='OEM'})
+                }
+            }
+        } catch { $errors.Add('OEM portal routing: '+[string]$_.Exception.Message) }
+        try {
+            $boardText=[string]$OEMProfile.BoardVendor
+            if(-not $boardText){$boardText=[string]$OEMProfile.BoardManufacturer}
+            if($boardText) {
+                $entry=Resolve-AMRDriverVendorName -Text $boardText -Role 'Motherboard'
+                if(-not $entry){$entry=Resolve-AMRDriverVendorName -Text $boardText}
+                if($entry) {
+                    $boardModel=[string]$OEMProfile.BoardProduct
+                    $targets.Add([pscustomobject]@{Entry=$entry;Evidence=('Motherboard manufacturer/model: '+$boardText);Model=$boardModel;Kind='Motherboard'})
+                }
+            }
+        } catch { $errors.Add('Motherboard portal routing: '+[string]$_.Exception.Message) }
+        # Preserve multiple board vendors from an inventory (multi-board/workstation cases).
+        foreach($boardMatch in @($OEMProfile.BoardVendorMatches)) {
+            try {
+                $entry=Resolve-AMRDriverVendorName -Text ([string]$boardMatch.Vendor) -Role 'Motherboard'
+                if(-not $entry){$entry=Resolve-AMRDriverVendorName -Text ([string]$boardMatch.Vendor)}
+                if($entry){$targets.Add([pscustomobject]@{Entry=$entry;Evidence=('Board inventory: '+[string]$boardMatch.InventoryText);Model=[string]$boardMatch.InventoryText;Kind='Motherboard / inventory'})}
+            } catch {}
+        }
+    }
+
+    # PnP manufacturer is supporting evidence only; never let it replace stronger IDs.
+    if($manufacturer) {
+        try {
+            $manufacturerText=$manufacturer
+            if($manufacturerText -match '(?i)Microsoft' -and $deviceName -notmatch '(?i)Surface'){$manufacturerText=''}
+            $entry=if($manufacturerText){Resolve-AMRDriverVendorName -Text $manufacturerText}else{$null}
+            if($entry){$targets.Add([pscustomobject]@{Entry=$entry;Evidence='PnP manufacturer string (supporting evidence only)';Model=$deviceName;Kind='PnP'})}
+        } catch {}
+    }
+
+    $seen=@{}
+    foreach($target in $targets) {
+        if(-not $target.Entry){continue}
+        $entry=$target.Entry
+        $vendor=[string]$entry.Vendor
+        $id=Get-AMRVendorPortalProviderId -Vendor $vendor
+        if($ProviderId -and $ProviderId -ne $id){continue}
+        $dedupeKey=($id+'|'+[string]$target.Kind+'|'+[string]$target.Model)
+        if($seen.ContainsKey($dedupeKey)){continue}
+        $seen[$dedupeKey]=$true
+        $url=[string]$entry.Url
+        $uri=$null
+        if(-not [uri]::TryCreate($url,[UriKind]::Absolute,[ref]$uri) -or $null -eq $uri -or $uri.Scheme -ne 'https') {
+            $errors.Add(('Skipped '+$vendor+': registry URL is not a valid HTTPS support portal.'))
+            continue
+        }
+        $searchTerms=(@($target.Model,$deviceName,$hardwareSummary) | Where-Object {$_}) -join ' '
+        $results.Add([pscustomobject]@{
+            CandidateId=('PORTAL-'+($vendor -replace '[^A-Za-z0-9]','')+'-'+([guid]::NewGuid().ToString('N').Substring(0,8)))
+            ProviderId=$id;Title=($vendor+' Official Support Portal');Name=($vendor+' Official Support Portal')
+            Source=($vendor+' official support website');Manufacturer=$vendor;Model=[string]$target.Model
+            Version='Not resolved';DriverDate='Not resolved';SourceAdapter='OfficialVendorPortal';CandidateType='OfficialSupportPortal'
+            Url=$url;SupportUrl=$url;SecondarySupportUrl='';PackageUrl='';ExpectedHash='';HashAlgorithm=''
+            OS=[string]$script:DriverWindowsContext;Architecture=''
+            MatchConfidence='Vendor/source identified; exact package compatibility not verified'
+            MatchReason=([string]$target.Kind+' source identified. '+[string]$target.Evidence+'. '+[string]$entry.Note)
+            SearchTerms=$searchTerms;ComparisonScore=0;ComparisonRank=0
+            IsDownloaded=$false;IsInstallable=$false;IsDownloadable=$false
+            VerificationState='Official support portal lead only. No driver package, version, INF/CAT, hash or signature has been resolved.'
+            Capabilities=@('Discover','Search','GetDetails')
+            ProviderMetadata=[pscustomobject]@{
+                Vendor=$vendor;Role=[string]$entry.Role;PrimaryUrl=$url;Evidence=[string]$target.Evidence
+                ResolutionMode=[string]$entry.Mode;DirectPackageApiSupported=$false;PortalOnly=$true
+                OEMFirst=($vendor -in @('Qualcomm','MediaTek','Realtek','Broadcom'))
+                HardwareIds=@($rawIds | Select-Object -First 8)
+                SearchGuidance=$(switch($vendor){
+                    'Realtek' {'Search exact codec/controller family; prefer OEM-customized audio/WLAN package when available.'}
+                    'Broadcom' {'Search exact chip/product part number and Drivers asset type; sign-in/entitlement may be required.'}
+                    'Qualcomm' {'Check laptop/system OEM and Windows Update first; Qualcomm consumer driver catalog is limited.'}
+                    'MediaTek' {'Check laptop/system OEM and Windows Update first; use exact WLAN/Bluetooth module model.'}
+                    'Marvell' {'Search exact part number/platform in Public Driver Downloads; license acceptance may be required.'}
+                    'Silicon Labs' {'CP210x route is relevant only when USB VID_10C4 identifies a Silicon Labs bridge.'}
+                    'FTDI' {'VCP route is relevant only when USB VID_0403 identifies an FTDI interface.'}
+                    'WCH' {'Confirm CH34x/CH91xx family before choosing a WCH package.'}
+                    'ASIX' {'Confirm exact AX-series USB Ethernet chipset before choosing a package.'}
+                    'Prolific' {'Confirm USB VID_067B and exact PL2303 chip family/PID; check whether the adapter uses a legacy revision before selecting a current driver.'}
+                    'C-Media' {'Confirm exact C-Media USB audio codec/model and prefer the headset, motherboard or computer OEM package.'}
+                    'Infineon' {'Confirm exact Infineon/Cypress controller family and product generation; VID_04B4 alone is not enough to select a driver.'}
+                    'Synaptics' {'For touchpads and fingerprint devices, use the exact notebook OEM model and its customized driver package first.'}
+                    'Goodix' {'Confirm the exact Goodix fingerprint/touch controller and retrieve the driver from the system OEM.'}
+                    'ELAN' {'Confirm exact ELAN touchpad/controller hardware ID and use the notebook OEM package first.'}
+                    'Genesys Logic' {'Confirm the exact USB hub/card-reader controller model and the system/peripheral OEM package.'}
+                    'ASMedia' {'Confirm exact ASM controller model and motherboard revision; prefer the board OEM package.'}
+                    'Logitech' {'Search by exact Logitech model or part number; separate Options+ / G HUB software and firmware from a real driver package.'}
+                    'SteelSeries' {'Search by exact device model; SteelSeries GG is companion software and must not be treated as a generic driver.'}
+                    'Corsair' {'Use the exact Corsair product selector; distinguish iCUE, firmware and product-specific driver packages.'}
+                    'Elgato' {'Confirm exact capture-device model and Windows version; respect the official UVC plug-and-play designation where no proprietary driver is needed.'}
+                    'AverMedia' {'Select exact capture/tuner model and hardware revision; filter the official catalog by Driver versus Firmware or Application.'}
+                    'Razer' {'Use exact Razer peripheral or Blade model; Synapse and firmware are separate from a device driver.'}
+                    default {'Use exact model and operating system; confirm package applicability independently.'}
+                })
+            }
+        })
+    }
+    return [pscustomobject]@{Results=@($results.ToArray());Errors=@($errors.ToArray());SourcesQueried=@($results | ForEach-Object {$_.Manufacturer} | Select-Object -Unique);PortalOnly=$true}
+}
+
+# --- Phase 6.10 | Intel / NVIDIA / AMD official support portal adapters ---
+function Get-AMROfficialGraphicsVendorPortalCandidates {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][object]$Device,[string]$ProviderId='')
+    $results=New-Object 'System.Collections.Generic.List[object]'
+    $hardware=@()
+    try { $hardware=@($Device.HardwareIds | ForEach-Object {[string]$_}) } catch {}
+    $compatible=@()
+    try { $compatible=@($Device.CompatibleIds | ForEach-Object {[string]$_}) } catch {}
+    $deviceName=[string]$Device.DeviceName
+    $classText=@([string]$Device.Class,[string]$Device.DeviceClass,[string]$Device.ClassName) -join ' '
+    $isDisplay=($classText -match '(?i)display') -or ($deviceName -match '(?i)display|graphics|video|radeon|geforce|quadro|arc\s|iris|uhd graphics')
+    if(-not $isDisplay){return [pscustomobject]@{Results=@();Errors=@();SourcesQueried=@();PortalOnly=$true}}
+    $vendor='';$vendorId=''
+    foreach($id in @($hardware+$compatible)) {
+        if($id -match '(?i)^PCI\\VEN_([0-9A-F]{4})') {
+            $vendorId=$Matches[1].ToUpperInvariant()
+            switch($vendorId) {
+                '8086' {$vendor='Intel'}
+                '10DE' {$vendor='NVIDIA'}
+                '1002' {$vendor='AMD'}
+            }
+            if($vendor){break}
+        }
+    }
+    if(-not $vendor) {
+        if($deviceName -match '(?i)Intel.*(Graphics|Arc|Iris|UHD)|\bArc\s*A?\d{3,4}\b'){$vendor='Intel';$vendorId='8086'}
+        elseif($deviceName -match '(?i)NVIDIA|GeForce|Quadro|RTX\s*\d{3,4}'){$vendor='NVIDIA';$vendorId='10DE'}
+        elseif($deviceName -match '(?i)AMD Radeon|Radeon RX|Radeon Pro'){$vendor='AMD';$vendorId='1002'}
+    }
+    if(-not $vendor){return [pscustomobject]@{Results=@();Errors=@();SourcesQueried=@();PortalOnly=$true}}
+    $id=switch($vendor){'Intel'{'Intel.DriverPortal'} 'NVIDIA'{'NVIDIA.DriverPortal'} 'AMD'{'AMD.DriverPortal'}}
+    if($ProviderId -and $ProviderId -ne $id){return [pscustomobject]@{Results=@();Errors=@();SourcesQueried=@();PortalOnly=$true}}
+    $portalUrl=switch($vendor){
+        'Intel' {'https://www.intel.com/content/www/us/en/download-center/home.html'}
+        'NVIDIA' {'https://www.nvidia.com/Download/index.aspx'}
+        'AMD' {'https://www.amd.com/en/support/download/drivers.html'}
+    }
+    $secondaryUrl=switch($vendor){
+        'Intel' {'https://www.intel.com/content/www/us/en/support/detect.html'}
+        'NVIDIA' {'https://www.nvidia.com/en-us/geforce/drivers/'}
+        'AMD' {'https://www.amd.com/en/resources/support-articles/faqs/GPU-131.html'}
+    }
+    $searchTerms=(@($deviceName)+@($hardware | Select-Object -First 4)) -join ' '
+    $matchReason=('{0} hardware vendor identified from {1}; this is an official support route, not a verified driver match.' -f $vendor,$vendorId)
+    $results.Add([pscustomobject]@{
+        CandidateId=('PORTAL-'+$vendorId+'-'+([guid]::NewGuid().ToString('N').Substring(0,8)))
+        ProviderId=$id;Title=($vendor+' Official Driver Support');Name=($vendor+' Official Driver Support')
+        Source=($vendor+' official support website');Manufacturer=$vendor;Model=$deviceName;Version='Not resolved';DriverDate='Not resolved'
+        SourceAdapter='OfficialVendorPortal';CandidateType='OfficialSupportPortal';Url=$portalUrl;SupportUrl=$portalUrl;SecondarySupportUrl=$secondaryUrl
+        PackageUrl='';ExpectedHash='';HashAlgorithm='';OS=[string]$script:DriverWindowsContext;Architecture=''
+        MatchConfidence='Vendor identified only - exact driver compatibility not verified';MatchReason=$matchReason
+        SearchTerms=$searchTerms;ComparisonScore=0;ComparisonRank=0;IsDownloaded=$false;IsInstallable=$false;IsDownloadable=$false
+        VerificationState='Portal route only. AMR has not resolved a driver package, version, hardware compatibility, or signature.'
+        Capabilities=@('Discover','Search','GetDetails');ProviderMetadata=[pscustomobject]@{VendorId=$vendorId;PrimaryUrl=$portalUrl;SecondaryUrl=$secondaryUrl;ResolutionMode='User-assisted official portal';DirectPackageApiSupported=$false}
+    })
+    return [pscustomobject]@{Results=@($results.ToArray());Errors=@();SourcesQueried=@($vendor+' official portal');PortalOnly=$true}
+}
+
+function Invoke-AMRLocalVendorApi {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][ValidateSet('GetCapabilities','GetProvider','ValidateProvider','RegisterProvider','SetProviderEnabled','Discover','Search','GetDetails','ResolveDownload','Acquire','Normalize')][string]$Action,
+        [object]$Device,[object]$OEMProfile,[string]$ProviderId='',[object[]]$Candidates=@(),[object]$ProviderDefinition,[bool]$Enabled=$true,[string]$CandidateId='',[object]$Candidate
+    )
+    switch($Action) {
+        'GetCapabilities' {return Get-AMRLocalVendorAdapterCapabilities -ProviderId $ProviderId}
+        'GetProvider' {
+            if($ProviderId){$builtin=@(Get-AMRLocalVendorAdapterRegistry | Where-Object {$_.ProviderId -eq $ProviderId});if($builtin.Count){return $builtin[0]}}
+            $manifest=Get-AMRLocalVendorProviderManifest;return @($manifest.providers | Where-Object {[string]$_.id -eq $ProviderId})
+        }
+        'ValidateProvider' {if(-not $ProviderDefinition){throw 'ValidateProvider requires ProviderDefinition.'};return Test-AMRLocalVendorProviderDefinition -Provider $ProviderDefinition}
+        'RegisterProvider' {if(-not $ProviderDefinition){throw 'RegisterProvider requires ProviderDefinition.'};return Register-AMRLocalVendorProvider -Provider $ProviderDefinition}
+        'SetProviderEnabled' {if(-not $ProviderId){throw 'SetProviderEnabled requires ProviderId.'};return Set-AMRLocalVendorProviderEnabled -ProviderId $ProviderId -Enabled $Enabled}
+        'ResolveDownload' {
+            if(-not $Candidate){throw 'ResolveDownload requires Candidate.'}
+            $adapter=[string]$Candidate.SourceAdapter
+            if($adapter -in @('OfficialVendorPortal','MSIDriverCatalogMetadata','GigabyteDriverCatalogMetadata','ASRockDriverCatalogMetadata')){throw 'This candidate is catalog metadata only. Open the official vendor package URL manually; AMR will not download or install it until archive hash/signature and INF/CAT verification are implemented.'}
+            $allowedHosts=switch($adapter){'DellDriverPackCatalog' {@('downloads.dell.com','ftp.dell.com')} 'HPDriverPackCatalog' {@('ftp.hp.com','hpia.hpcloud.hp.com')} 'LenovoCDRTDriverPackCatalog' {@('download.lenovo.com')} default {@()}}
+            $uri=$null;$url=[string]$Candidate.PackageUrl
+            if(-not [uri]::TryCreate($url,[UriKind]::Absolute,[ref]$uri) -or $null -eq $uri -or $uri.Scheme -ne 'https' -or $uri.Host.ToLowerInvariant() -notin $allowedHosts){throw 'Candidate does not expose a download URL approved by its registered dedicated adapter.'}
+            return [pscustomobject]@{ProviderId=$ProviderId;Uri=$uri.AbsoluteUri;Host=$uri.Host;RequiresAcquisitionVerification=$true;Installable=$false}
+        }
+        'Acquire' {
+            if(-not $Device -or -not $Candidate){throw 'Acquire requires Device and Candidate.'}
+            $resolved=Invoke-AMRLocalVendorApi -Action ResolveDownload -ProviderId $ProviderId -Candidate $Candidate
+            return Invoke-AMRVendorPackageAcquisition -Device $Device -Candidate $Candidate
+        }
+        'Normalize' {
+            $normalized=New-Object 'System.Collections.Generic.List[object]'
+            foreach($candidate in @($Candidates)){if($candidate){$normalized.Add((ConvertTo-AMRLocalVendorCandidate -Candidate $candidate -ProviderId $ProviderId))}}
+            return @($normalized.ToArray())
+        }
+        {$_ -in @('Discover','Search')} {
+            if(-not $Device){throw ($Action+' requires a device record.')}
+            $all=New-Object 'System.Collections.Generic.List[object]';$errors=New-Object 'System.Collections.Generic.List[string]'
+            if(-not $ProviderId -or $ProviderId -in @('Dell.DriverPackCatalog','HP.ClientDriverPackCatalog','Lenovo.CDRT')){
+                $dedicatedDiscovery=Get-AMRDirectVendorPackageCandidates -Device $Device -OEMProfile $OEMProfile
+                foreach($candidate in @($dedicatedDiscovery.Results)){
+                    if($candidate){$candidateProvider=[string]$candidate.ProviderId;if(-not $candidateProvider){$candidateProvider=[string]$candidate.SourceAdapter};if(-not $ProviderId -or $ProviderId -eq $candidateProvider -or ($ProviderId -eq 'Dell.DriverPackCatalog' -and $candidateProvider -match 'Dell') -or ($ProviderId -eq 'HP.ClientDriverPackCatalog' -and $candidateProvider -match 'HP') -or ($ProviderId -eq 'Lenovo.CDRT' -and $candidateProvider -match 'Lenovo')){$all.Add((ConvertTo-AMRLocalVendorCandidate -Candidate $candidate -ProviderId $candidateProvider))}}
+                }
+                foreach($message in @($dedicatedDiscovery.Errors)){$errors.Add([string]$message)}
+            }
+            # MSI and GIGABYTE expose model-specific public motherboard catalog endpoints.
+            # These are metadata-only adapters: direct URLs are surfaced, but no download or
+            # install is enabled until package/archive verification is implemented.
+            if(-not $ProviderId -or $ProviderId -in @('MSI.DriverCatalog','GIGABYTE.DriverCatalog')){
+                $boardCatalog=Get-AMRBoardVendorCatalogMetadataCandidates -Device $Device -OEMProfile $OEMProfile -ProviderId $ProviderId
+                foreach($candidate in @($boardCatalog.Results)){if($candidate){$all.Add((ConvertTo-AMRLocalVendorCandidate -Candidate $candidate -ProviderId ([string]$candidate.ProviderId)))}}
+                foreach($message in @($boardCatalog.Errors)){$errors.Add([string]$message)}
+            }
+            if(-not $ProviderId -or $ProviderId -eq 'ASRock.DriverCatalog'){
+                $asrockCatalog=Get-AMRAsrockDriverCatalogMetadataCandidates -Device $Device -OEMProfile $OEMProfile
+                foreach($candidate in @($asrockCatalog.Results)){if($candidate){$all.Add((ConvertTo-AMRLocalVendorCandidate -Candidate $candidate -ProviderId 'ASRock.DriverCatalog'))}}
+                foreach($message in @($asrockCatalog.Errors)){$errors.Add([string]$message)}
+            }
+            # Remaining vendors continue through the universal official portal layer.
+            $portalDiscovery=Get-AMRAllVendorSupportPortalCandidates -Device $Device -OEMProfile $OEMProfile -ProviderId $ProviderId
+            foreach($candidate in @($portalDiscovery.Results)){
+                if($candidate){$all.Add((ConvertTo-AMRLocalVendorCandidate -Candidate $candidate -ProviderId ([string]$candidate.ProviderId)))}
+            }
+            foreach($message in @($portalDiscovery.Errors)){$errors.Add([string]$message)}
+            $isGenericProvider=(-not $ProviderId -or $ProviderId -like 'Generic.*' -or @((Get-AMRLocalVendorProviderManifest).providers | Where-Object {[string]$_.id -eq $ProviderId}).Count -gt 0)
+            if($isGenericProvider){
+                $generic=Get-AMRGenericVendorManifestCandidates -Device $Device -ProviderId $(if($ProviderId){$ProviderId}else{''})
+                foreach($candidate in @($generic.Results)){if($candidate){$all.Add((ConvertTo-AMRLocalVendorCandidate -Candidate $candidate -ProviderId ([string]$candidate.ProviderId)))}}
+                foreach($message in @($generic.Errors)){$errors.Add([string]$message)}
+            }
+            return [pscustomobject]@{Action=$Action;ProviderId=$ProviderId;Results=@($all.ToArray());Errors=@($errors.ToArray());CompletedAt=(Get-Date)}
+        }
+        'GetDetails' {
+            foreach($candidate in @($Candidates)){if($CandidateId -and [string]$candidate.CandidateId -eq $CandidateId){return $candidate}}
+            return $null
+        }
+    }
+}
+
+# --- Phase 6.10.2 | Direct motherboard catalog metadata adapters (MSI + GIGABYTE) ---
+# Changes: adds exact-model MSI and GIGABYTE driver metadata discovery; six-hour local cache;
+# official-host validation; direct package links remain non-downloadable/non-installable by AMR
+# until package archive hash/signature and INF/CAT verification are implemented.
+# These adapters use the vendors' public support endpoints, but deliberately emit
+# metadata-only candidates. They do not download, execute, or install vendor packages.
+function Get-AMRVendorObjectValue {
+    [CmdletBinding()]
+    param([object]$InputObject,[string[]]$Names)
+    if($null -eq $InputObject){return $null}
+    foreach($name in $Names){
+        $property=$InputObject.PSObject.Properties | Where-Object {$_.Name -ieq $name} | Select-Object -First 1
+        if($property -and $null -ne $property.Value -and [string]$property.Value -ne ''){return $property.Value}
+    }
+    return $null
+}
+
+function Get-AMRVendorObjectTree {
+    [CmdletBinding()]
+    param([object]$InputObject,[int]$Depth=0)
+    $items=New-Object 'System.Collections.Generic.List[object]'
+    if($null -eq $InputObject -or $Depth -gt 18){return @()}
+    if($InputObject -is [string] -or $InputObject -is [ValueType]){return @()}
+    if($InputObject -is [System.Collections.IDictionary]){
+        $items.Add($InputObject)
+        foreach($value in $InputObject.Values){foreach($child in @(Get-AMRVendorObjectTree -InputObject $value -Depth ($Depth+1))){$items.Add($child)}}
+    } elseif($InputObject -is [System.Collections.IEnumerable] -and $InputObject -isnot [pscustomobject]){
+        foreach($value in $InputObject){foreach($child in @(Get-AMRVendorObjectTree -InputObject $value -Depth ($Depth+1))){$items.Add($child)}}
+    } else {
+        $items.Add($InputObject)
+        foreach($property in $InputObject.PSObject.Properties){if($property.MemberType -in @('NoteProperty','Property','AliasProperty')){foreach($child in @(Get-AMRVendorObjectTree -InputObject $property.Value -Depth ($Depth+1))){$items.Add($child)}}}
+    }
+    return @($items.ToArray())
+}
+
+function ConvertTo-AMRVendorModelKey {
+    param([string]$Value)
+    if([string]::IsNullOrWhiteSpace($Value)){return ''}
+    return ([regex]::Replace($Value.ToUpperInvariant(),'[^A-Z0-9]',''))
+}
+
+function Get-AMRBoardVendorCatalogMetadataCandidates {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][object]$Device,[object]$OEMProfile,[string]$ProviderId='')
+    $results=New-Object 'System.Collections.Generic.List[object]'
+    $errors=New-Object 'System.Collections.Generic.List[string]'
+    $boardModel=[string]$OEMProfile.BoardProduct
+    if($boardModel -match '(?i)to be filled|default string|unknown|system product name'){$boardModel=''}
+    if(-not $boardModel -or $boardModel -match '(?i)to be filled|default string|unknown'){
+        return [pscustomobject]@{Results=@();Errors=@('MSI/GIGABYTE direct catalogs require an exact motherboard product model; no reliable board model was detected.');SourcesQueried=@();MetadataOnly=$true}
+    }
+    $boardKey=ConvertTo-AMRVendorModelKey $boardModel
+    $cacheRoot=Join-Path (Join-Path $script:DownloadDir 'Drivers') '_VendorCatalogCache'
+    if(-not(Test-Path -LiteralPath $cacheRoot -PathType Container)){New-Item -ItemType Directory -Path $cacheRoot -Force -ErrorAction Stop | Out-Null}
+    $osLabel='Win11 64'
+    if([string]$script:DriverWindowsContext -match '(?i)Windows\s*10'){$osLabel='Win10 64'}
+    elseif([string]$script:DriverWindowsContext -match '(?i)Windows\s*11'){$osLabel='Win11 64'}
+    else{$errors.Add('Vendor motherboard catalogs currently query Windows 10/11 x64 only; this OS context was not recognized.')}
+
+    # MSI support panel: product slug is the exact board model; this endpoint returns driver metadata.
+    if(-not $ProviderId -or $ProviderId -eq 'MSI.DriverCatalog'){
+        try{
+            if($OEMProfile.BoardVendor -match '(?i)MSI|Micro-Star' -or $boardModel -match '(?i)^MS-[A-Z0-9]{3,}$'){
+                $slugSource=([string]$boardModel).Trim() -replace '(?i)\s*\(MS-[A-Z0-9]+\)\s*$',''
+                if($slugSource -match '(?i)^MS-[A-Z0-9]+$'){throw 'MSI SMBIOS board code was detected without the commercial product slug; exact product catalog lookup is not safe.'}
+                $slug=([regex]::Replace($slugSource,'[^A-Za-z0-9]+','-')).Trim('-')
+                $cachePath=Join-Path $cacheRoot ('MSI_'+$boardKey+'_'+($osLabel -replace '\s+','')+'.json')
+                $cached=$false
+                if(Test-Path -LiteralPath $cachePath -PathType Leaf){$cacheAge=(Get-Date)-(Get-Item -LiteralPath $cachePath).LastWriteTime;if($cacheAge.TotalHours -lt 6){try{$cachedRows=@(Get-Content -LiteralPath $cachePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop);foreach($cachedRow in $cachedRows){$results.Add($cachedRow)};$cached=$true}catch{Remove-Item -LiteralPath $cachePath -Force -ErrorAction SilentlyContinue}}}
+                if(-not $cached){
+                $beforeCount=$results.Count
+                $uri='https://www.msi.com/api/v1/product/support/panel?product='+[uri]::EscapeDataString($slug)+'&type=driver&os='+[uri]::EscapeDataString($osLabel)
+                $response=Invoke-WebRequest -Uri $uri -UseBasicParsing -TimeoutSec 25 -MaximumRedirection 3 -ErrorAction Stop
+                if($response.BaseResponse -and $response.BaseResponse.ResponseUri -and ([uri]$response.BaseResponse.ResponseUri).Host -notin @('www.msi.com','msi.com')){throw 'MSI catalog redirected outside the official MSI host.'}
+                $payload=$response.Content | ConvertFrom-Json -ErrorAction Stop
+                foreach($row in @(Get-AMRVendorObjectTree -InputObject $payload)){
+                    $title=[string](Get-AMRVendorObjectValue -InputObject $row -Names @('download_name','download_title','name','title','fileName'))
+                    $rawUrl=[string](Get-AMRVendorObjectValue -InputObject $row -Names @('download_url','download_link','url','link','fileUrl'))
+                    if(-not $title -or -not $rawUrl -or $title -match '(?i)BIOS|Firmware|Utility|MSI Center|Manual') {continue}
+                    $packageUri=$null
+                    if(-not [uri]::TryCreate($rawUrl,[UriKind]::Absolute,[ref]$packageUri)){try{$packageUri=[uri]::new([uri]'https://www.msi.com/',$rawUrl)}catch{continue}}
+                    if($packageUri.Scheme -ne 'https' -or $packageUri.Host.ToLowerInvariant() -notin @('download.msi.com','download.msi.com.tw')){continue}
+                    $version=[string](Get-AMRVendorObjectValue -InputObject $row -Names @('download_version','version','Version'))
+                    $date=[string](Get-AMRVendorObjectValue -InputObject $row -Names @('download_date','release_date','date','Date'))
+                    $hashRaw=[string](Get-AMRVendorObjectValue -InputObject $row -Names @('download_sha256','sha256','SHA256'))
+                    $hash=([regex]::Match($hashRaw,'(?i)[A-F0-9]{64}')).Value
+                    $sizeValue=Get-AMRVendorObjectValue -InputObject $row -Names @('download_size','file_size','size')
+                    $size=0L;[void][long]::TryParse([string]$sizeValue,[ref]$size)
+                    $results.Add([pscustomobject]@{
+                        CandidateId=('MSI-'+([guid]::NewGuid().ToString('N').Substring(0,10)));ProviderId='MSI.DriverCatalog'
+                        Title=$title;Name=$title;Source='MSI Official Driver Catalog';Manufacturer='MSI';Model=$boardModel
+                        Version=$(if($version){$version}else{'Not supplied'});DriverDate=$(if($date){$date}else{'Not supplied'})
+                        SourceAdapter='MSIDriverCatalogMetadata';CandidateType='OfficialCatalogMetadata';Url=$packageUri.AbsoluteUri;SupportUrl='https://www.msi.com/support'
+                        PackageUrl=$packageUri.AbsoluteUri;ExpectedHash=$hash;HashAlgorithm=$(if($hash){'SHA256'}else{''});ExpectedSize=$size;OS=$osLabel;Architecture='x64'
+                        MatchConfidence='Exact MSI motherboard model endpoint; package contents not inspected'
+                        MatchReason=('MSI support panel returned this driver entry for exact board model '+$boardModel+'. Published SHA-256 '+$(if($hash){'is available'}else{'was not supplied'})+'.')
+                        SearchTerms=$boardModel;ComparisonScore=45;ComparisonRank=0;IsDownloaded=$false;IsInstallable=$false;IsDownloadable=$false
+                        VerificationState='Official catalog metadata only. Manual vendor download is possible from the official URL; AMR has not acquired or inspected the archive.'
+                        Capabilities=@('Discover','Search','GetDetails');ProviderMetadata=[pscustomobject]@{Catalog='MSI';ProductSlug=$slug;PublishedSHA256=$hash;MetadataOnly=$true}
+                    })
+                }
+                $freshRows=@($results | Select-Object -Skip $beforeCount)
+                if($freshRows.Count -gt 0){$freshRows | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $cachePath -Encoding UTF8 -ErrorAction SilentlyContinue}
+                }
+            }
+        } catch {$errors.Add('MSI direct catalog: '+[string]$_.Exception.Message)}
+    }
+
+    # GIGABYTE: resolve an exact product ID from its official motherboard list, then read its support tab.
+    if(-not $ProviderId -or $ProviderId -eq 'GIGABYTE.DriverCatalog'){
+        try{
+            if($OEMProfile.BoardVendor -match '(?i)GIGABYTE|Gigabyte' -or $OEMProfile.BoardProduct -match '(?i)AORUS|GIGABYTE'){
+                $cachePath=Join-Path $cacheRoot ('GIGABYTE_'+$boardKey+'_'+($osLabel -replace '\s+','')+'.json')
+                $cached=$false
+                if(Test-Path -LiteralPath $cachePath -PathType Leaf){$cacheAge=(Get-Date)-(Get-Item -LiteralPath $cachePath).LastWriteTime;if($cacheAge.TotalHours -lt 6){try{$cachedRows=@(Get-Content -LiteralPath $cachePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop);foreach($cachedRow in $cachedRows){$results.Add($cachedRow)};$cached=$true}catch{Remove-Item -LiteralPath $cachePath -Force -ErrorAction SilentlyContinue}}}
+                if(-not $cached){
+                $beforeCount=$results.Count
+                $listUrl='https://www.gigabyte.com/iisApplicationNuxt/api/proxy/api/v1.0/Support/global/DownloadCenter/2/GetProducts'
+                $listResponse=Invoke-WebRequest -Uri $listUrl -UseBasicParsing -TimeoutSec 30 -MaximumRedirection 3 -ErrorAction Stop
+                if($listResponse.BaseResponse -and $listResponse.BaseResponse.ResponseUri -and ([uri]$listResponse.BaseResponse.ResponseUri).Host -notin @('www.gigabyte.com','gigabyte.com')){throw 'GIGABYTE product catalog redirected outside the official host.'}
+                $listPayload=$listResponse.Content | ConvertFrom-Json -ErrorAction Stop
+                $matchedProduct=$null
+                foreach($row in @(Get-AMRVendorObjectTree -InputObject $listPayload)){
+                    $name=[string](Get-AMRVendorObjectValue -InputObject $row -Names @('productName','ProductName','name','Name','model','Model'))
+                    $idValue=Get-AMRVendorObjectValue -InputObject $row -Names @('productId','ProductId','productID','id','Id')
+                    if($name -and $idValue -and (ConvertTo-AMRVendorModelKey $name) -eq $boardKey){$matchedProduct=$row;break}
+                }
+                if(-not $matchedProduct){throw ('No exact GIGABYTE motherboard catalog match was returned for '+$boardModel+'.')}
+                $productId=[string](Get-AMRVendorObjectValue -InputObject $matchedProduct -Names @('productId','ProductId','productID','id','Id'))
+                $tabUrl='https://www.gigabyte.com/iisApplicationNuxt/api/proxy/api/v1.0/Consumer/global/GetProductTabDataAsync/Support/'+[uri]::EscapeDataString($productId)
+                $tabResponse=Invoke-WebRequest -Uri $tabUrl -UseBasicParsing -TimeoutSec 30 -MaximumRedirection 3 -ErrorAction Stop
+                if($tabResponse.BaseResponse -and $tabResponse.BaseResponse.ResponseUri -and ([uri]$tabResponse.BaseResponse.ResponseUri).Host -notin @('www.gigabyte.com','gigabyte.com')){throw 'GIGABYTE support tab redirected outside the official host.'}
+                $tabPayload=$tabResponse.Content | ConvertFrom-Json -ErrorAction Stop
+                foreach($row in @(Get-AMRVendorObjectTree -InputObject $tabPayload)){
+                    $title=[string](Get-AMRVendorObjectValue -InputObject $row -Names @('fileName','FileName','title','Title','name','Name'))
+                    $rawUrl=[string](Get-AMRVendorObjectValue -InputObject $row -Names @('fileUrl','FileUrl','downloadUrl','DownloadUrl','url','Url','path','Path'))
+                    if(-not $title -or -not $rawUrl -or $title -notmatch '(?i)driver|audio|chipset|LAN|WLAN|Bluetooth|USB|SATA|RAID|Serial|VGA') {continue}
+                    if($title -match '(?i)BIOS|Firmware|Utility|APP Center|EasyTune|RGB Fusion') {continue}
+                    $packageUri=$null
+                    if(-not [uri]::TryCreate($rawUrl,[UriKind]::Absolute,[ref]$packageUri)){try{$packageUri=[uri]::new([uri]'https://www.gigabyte.com/',$rawUrl)}catch{continue}}
+                    if($packageUri.Scheme -ne 'https' -or $packageUri.Host.ToLowerInvariant() -notin @('download.gigabyte.com','www.gigabyte.com')){continue}
+                    $version=[string](Get-AMRVendorObjectValue -InputObject $row -Names @('version','Version','fileVersion','FileVersion'))
+                    $date=[string](Get-AMRVendorObjectValue -InputObject $row -Names @('releaseDate','ReleaseDate','date','Date'))
+                    $osText=[string](Get-AMRVendorObjectValue -InputObject $row -Names @('os','OS','operatingSystem','OperatingSystem'))
+                    if($osText -and $osText -notmatch '(?i)Windows\s*(10|11)|Win\s*(10|11)') {continue}
+                    $results.Add([pscustomobject]@{
+                        CandidateId=('GIGA-'+([guid]::NewGuid().ToString('N').Substring(0,10)));ProviderId='GIGABYTE.DriverCatalog'
+                        Title=$title;Name=$title;Source='GIGABYTE Official Driver Catalog';Manufacturer='GIGABYTE';Model=$boardModel
+                        Version=$(if($version){$version}else{'Not supplied'});DriverDate=$(if($date){$date}else{'Not supplied'})
+                        SourceAdapter='GigabyteDriverCatalogMetadata';CandidateType='OfficialCatalogMetadata';Url=$packageUri.AbsoluteUri;SupportUrl='https://www.gigabyte.com/Support'
+                        PackageUrl=$packageUri.AbsoluteUri;ExpectedHash='';HashAlgorithm='';OS=$(if($osText){$osText}else{$osLabel});Architecture='x64'
+                        MatchConfidence='Exact GIGABYTE product ID; OS metadata may require manual confirmation'
+                        MatchReason=('GIGABYTE official product catalog exact model match ('+$productId+'). Package checksum is not published in the parsed metadata and has not been inferred from the URL.')
+                        SearchTerms=$boardModel;ComparisonScore=44;ComparisonRank=0;IsDownloaded=$false;IsInstallable=$false;IsDownloadable=$false
+                        VerificationState='Official catalog metadata only. The URL points to a vendor-hosted package; AMR has not downloaded, hashed, signature-checked or INF-validated it.'
+                        Capabilities=@('Discover','Search','GetDetails');ProviderMetadata=[pscustomobject]@{Catalog='GIGABYTE';ProductId=$productId;MetadataOnly=$true;QueryHashTrusted=$false}
+                    })
+                }
+                $freshRows=@($results | Select-Object -Skip $beforeCount)
+                if($freshRows.Count -gt 0){$freshRows | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $cachePath -Encoding UTF8 -ErrorAction SilentlyContinue}
+                }
+            }
+        } catch {$errors.Add('GIGABYTE direct catalog: '+[string]$_.Exception.Message)}
+    }
+    return [pscustomobject]@{Results=@($results.ToArray());Errors=@($errors.ToArray());SourcesQueried=@($results | ForEach-Object {$_.Source} | Select-Object -Unique);MetadataOnly=$true}
+}
+
+# --- Phase 6.10.3 | ASRock public latest-driver listing adapter ---
+# The public ASRock Latest Drivers Update page exposes model/description/OS/date/size/download
+# rows. This adapter performs exact model matching only and surfaces vendor-hosted metadata.
+# It never downloads, executes or installs a package; package archive/signature/INF/CAT checks
+# remain mandatory before a future acquisition adapter can be enabled.
+function Get-AMRAsrockDriverCatalogMetadataCandidates {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][object]$Device,[object]$OEMProfile)
+    $results=New-Object 'System.Collections.Generic.List[object]'
+    $errors=New-Object 'System.Collections.Generic.List[string]'
+    $boardVendor=[string]$OEMProfile.BoardVendor
+    if(-not $boardVendor){$boardVendor=[string]$OEMProfile.BoardManufacturer}
+    if($boardVendor -notmatch '(?i)ASRock') {
+        return [pscustomobject]@{Results=@();Errors=@();SourcesQueried=@();MetadataOnly=$true}
+    }
+    $boardModel=[string]$OEMProfile.BoardProduct
+    if(-not $boardModel -or $boardModel -match '(?i)to be filled|default string|unknown|system product name|base board product') {
+        $errors.Add('ASRock catalog requires an exact motherboard product model; no reliable BoardProduct value was detected.')
+        return [pscustomobject]@{Results=@();Errors=@($errors.ToArray());SourcesQueried=@();MetadataOnly=$true}
+    }
+    $boardKey=ConvertTo-AMRVendorModelKey $boardModel
+    if(-not $boardKey -or $boardKey.Length -lt 5) {
+        $errors.Add('ASRock motherboard model was too short for safe exact matching; no catalog search was attempted.')
+        return [pscustomobject]@{Results=@();Errors=@($errors.ToArray());SourcesQueried=@();MetadataOnly=$true}
+    }
+    $windows=[string]$script:DriverWindowsContext
+    if($windows -notmatch '(?i)Windows\s*(10|11)') {
+        $errors.Add('ASRock public latest-driver adapter currently filters Windows 10/11 listings only.')
+        return [pscustomobject]@{Results=@();Errors=@($errors.ToArray());SourcesQueried=@();MetadataOnly=$true}
+    }
+    $cacheRoot=Join-Path (Join-Path $script:DownloadDir 'Drivers') '_VendorCatalogCache'
+    if(-not(Test-Path -LiteralPath $cacheRoot -PathType Container)){New-Item -ItemType Directory -Path $cacheRoot -Force -ErrorAction Stop | Out-Null}
+    $cachePath=Join-Path $cacheRoot ('ASRock_'+$boardKey+'_'+($(if($windows -match '(?i)Windows\s*11'){'Win11'}else{'Win10'}))+'.json')
+    try {
+        $cached=$false
+        if(Test-Path -LiteralPath $cachePath -PathType Leaf) {
+            $age=(Get-Date)-(Get-Item -LiteralPath $cachePath).LastWriteTime
+            if($age.TotalHours -lt 6) {
+                try {
+                    $cachedRows=@(Get-Content -LiteralPath $cachePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop)
+                    foreach($row in $cachedRows){if($row){$results.Add($row)}}
+                    $cached=$true
+                } catch {Remove-Item -LiteralPath $cachePath -Force -ErrorAction SilentlyContinue}
+            }
+        }
+        if(-not $cached) {
+            $pageUrl='https://www.asrock.com/support/index.asp?cat=Drivers'
+            $response=Invoke-WebRequest -Uri $pageUrl -UseBasicParsing -TimeoutSec 45 -MaximumRedirection 3 -ErrorAction Stop
+            if($response.BaseResponse -and $response.BaseResponse.ResponseUri) {
+                $finalUri=[uri]$response.BaseResponse.ResponseUri
+                if($finalUri.Scheme -ne 'https' -or $finalUri.Host.ToLowerInvariant() -notin @('asrock.com','www.asrock.com','pg.asrock.com')) {
+                    throw 'ASRock latest-driver page redirected outside the approved official ASRock hosts.'
+                }
+            }
+            $html=[string]$response.Content
+            if($html.Length -lt 1000 -or $html -notmatch '(?i)Latest Drivers Update') {throw 'ASRock response did not contain the expected Latest Drivers Update page.'}
+            $htmlRows=[regex]::Matches($html,'(?is)<tr\b[^>]*>(.*?)</tr>')
+            $found=0
+            foreach($rowMatch in $htmlRows) {
+                $rowHtml=[string]$rowMatch.Groups[1].Value
+                $cells=[regex]::Matches($rowHtml,'(?is)<td\b[^>]*>(.*?)</td>')
+                if($cells.Count -lt 5){continue}
+                $cellText=New-Object 'System.Collections.Generic.List[string]'
+                foreach($cell in $cells) {
+                    $raw=[regex]::Replace([string]$cell.Groups[1].Value,'(?is)<script\b.*?</script>|<style\b.*?</style>',' ')
+                    $raw=[regex]::Replace($raw,'(?is)<[^>]+>',' ')
+                    $raw=[System.Net.WebUtility]::HtmlDecode($raw)
+                    $raw=[regex]::Replace($raw,'\s+',' ').Trim()
+                    $cellText.Add($raw)
+                }
+                $modelCell=[string]$cellText[0]
+                $modelAnchors=[regex]::Matches([string]$cells[0].Groups[1].Value,'(?is)<a\b[^>]*>(.*?)</a>')
+                $matchedModel=''
+                foreach($anchor in $modelAnchors) {
+                    $anchorText=[regex]::Replace([string]$anchor.Groups[1].Value,'(?is)<[^>]+>',' ')
+                    $anchorText=[System.Net.WebUtility]::HtmlDecode(([regex]::Replace($anchorText,'\s+',' ')).Trim())
+                    if((ConvertTo-AMRVendorModelKey $anchorText) -eq $boardKey){$matchedModel=$anchorText;break}
+                }
+                if(-not $matchedModel -and (ConvertTo-AMRVendorModelKey $modelCell) -eq $boardKey){$matchedModel=$modelCell}
+                if(-not $matchedModel){continue}
+                $description=[string]$cellText[1]
+                $osText=[string]$cellText[2]
+                $dateText=[string]$cellText[3]
+                $sizeText=[string]$cellText[4]
+                if($description -notmatch '(?i)driver|chipset|audio|LAN|WLAN|Bluetooth|USB|SATA|RAID|VGA|Ethernet|Wireless') {continue}
+                if($description -match '(?i)BIOS|Firmware|Utility|APP Shop|Polychrome|A-Tuning') {continue}
+                if($osText -and $osText -notmatch '(?i)Windows\s*(10|11)|Win\s*(10|11)') {continue}
+                if($windows -match '(?i)Windows\s*11' -and $osText -match '(?i)Windows\s*10' -and $osText -notmatch '(?i)Windows\s*11') {continue}
+                if($windows -match '(?i)Windows\s*10' -and $osText -match '(?i)Windows\s*11' -and $osText -notmatch '(?i)Windows\s*10') {continue}
+                $downloadAnchors=[regex]::Matches([string]$cells[$cells.Count-1].Groups[1].Value,'(?is)<a\b[^>]*href\s*=\s*["'']([^"'']+)["''][^>]*>(.*?)</a>')
+                if($downloadAnchors.Count -eq 0) {
+                    # Some ASRock rows place the download link in any cell after the model.
+                    $downloadAnchors=[regex]::Matches($rowHtml,'(?is)<a\b[^>]*href\s*=\s*["'']([^"'']+)["''][^>]*>(.*?)</a>')
+                }
+                $packageUri=$null
+                foreach($anchor in $downloadAnchors) {
+                    $href=[System.Net.WebUtility]::HtmlDecode([string]$anchor.Groups[1].Value).Trim()
+                    try {$candidateUri=[uri]::new([uri]'https://www.asrock.com/',$href)} catch {continue}
+                    if($candidateUri.Scheme -eq 'https' -and $candidateUri.Host.ToLowerInvariant() -in @('asrock.com','www.asrock.com','pg.asrock.com','download.asrock.com')) {$packageUri=$candidateUri;break}
+                }
+                if($null -eq $packageUri){continue}
+                $title=$description
+                if($title.Length -gt 180){$title=$title.Substring(0,180)}
+                $results.Add([pscustomobject]@{
+                    CandidateId=('ASROCK-'+([guid]::NewGuid().ToString('N').Substring(0,10)));ProviderId='ASRock.DriverCatalog'
+                    Title=('ASRock '+$matchedModel+' – '+$title);Name=('ASRock '+$matchedModel+' – '+$title)
+                    Source='ASRock Official Latest Drivers Update';Manufacturer='ASRock';Model=$matchedModel
+                    Version='Not supplied';DriverDate=$dateText;SourceAdapter='ASRockDriverCatalogMetadata';CandidateType='OfficialCatalogMetadata'
+                    Url=$packageUri.AbsoluteUri;SupportUrl=$pageUrl;PackageUrl=$packageUri.AbsoluteUri
+                    ExpectedHash='';HashAlgorithm='';ExpectedSize='';OS=$osText;Architecture='x64'
+                    MatchConfidence='Exact ASRock motherboard model row; OS listing checked; package contents not inspected'
+                    MatchReason=('Exact model match on ASRock public Latest Drivers Update page: '+$matchedModel+'. '+$description+'. Package size shown by vendor: '+$sizeText+'.')
+                    SearchTerms=$matchedModel;ComparisonScore=43;ComparisonRank=0
+                    IsDownloaded=$false;IsInstallable=$false;IsDownloadable=$false
+                    VerificationState='Official catalog metadata only. AMR has not downloaded, hashed, signature-checked or INF/CAT-validated this package.'
+                    Capabilities=@('Discover','Search','GetDetails')
+                    ProviderMetadata=[pscustomobject]@{Catalog='ASRock';ListingUrl=$pageUrl;VendorSize=$sizeText;MetadataOnly=$true;ExactModelMatch=$true}
+                })
+                $found++
+                if($found -ge 100){break}
+            }
+            if($results.Count -gt 0) {
+                @($results.ToArray()) | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $cachePath -Encoding UTF8 -ErrorAction SilentlyContinue
+            }
+        }
+    } catch {$errors.Add('ASRock latest-driver catalog: '+[string]$_.Exception.Message)}
+    return [pscustomobject]@{Results=@($results.ToArray());Errors=@($errors.ToArray());SourcesQueried=@('ASRock public Latest Drivers Update');MetadataOnly=$true}
+}
+
+function Get-AMRDirectVendorPackageCandidates {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][object]$Device,[object]$OEMProfile)
+    $results=New-Object 'System.Collections.Generic.List[object]'
+    $errors=New-Object 'System.Collections.Generic.List[string]'
+    $root=Join-Path (Join-Path $script:DownloadDir 'Drivers') '_VendorCatalogCache'
+    if(-not(Test-Path -LiteralPath $root -PathType Container)){New-Item -ItemType Directory -Path $root -Force -ErrorAction Stop | Out-Null}
+    $windows=[string]$script:DriverWindowsContext
+    $osMajor=10; $osMinor=0
+    $targetOs=''
+    if($windows -match '(?i)Windows\s*11'){$targetOs='Windows 11';$osMajor=10;$osMinor=0}
+    elseif($windows -match '(?i)Windows\s*10'){$targetOs='Windows 10';$osMajor=10;$osMinor=0}
+    elseif($windows -match '(?i)Windows\s*Server\s*2022'){$targetOs='Windows Server 2022';$osMajor=10;$osMinor=0}
+    $arch='amd64';if($windows -match '(?i)arm64'){$arch='arm64'}elseif($windows -match '(?i)x86|32-bit'){$arch='x86'}
+    $modelNames=@([string]$Device.DeviceName,[string]$OEMProfile.ComputerModel,[string]$OEMProfile.ProductName,[string]$OEMProfile.SystemSKU,[string]$OEMProfile.ProductVersion) | ForEach-Object {([string]$_).Trim()} | Where-Object {$_ -and $_ -notmatch '(?i)to be filled|default string|unknown|system manufacturer'} | Select-Object -Unique
+    $modelText=$modelNames -join ' '
+    $systemIdCandidates=@()
+    foreach($value in @([string]$OEMProfile.SystemSKU,[string]$OEMProfile.ProductVersion,[string]$OEMProfile.ProductName,[string]$OEMProfile.ComputerModel,[string]$OEMProfile.BoardProduct)){
+        if($value -match '(?i)(?:^|\s)([0-9A-Z]{4})(?:\s|$)'){$systemIdCandidates+= $Matches[1].ToUpperInvariant()}
+        foreach($idMatch in [regex]::Matches($value,'(?i)(?:^|_)([0-9A-Z]{4})(?=_|$)')){$systemIdCandidates+=$idMatch.Groups[1].Value.ToUpperInvariant()}
+    }
+    $systemIdCandidates=@($systemIdCandidates | Select-Object -Unique)
+    $deviceVendor=Resolve-AMRDriverVendorName -Text ([string]$OEMProfile.OEMVendor)
+
+    # Dell Driver Pack Catalog: digitally signed CAB with model/SystemID + OS metadata.
+    if($deviceVendor -and $deviceVendor.Vendor -eq 'Dell' -and $targetOs -in @('Windows 10','Windows 11')){
+        try{
+            if(Get-Command Write-AMRDriverWorkerProgress -ErrorAction SilentlyContinue){Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Downloading Dell official Driver Pack Catalog'}
+            $cab=Join-Path $root 'Dell_DriverPackCatalog.cab';$xmlPath=Join-Path $root 'Dell_DriverPackCatalog.xml'
+            $catalogUrl='https://downloads.dell.com/catalog/DriverPackCatalog.cab'
+            $refresh=(-not(Test-Path -LiteralPath $cab -PathType Leaf))
+            if(-not $refresh){$age=(Get-Date)-(Get-Item -LiteralPath $cab).LastWriteTime;$refresh=($age.TotalHours -ge 12)}
+            if($refresh){$partial=$cab+'.download';if(Test-Path -LiteralPath $partial){Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue};Invoke-WebRequest -Uri $catalogUrl -OutFile $partial -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop;if(-not(Test-Path -LiteralPath $partial -PathType Leaf) -or (Get-Item -LiteralPath $partial).Length -le 0 -or (Get-Item -LiteralPath $partial).Length -gt 250MB){throw 'Dell catalog download is empty or exceeds the 250 MB safety limit.'};Move-Item -LiteralPath $partial -Destination $cab -Force -ErrorAction Stop}
+            $catalogSig=Get-AuthenticodeSignature -FilePath $cab -ErrorAction Stop
+            if([string]$catalogSig.Status -ne 'Valid' -or -not $catalogSig.SignerCertificate){Remove-Item -LiteralPath $cab -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath $xmlPath -Force -ErrorAction SilentlyContinue;throw 'Dell Driver Pack Catalog CAB signature is not valid; catalog results were rejected.'}
+            if(-not(Test-Path -LiteralPath $xmlPath -PathType Leaf) -or (Get-Item -LiteralPath $xmlPath).LastWriteTime -lt (Get-Item -LiteralPath $cab).LastWriteTime){
+                $expanded=Join-Path $root 'Dell_Expanded';if(Test-Path -LiteralPath $expanded){Remove-Item -LiteralPath $expanded -Recurse -Force -ErrorAction SilentlyContinue};New-Item -ItemType Directory -Path $expanded -Force | Out-Null
+                $expand=Join-Path $env:WINDIR 'System32\expand.exe';if(-not(Test-Path $expand)){throw 'Windows expand.exe is unavailable for the Dell catalog CAB.'}
+                $expandOutput=& $expand $cab '-F:DriverPackCatalog.xml' $expanded 2>&1 | Out-String
+                if([int]$LASTEXITCODE -ne 0){throw ('Dell catalog CAB extraction failed: '+$expandOutput.Trim())}
+                $foundXml=Get-ChildItem -LiteralPath $expanded -Filter 'DriverPackCatalog.xml' -File -Recurse | Select-Object -First 1
+                if(-not $foundXml){throw 'Dell DriverPackCatalog.xml was not present in the signed catalog CAB.'}
+                Copy-Item -LiteralPath $foundXml.FullName -Destination $xmlPath -Force
+            }
+            [xml]$doc=Get-Content -LiteralPath $xmlPath -Raw -ErrorAction Stop
+            $packages=@($doc.DriverPackManifest.DriverPackage)
+            foreach($pkg in $packages){
+                if([string]$pkg.type -match '(?i)WinPE'){continue}
+                $models=@($pkg.SupportedSystems.Brand.Model)
+                $modelMatches=@($models | Where-Object {
+                    $sid=[string]$_.systemID;$name=[string]$_.name
+                    (($systemIdCandidates.Count -gt 0) -and ($systemIdCandidates -contains $sid.ToUpperInvariant())) -or
+                    (($name -and $modelNames -contains $name))
+                })
+                if($modelMatches.Count -eq 0){continue}
+                $osMatches=@($pkg.SupportedOperatingSystems.OperatingSystem | Where-Object {
+                    $major=0;$minor=0;[void][int]::TryParse([string]$_.majorVersion,[ref]$major);[void][int]::TryParse([string]$_.minorVersion,[ref]$minor)
+                    $osLabel=@([string]$_.name,[string]$_.osName,[string]$_.description) -join ' '
+                    (($major -eq $osMajor -and $minor -eq $osMinor) -or ($major -eq 0 -and $minor -eq 0)) -and ([string]$_.osArch -match ('(?i)'+[regex]::Escape($arch)+'|x64|64')) -and ((-not $osLabel.Trim()) -or ($targetOs -and $osLabel -match ('(?i)'+[regex]::Escape($targetOs))))
+                })
+                if($osMatches.Count -eq 0){continue}
+                $base=[string]$doc.DriverPackManifest.baseLocation
+                $relative=[string]$pkg.path
+                if([string]::IsNullOrWhiteSpace($base) -or [string]::IsNullOrWhiteSpace($relative)){continue}
+                $packageUrl=([uri]::new([uri]$base,$relative)).AbsoluteUri
+                if(([uri]$packageUrl).Scheme -ne 'https' -or ([uri]$packageUrl).Host -notin @('downloads.dell.com','ftp.dell.com')){continue}
+                $matchedModel=@($modelMatches | ForEach-Object {[string]$_.name} | Select-Object -Unique) -join '; '
+                $results.Add([pscustomobject]@{Title=('Dell Driver Pack – '+$matchedModel);Name=('Dell Driver Pack – '+$matchedModel);Source='Dell';Manufacturer='Dell';Model=$matchedModel;Version=[string]$pkg.dellVersion;DriverDate=[string]$pkg.dateTime;PackageUrl=$packageUrl;Url=$packageUrl;SourceAdapter='DellDriverPackCatalog';PackageType='OEMDriverPack';PackageFormat=[string]$pkg.format;ExpectedHash=[string]$pkg.hashMD5;HashAlgorithm='MD5';ExpectedSize=[int64]$pkg.size;ReleaseId=[string]$pkg.releaseID;SystemIds=@($modelMatches | ForEach-Object {[string]$_.systemID} | Select-Object -Unique);OS=$targetOs;Architecture=$arch;MatchConfidence='Exact Dell SystemID / model + OS catalog match';MatchReason=('Dell signed Driver Pack Catalog exact model match: '+$matchedModel);ComparisonScore=80;ComparisonRank=0;IsDownloaded=$false;IsInstallable=$false;IsDownloadable=$true;VerificationState='Official Dell package listed in signed catalog; payload download/signature/hash verification pending';SearchTerms=($modelText+' '+($systemIdCandidates -join ' '));CatalogSigner=[string]$catalogSig.SignerCertificate.Subject;CatalogSignatureStatus=[string]$catalogSig.Status})
+            }
+        }catch{if($cab -and (Test-Path -LiteralPath ($cab+'.download'))){Remove-Item -LiteralPath ($cab+'.download') -Force -ErrorAction SilentlyContinue};$errors.Add(('Dell adapter: '+[string]$_.Exception.Message))}
+    }
+
+    # HP Client Driver Pack Catalog: SoftPaq packages mapped to product OS driver packs.
+    if($deviceVendor -and $deviceVendor.Vendor -eq 'HP' -and $targetOs -in @('Windows 10','Windows 11')){
+        try{
+            if(Get-Command Write-AMRDriverWorkerProgress -ErrorAction SilentlyContinue){Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Downloading HP official Client Driver Pack Catalog'}
+            $cab=Join-Path $root 'HP_ClientDriverPackCatalog.cab';$xmlPath=Join-Path $root 'HP_ClientDriverPackCatalog.xml';$catalogUrl='https://hpia.hpcloud.hp.com/downloads/driverpackcatalog/HPClientDriverPackCatalog.cab'
+            $refresh=(-not(Test-Path -LiteralPath $cab -PathType Leaf));if(-not $refresh){$age=(Get-Date)-(Get-Item -LiteralPath $cab).LastWriteTime;$refresh=($age.TotalHours -ge 12)}
+            if($refresh){$partial=$cab+'.download';if(Test-Path -LiteralPath $partial){Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue};Invoke-WebRequest -Uri $catalogUrl -OutFile $partial -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop;if(-not(Test-Path -LiteralPath $partial -PathType Leaf) -or (Get-Item -LiteralPath $partial).Length -le 0 -or (Get-Item -LiteralPath $partial).Length -gt 250MB){throw 'HP catalog download is empty or exceeds the 250 MB safety limit.'};Move-Item -LiteralPath $partial -Destination $cab -Force -ErrorAction Stop}
+            $expand=Join-Path $env:WINDIR 'System32\expand.exe';if(-not(Test-Path $expand)){throw 'Windows expand.exe is unavailable for the HP catalog CAB.'}
+            if(-not(Test-Path -LiteralPath $xmlPath -PathType Leaf) -or (Get-Item -LiteralPath $xmlPath).LastWriteTime -lt (Get-Item -LiteralPath $cab).LastWriteTime){
+                $expanded=Join-Path $root 'HP_Expanded';if(Test-Path -LiteralPath $expanded){Remove-Item -LiteralPath $expanded -Recurse -Force -ErrorAction SilentlyContinue};New-Item -ItemType Directory -Path $expanded -Force | Out-Null
+                $expandOutput=& $expand $cab $expanded 2>&1 | Out-String;if([int]$LASTEXITCODE -ne 0){throw ('HP catalog CAB extraction failed: '+$expandOutput.Trim())}
+                $foundXml=Get-ChildItem -LiteralPath $expanded -Filter '*.xml' -File -Recurse | Select-Object -First 1;if(-not $foundXml){throw 'HP Client Driver Pack catalog XML was not found in the CAB.'};Copy-Item -LiteralPath $foundXml.FullName -Destination $xmlPath -Force
+            }
+            if((Get-Item -LiteralPath $xmlPath).Length -gt 150MB){throw 'HP Client Driver Pack catalog exceeded the 150 MB safety limit.'}
+            [xml]$doc=Get-Content -LiteralPath $xmlPath -Raw -ErrorAction Stop
+            $catalogRoot=$doc.NewDataSet.HPClientDriverPackCatalog;if(-not $catalogRoot){throw 'HP Client Driver Pack catalog XML has an unexpected schema.'}
+            $softPaqs=@($catalogRoot.SoftPaqList.SoftPaq);$driverPacks=@($catalogRoot.ProductOSDriverPackList.ProductOSDriverPack)
+            foreach($pack in $driverPacks){
+                $systemIds=@(([string]$pack.SystemId) -split ',') | ForEach-Object {$_.Trim().ToUpperInvariant()} | Where-Object {$_}
+                $modelName=[string]$pack.SystemName
+                $modelMatch=($systemIds | Where-Object {$systemIdCandidates -contains $_} | Select-Object -First 1)
+                if(-not $modelMatch -and $modelName){foreach($known in $modelNames){if($known -and $modelName.Equals($known,[StringComparison]::OrdinalIgnoreCase)){$modelMatch='Exact model name';break}}}
+                if(-not $modelMatch){continue}
+                $osName=[string]$pack.OSName
+                if($targetOs -notin @('Windows 10','Windows 11') -or $osName -notmatch ('(?i)'+[regex]::Escape($targetOs))){continue}
+                if($arch -ne 'amd64'){continue}
+                $softPaq=@($softPaqs | Where-Object {[string]$_.Id -eq [string]$pack.SoftPaqId} | Select-Object -First 1)
+                if($softPaq.Count -eq 0){continue};$soft=$softPaq[0]
+                $packageUrl=[string]$soft.Url;$uri=$null;if(-not [uri]::TryCreate($packageUrl,[UriKind]::Absolute,[ref]$uri)){continue}
+                if($uri.Scheme -ne 'https' -or $uri.Host -notin @('ftp.hp.com','hpia.hpcloud.hp.com')){continue}
+                $results.Add([pscustomobject]@{Title=('HP Driver Pack – '+$modelName+' – '+[string]$pack.SoftPaqId);Name=('HP Driver Pack – '+$modelName);Source='HP';Manufacturer='HP';Model=$modelName;Version=[string]$pack.OSName;DriverDate=[string]$soft.DateReleased;PackageUrl=$packageUrl;Url=$packageUrl;SourceAdapter='HPDriverPackCatalog';PackageType='OEMDriverPack';PackageFormat='EXE';ExpectedHash=[string]$soft.MD5;HashAlgorithm='MD5';ExpectedSize=0L;ReleaseId=[string]$pack.SoftPaqId;SystemIds=@($systemIds);OS=$osName;Architecture=$arch;MatchConfidence='Exact HP SystemId / model + OS catalog match';MatchReason=('HP Client Driver Pack Catalog exact product mapping: '+$modelName+' / SoftPaq '+[string]$pack.SoftPaqId);ComparisonScore=80;ComparisonRank=0;IsDownloaded=$false;IsInstallable=$false;IsDownloadable=$true;VerificationState='Official HP SoftPaq mapped by HP product/OS catalog; payload download/hash/signature verification pending';SearchTerms=($modelText+' '+($systemIds -join ' '));CatalogSigner='HP official HTTPS catalog; CAB signature not independently asserted'})
+            }
+        }catch{if($cab -and (Test-Path -LiteralPath ($cab+'.download'))){Remove-Item -LiteralPath ($cab+'.download') -Force -ErrorAction SilentlyContinue};$errors.Add(('HP adapter: '+[string]$_.Exception.Message))}
+    }
+
+    # Lenovo CDRT public catalog: model/SystemType-specific SCCM driver packs.
+    if($deviceVendor -and $deviceVendor.Vendor -eq 'Lenovo' -and $targetOs -in @('Windows 10','Windows 11')){
+        try{
+            if(Get-Command Write-AMRDriverWorkerProgress -ErrorAction SilentlyContinue){Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Downloading Lenovo official CDRT driver-pack catalog'}
+            $xmlPath=Join-Path $root 'Lenovo_CDRT_catalogv2.xml';$catalogUrl='https://download.lenovo.com/cdrt/td/catalogv2.xml'
+            $refresh=(-not(Test-Path -LiteralPath $xmlPath -PathType Leaf));if(-not $refresh){$age=(Get-Date)-(Get-Item -LiteralPath $xmlPath).LastWriteTime;$refresh=($age.TotalHours -ge 12)}
+            if($refresh){$partial=$xmlPath+'.download';if(Test-Path -LiteralPath $partial){Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue};Invoke-WebRequest -Uri $catalogUrl -OutFile $partial -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop;if(-not(Test-Path -LiteralPath $partial -PathType Leaf) -or (Get-Item -LiteralPath $partial).Length -le 0 -or (Get-Item -LiteralPath $partial).Length -gt 100MB){throw 'Lenovo CDRT catalog is empty or exceeds the 100 MB safety limit.'};[xml]$validation=Get-Content -LiteralPath $partial -Raw -ErrorAction Stop;if(-not $validation.ModelList.Model){throw 'Lenovo CDRT catalog XML has an unexpected schema.'};Move-Item -LiteralPath $partial -Destination $xmlPath -Force -ErrorAction Stop}
+            if((Get-Item -LiteralPath $xmlPath).Length -gt 100MB){throw 'Lenovo CDRT catalog exceeded the 100 MB safety limit.'}
+            [xml]$doc=Get-Content -LiteralPath $xmlPath -Raw -ErrorAction Stop
+            foreach($model in @($doc.ModelList.Model)){
+                $modelName=[string]$model.name
+                $types=@($model.Types.Type | ForEach-Object {[string]$_ -split ','} | ForEach-Object {$_.Trim().ToUpperInvariant()} | Where-Object {$_})
+                $modelMatch=$false
+                foreach($id in $systemIdCandidates){if($types -contains $id){$modelMatch=$true}}
+                if(-not $modelMatch -and $modelName){foreach($known in $modelNames){if($known -and $modelName.Equals($known,[StringComparison]::OrdinalIgnoreCase)){$modelMatch=$true;break}}}
+                if(-not $modelMatch){continue}
+                foreach($item in @($model.SCCM)){
+                    $osName=[string]$item.os;if($osName -notin @('win10','win11')){continue}
+                    if(($targetOs -eq 'Windows 11' -and $osName -ne 'win11') -or ($targetOs -eq 'Windows 10' -and $osName -ne 'win10') -or [string]::IsNullOrWhiteSpace($targetOs)){continue}
+                    $url=[string]$item.'#text';if([string]::IsNullOrWhiteSpace($url)){continue}
+                    $uri=$null;if(-not [uri]::TryCreate($url,[UriKind]::Absolute,[ref]$uri)){continue}
+                    if($uri.Scheme -ne 'https' -or $uri.Host -notin @('download.lenovo.com')){continue}
+                    $displayOs=if($osName -eq 'win11'){'Windows 11'}else{'Windows 10'}
+                    $results.Add([pscustomobject]@{Title=('Lenovo Driver Pack – '+$modelName);Name=('Lenovo Driver Pack – '+$modelName);Source='Lenovo';Manufacturer='Lenovo';Model=$modelName;Version=[string]$item.version;DriverDate=[string]$item.date;PackageUrl=$url;Url=$url;SourceAdapter='LenovoCDRTDriverPackCatalog';PackageType='OEMDriverPack';PackageFormat='EXE';ExpectedHash=[string]$item.crc;HashAlgorithm='MD5';ExpectedSize=0L;ReleaseId=[IO.Path]::GetFileName($uri.AbsolutePath);SystemIds=@($types);OS=$displayOs;Architecture='amd64';MatchConfidence='Exact Lenovo Machine Type / model catalog match';MatchReason=('Lenovo CDRT SCCM driver pack for exact model '+$modelName+' ('+($types -join ', ')+')');ComparisonScore=80;ComparisonRank=0;IsDownloaded=$false;IsInstallable=$false;IsDownloadable=$true;VerificationState='Official Lenovo CDRT package listed in public catalog; payload download/signature/hash verification pending';SearchTerms=($modelText+' '+($types -join ' '))})
+                }
+            }
+        }catch{if($xmlPath -and (Test-Path -LiteralPath ($xmlPath+'.download'))){Remove-Item -LiteralPath ($xmlPath+'.download') -Force -ErrorAction SilentlyContinue};$errors.Add(('Lenovo adapter: '+[string]$_.Exception.Message))}
+    }
+    $dedup=@{};$unique=New-Object 'System.Collections.Generic.List[object]'
+    foreach($candidate in $results){$key=([string]$candidate.SourceAdapter+'|'+[string]$candidate.PackageUrl).ToLowerInvariant();if(-not $dedup.ContainsKey($key)){$dedup[$key]=$true;$unique.Add($candidate)}}
+    $ordered=@($unique | Sort-Object @{Expression={if($_.MatchConfidence -like 'Exact*'){0}else{1}}},@{Expression='Source'},@{Expression='DriverDate';Descending=$true})
+    $rank=0;foreach($candidate in $ordered){$rank++;$candidate.ComparisonRank=$rank}
+    return [pscustomobject]@{Results=@($ordered);Errors=@($errors.ToArray());SourcesQueried=@('Dell Driver Pack Catalog','HP Client Driver Pack Catalog','Lenovo CDRT Driver Pack Catalog');PackageCandidateCount=$ordered.Count;CatalogOnly=$true}
+}
+
+function Invoke-AMRVendorPackageAcquisition {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][object]$Device,[Parameter(Mandatory=$true)][object]$Candidate)
+    $adapter=[string]$Candidate.SourceAdapter
+    $allowedHosts=switch($adapter){'DellDriverPackCatalog' {@('downloads.dell.com','ftp.dell.com')} 'HPDriverPackCatalog' {@('ftp.hp.com','hpia.hpcloud.hp.com')} 'LenovoCDRTDriverPackCatalog' {@('download.lenovo.com')} default {throw 'Unsupported vendor package adapter.'}}
+    $url=[string]$Candidate.PackageUrl;$uri=$null
+    if(-not [uri]::TryCreate($url,[UriKind]::Absolute,[ref]$uri) -or $uri.Scheme -ne 'https' -or $uri.Host -notin $allowedHosts){throw 'Vendor package URL failed HTTPS host allowlist validation.'}
+    $root=Join-Path (Join-Path $script:DownloadDir 'Drivers') 'VendorPackages';if(-not(Test-Path -LiteralPath $root -PathType Container)){New-Item -ItemType Directory -Path $root -Force | Out-Null}
+    $safeDevice=([string]$Device.DeviceId -replace '[^A-Za-z0-9._-]','_');if($safeDevice.Length -gt 55){$safeDevice=$safeDevice.Substring(0,55)}
+    $safeRelease=([string]$Candidate.ReleaseId -replace '[^A-Za-z0-9._-]','_');if(-not $safeRelease){$safeRelease=([string]$Candidate.Version -replace '[^A-Za-z0-9._-]','_')};if(-not $safeRelease){$safeRelease=[guid]::NewGuid().ToString('N')}
+    $folder=Join-Path $root (($adapter+'_'+$safeDevice+'_'+$safeRelease).Trim('_'))
+    if(Test-Path -LiteralPath $folder -PathType Container){$folder=Join-Path $root (($adapter+'_'+$safeDevice+'_'+$safeRelease+'_'+[guid]::NewGuid().ToString('N').Substring(0,8)).Trim('_'))}
+    New-Item -ItemType Directory -Path $folder -Force | Out-Null
+    $extension=[IO.Path]::GetExtension($uri.AbsolutePath);if($extension -notmatch '^\.(exe|cab|zip)$'){$extension='.exe'}
+    $file=Join-Path $folder ('VendorDriverPackage'+$extension)
+    try{
+        if(Get-Command Write-AMRDriverWorkerProgress -ErrorAction SilentlyContinue){Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage ('Downloading official '+[string]$Candidate.Source+' package')}
+        $downloaded=$false;$lastError=''
+        for($attempt=1;$attempt -le 3;$attempt++){
+            $request=[System.Net.HttpWebRequest]::Create($uri);$request.Method='GET';$request.UserAgent='AMR-Windows-Utility-DriverCenter/6.8';$request.Timeout=180000;$request.ReadWriteTimeout=180000;$request.AllowAutoRedirect=$true;$request.MaximumAutomaticRedirections=5;$request.UseDefaultCredentials=$false
+            $response=$null;$inputStream=$null;$outputStream=$null
+            try{
+                $response=$request.GetResponse();$finalUri=$response.ResponseUri
+                if($finalUri.Scheme -ne 'https' -or $finalUri.Host -notin $allowedHosts){throw ('Vendor package redirected to an unapproved host: '+$finalUri.Host)}
+                if([string]$response.ContentType -match '(?i)text/html|application/json'){throw 'Vendor package endpoint returned HTML/JSON instead of a package.'}
+                if([int64]$response.ContentLength -gt 4GB){throw 'Vendor package response exceeds the 4 GB safety limit.'}
+                $inputStream=$response.GetResponseStream();$outputStream=[IO.File]::Open($file,[IO.FileMode]::Create,[IO.FileAccess]::Write,[IO.FileShare]::None)
+                $buffer=New-Object byte[] 65536;$received=[int64]0;$lastProgress=[int64]0
+                while(($read=$inputStream.Read($buffer,0,$buffer.Length)) -gt 0){$outputStream.Write($buffer,0,$read);$received+=$read;if($received -gt 4GB){throw 'Vendor package exceeded the 4 GB safety limit while downloading.'};if($response.ContentLength -gt 0 -and ($received-$lastProgress -ge 1MB -or $received -eq [int64]$response.ContentLength)){ $pct=[int][math]::Floor(($received/[double]$response.ContentLength)*100);if(Get-Command Write-AMRDriverWorkerProgress -ErrorAction SilentlyContinue){Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage ('Downloading OEM bundle: {0:N0} / {1:N0} bytes' -f $received,$response.ContentLength) -Percent $pct -BytesReceived $received -BytesTotal ([long]$response.ContentLength)};$lastProgress=$received }}
+                $outputStream.Flush();if($received -le 0 -or ($response.ContentLength -gt 0 -and $received -ne [int64]$response.ContentLength)){throw 'Vendor package download was empty or content length did not match.'};$downloaded=$true;break
+            }catch{$lastError=[string]$_.Exception.Message;if(Test-Path -LiteralPath $file){Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue};if($attempt -lt 3){Start-Sleep -Seconds (2*$attempt)}}finally{if($outputStream){$outputStream.Dispose()};if($inputStream){$inputStream.Dispose()};if($response){$response.Dispose()}}
+        }
+        if(-not $downloaded){throw ('Vendor package download failed after 3 attempts: '+$lastError)}
+        if(-not(Test-Path -LiteralPath $file -PathType Leaf)){throw 'Vendor package download did not create a file.'}
+        $info=Get-Item -LiteralPath $file;if($info.Length -le 0 -or $info.Length -gt 4GB){throw 'Vendor package size is empty or exceeds the 4 GB safety limit.'}
+        if($Candidate.ExpectedSize -and [int64]$Candidate.ExpectedSize -gt 0 -and [int64]$Candidate.ExpectedSize -ne [int64]$info.Length){throw 'Downloaded package size does not match the official catalog metadata.'}
+        $hashRecord=Get-FileHash -LiteralPath $file -Algorithm SHA256 -ErrorAction Stop
+        $expected=[string]$Candidate.ExpectedHash;$hashAlgorithm=[string]$Candidate.HashAlgorithm
+        if($expected){$actualExpected=(Get-FileHash -LiteralPath $file -Algorithm $hashAlgorithm -ErrorAction Stop).Hash;if($actualExpected -ine $expected){throw ('Vendor package '+$hashAlgorithm+' does not match the official catalog metadata.') }}
+        if(Get-Command Write-AMRDriverWorkerProgress -ErrorAction SilentlyContinue){Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Validating official vendor package signature and publisher'}
+        $signature=Get-AuthenticodeSignature -FilePath $file -ErrorAction Stop
+        if([string]$signature.Status -ne 'Valid' -or -not $signature.SignerCertificate){throw ('Vendor package Authenticode signature is not valid: '+[string]$signature.Status)}
+        $signer=[string]$signature.SignerCertificate.Subject
+        $expectedPublisher=switch($adapter){'DellDriverPackCatalog'{'Dell'} 'HPDriverPackCatalog'{'HP|Hewlett'} default{'Lenovo'}}
+        if($signer -notmatch ('(?i)'+$expectedPublisher)){throw ('Package signer does not identify the expected vendor '+$expectedPublisher+'. Actual signer: '+$signer)}
+        $manifest=[pscustomobject]@{Product='AMR Verified OEM Driver Pack';CreatedAt=(Get-Date).ToString('o');SourceAdapter=$adapter;Source=[string]$Candidate.Source;DeviceInstanceId=[string]$Device.DeviceId;DeviceName=[string]$Device.DeviceName;Title=[string]$Candidate.Title;Model=[string]$Candidate.Model;Version=[string]$Candidate.Version;DriverDate=[string]$Candidate.DriverDate;PackageUrl=$url;PackagePath=$file;SizeBytes=[int64]$info.Length;SHA256=[string]$hashRecord.Hash;ExpectedHash=$expected;HashAlgorithm=$hashAlgorithm;Signer=$signer;SignerThumbprint=[string]$signature.SignerCertificate.Thumbprint;SignatureStatus=[string]$signature.Status;Installable=$false;VerificationState='Downloaded, official catalog hash checked when supplied, and Authenticode signature validated. OEM bundle extraction and device-INF validation are not yet performed.';SearchMatch=[string]$Candidate.MatchReason}
+        $manifestPath=Join-Path $folder 'AMR_VendorPackage_Manifest.json';$manifest|ConvertTo-Json -Depth 7|Set-Content -LiteralPath $manifestPath -Encoding UTF8 -ErrorAction Stop
+        $Candidate|Add-Member -NotePropertyName IsDownloaded -NotePropertyValue $true -Force
+        $Candidate|Add-Member -NotePropertyName IsInstallable -NotePropertyValue $false -Force
+        $Candidate|Add-Member -NotePropertyName PackageFolder -NotePropertyValue $folder -Force
+        $Candidate|Add-Member -NotePropertyName PackagePath -NotePropertyValue $file -Force
+        $Candidate|Add-Member -NotePropertyName ManifestPath -NotePropertyValue $manifestPath -Force
+        $Candidate|Add-Member -NotePropertyName SHA256 -NotePropertyValue ([string]$hashRecord.Hash) -Force
+        $Candidate|Add-Member -NotePropertyName CatalogSigner -NotePropertyValue $signer -Force
+        $Candidate|Add-Member -NotePropertyName VerificationState -NotePropertyValue ([string]$manifest.VerificationState) -Force
+        return [pscustomobject]@{Success=$true;Candidate=$Candidate;PackagePath=$file;ManifestPath=$manifestPath;PackageFolder=$folder;SizeBytes=[int64]$info.Length;SHA256=[string]$hashRecord.Hash;Signer=$signer;Installable=$false;Message='Official OEM driver pack downloaded and cryptographically verified. It remains a vendor bundle; AMR has not extracted and INF-validated its contents, so it is not installable through the current PnPUtil pipeline.'}
+    }catch{if(Test-Path -LiteralPath $folder -PathType Container){Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue};throw}
+}
+
+function Show-AMRVendorPackageResults {
+    param([Parameter(Mandatory=$true)][object]$Device,[Parameter(Mandatory=$true)][object[]]$Candidates)
+    $dialog=New-Object System.Windows.Window;$dialog.Title='Direct Vendor Package Discovery – '+[string]$Device.DeviceName;$dialog.Width=1050;$dialog.Height=590;$dialog.MinWidth=820;$dialog.MinHeight=430;$dialog.WindowStartupLocation='CenterOwner';$dialog.ResizeMode='CanResize';$dialog.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#182638');$dialog.Foreground=[System.Windows.Media.Brushes]::White;if($script:Window -and $script:Window.IsVisible){$dialog.Owner=$script:Window}
+    $root=New-Object System.Windows.Controls.DockPanel;$root.Margin=[System.Windows.Thickness]::new(14)
+    $note=New-Object System.Windows.Controls.TextBlock;$note.Text='Multi-source vendor coverage: Dell Driver Pack Catalog, HP Client Driver Pack Catalog and Lenovo CDRT provide package candidates where exact model/OS catalog matches exist. MSI and GIGABYTE now add exact motherboard-model catalog metadata and official package links, but remain manual-download / non-installable until archive verification is complete. Other supported OEM, motherboard, component, storage, peripheral and system-integrator vendors appear as official portal leads in the same candidate manager. Portal leads are not packages. OEM bundles remain non-installable until extraction and INF/CAT validation; AMR will not execute vendor EXEs automatically.';$note.TextWrapping='Wrap';$note.Margin=[System.Windows.Thickness]::new(0,0,0,10);$note.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#FCD9A6');[System.Windows.Controls.DockPanel]::SetDock($note,'Top');[void]$root.Children.Add($note)
+    $grid=New-Object System.Windows.Controls.ListView;$grid.SelectionMode='Single';$grid.ItemsSource=$Candidates;$grid.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#111B29');$grid.Foreground=[System.Windows.Media.Brushes]::White
+    $view=New-Object System.Windows.Controls.GridView
+    foreach($colDef in @(@('Rank',55,'ComparisonRank'),@('Vendor',90,'Source'),@('Model',210,'Model'),@('Version',95,'Version'),@('Date',110,'DriverDate'),@('OS',90,'OS'),@('Match',245,'MatchConfidence'),@('Downloaded',90,'IsDownloaded'))){$col=New-Object System.Windows.Controls.GridViewColumn;$col.Header=$colDef[0];$col.Width=[double]$colDef[1];$col.DisplayMemberBinding=[System.Windows.Data.Binding]::new([string]$colDef[2]);[void]$view.Columns.Add($col)};$grid.View=$view;[void]$root.Children.Add($grid)
+    $bottom=New-Object System.Windows.Controls.StackPanel;$bottom.Orientation='Vertical';$bottom.Margin=[System.Windows.Thickness]::new(0,10,0,0);[System.Windows.Controls.DockPanel]::SetDock($bottom,'Bottom')
+    $detail=New-Object System.Windows.Controls.TextBlock;$detail.TextWrapping='Wrap';$detail.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#93C5FD');$detail.Margin=[System.Windows.Thickness]::new(0,0,0,8);[void]$bottom.Children.Add($detail)
+    $buttons=New-Object System.Windows.Controls.StackPanel;$buttons.Orientation='Horizontal';$buttons.HorizontalAlignment='Right'
+    $download=New-Object System.Windows.Controls.Button;$download.Content='Download & Verify Selected';$download.Width=205;$download.Height=34;$download.Margin=[System.Windows.Thickness]::new(0,0,8,0);$download.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB');$download.Foreground=[System.Windows.Media.Brushes]::White
+    $open=New-Object System.Windows.Controls.Button;$open.Content='Open Official Package URL';$open.Width=175;$open.Height=34;$open.Margin=[System.Windows.Thickness]::new(0,0,8,0);$open.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#245B46');$open.Foreground=[System.Windows.Media.Brushes]::White
+    $close=New-Object System.Windows.Controls.Button;$close.Content='Close';$close.Width=90;$close.Height=34;$close.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#303846');$close.Foreground=[System.Windows.Media.Brushes]::White;$close.Add_Click({$dialog.Close()})
+    $open.Add_Click({if($grid.SelectedItem -and $grid.SelectedItem.PackageUrl){Start-Process -FilePath ([string]$grid.SelectedItem.PackageUrl) -ErrorAction SilentlyContinue}})
+    $download.Add_Click(({
+        if(-not $grid.SelectedItem -or [bool]$grid.SelectedItem.IsDownloaded){return}
+        $selected=$grid.SelectedItem;$download.IsEnabled=$false;$open.IsEnabled=$false
+        try{
+            $null=Start-AMRDriverManagedWorker -Operation VendorPackageAcquisition -Device $Device -Candidate $selected
+            $poll=New-Object System.Windows.Threading.DispatcherTimer;$poll.Interval=[TimeSpan]::FromMilliseconds(400)
+            $poll.Add_Tick(({
+                if(-not $script:DriverManagedJob){$poll.Stop();$download.IsEnabled=$true;$open.IsEnabled=$true;return}
+                if($script:DriverManagedJob.State -in @('Completed','Failed','Stopped')){$poll.Stop();try{$acq=Complete-AMRDriverManagedWorker;if(-not $acq -or -not $acq.Success){throw 'Vendor package acquisition did not return a verified result.'};$detail.Text=($acq.Message+' Package: '+$acq.PackagePath+' | Signer: '+$acq.Signer+' | SHA-256: '+$acq.SHA256);$download.Content='Downloaded & Verified';$selected.IsDownloaded=$true;$selected.PackagePath=$acq.PackagePath;$selected.ManifestPath=$acq.ManifestPath;$selected.CatalogSigner=$acq.Signer;$selected.VerificationState=$acq.Message;Write-AMRLog ('Downloaded and verified '+$selected.Source+' OEM bundle for '+$Device.DeviceName+'.') SUCCESS Overview}catch{$detail.Text=('Vendor package acquisition failed: '+[string]$_.Exception.Message);Show-AMRMessage ([string]$_.Exception.Message) 'Vendor Package Acquisition' OK Warning | Out-Null}finally{$download.IsEnabled=$true;$open.IsEnabled=$true}}
+            }).GetNewClosure());$script:DriverManagedTimer=$poll;$poll.Start()
+        }catch{$download.IsEnabled=$true;$open.IsEnabled=$true;Show-AMRMessage ('Could not start vendor package acquisition: '+[string]$_.Exception.Message) 'Vendor Package Acquisition' OK Warning | Out-Null}
+    }).GetNewClosure())
+    [void]$buttons.Children.Add($download);[void]$buttons.Children.Add($open);[void]$buttons.Children.Add($close);[void]$bottom.Children.Add($buttons);[void]$root.Children.Add($bottom)
+    $grid.Add_SelectionChanged({if($grid.SelectedItem){$item=$grid.SelectedItem;$detail.Text=('Source: {0} | Model: {1} | Package: {2} | Expected hash: {3} {4} | Match: {5} | Status: {6}' -f $item.Source,$item.Model,$item.PackageUrl,$item.HashAlgorithm,$item.ExpectedHash,$item.MatchReason,$item.VerificationState);$download.IsEnabled=((-not [bool]$item.IsDownloaded) -and [bool]$item.IsDownloadable);$open.IsEnabled=(-not [string]::IsNullOrWhiteSpace([string]$item.PackageUrl))}})
+    $dialog.Content=$root;if($Candidates.Count -gt 0){$grid.SelectedIndex=0};[void]$dialog.ShowDialog()
+}
+
+function Start-AMRDriverScan {
+    if ($script:DriverManagedJob -or $script:DriverBatchActive -or $script:DriverSmartQueueActive) { return }
+    $button = C 'ScanDriversBtn'
+    if ($script:DriverActionJob -and $script:DriverActionJob.State -in @('Running','NotStarted')) {
+        (C 'DriverScanStatus').Text = 'Wait for the current driver download or installation to finish before scanning again.'
+        return
+    }
+    if ($script:DriverScanJob -and $script:DriverScanJob.State -in @('Running','NotStarted')) {
+        return
+    }
+    if($script:DriverOperationState.State -eq 'Running'){return}
+    $script:DriverScanGeneration = [int]$script:DriverScanGeneration + 1
+
+    try {
+        $button.IsEnabled = $false
+        $button.Content = 'Scanning…'
+        $script:DriverAllDeviceRows = @()
+        $script:DriverSmartSelectionReady = $false
+        $script:DriverSmartSelectedKeys = @()
+        $script:DriverSmartSelectionTime = $null
+        (C 'DriverScanStatus').Text = 'Detecting computer model, motherboard, Windows version and Plug and Play devices…'
+        (C 'DriverDeviceList').ItemsSource = $null
+        (C 'DriverActionStatus').Text = ('Scanning for applicable updates. AMR driver package copies are saved under: ' + (Join-Path $script:DownloadDir 'Drivers'))
+        (C 'DriverDownloadSelectedBtn').IsEnabled = $false
+        (C 'DriverInstallSelectedBtn').IsEnabled = $false
+        (C 'DriverCatalogSearchBtn').IsEnabled = $false
+
+        $driverPackageRoot = Join-Path $script:DownloadDir 'Drivers'
+        $driverWorkerFunctionNames = @('Get-AMRDriverVendorRegistry','Resolve-AMRDriverVendorName','Get-AMRDriverOEMModelProfile','Get-AMRDriverHardwareCoverage','Get-AMRDriverVendorSourceAdapters')
+        $driverWorkerFunctionDefinitions = @()
+        foreach($functionName in $driverWorkerFunctionNames) {
+            $functionInfo = Get-Command -Name $functionName -CommandType Function -ErrorAction Stop
+            $driverWorkerFunctionDefinitions += [pscustomobject]@{Name=$functionName;Definition=[string]$functionInfo.Definition}
+        }
+        $driverWorkerPayload = [pscustomobject]@{DriverPackageRoot=$driverPackageRoot;FunctionDefinitions=@($driverWorkerFunctionDefinitions)}
+        $script:DriverScanPartialShown = $false
+        $script:DriverScanJob = Start-Job -ArgumentList $driverWorkerPayload -ScriptBlock {
+            param($WorkerPayload)
+            $DriverPackageRoot = [string]$WorkerPayload.DriverPackageRoot
+            foreach($functionDefinition in @($WorkerPayload.FunctionDefinitions)) {
+                $functionPath = 'Function:\' + [string]$functionDefinition.Name
+                Set-Item -Path $functionPath -Value ([scriptblock]::Create([string]$functionDefinition.Definition)) -Force
+            }
+            $ErrorActionPreference = 'Stop'
+            $driverWorkerStartedAt = Get-Date
+            # CIM is preferred. Windows PowerShell 5.1's WMI provider is used only
+            # as a compatibility fallback when the corresponding CIM query fails.
+            try {
+                $computer = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop | Select-Object -First 1
+            } catch {
+                $cimComputerError = $_.Exception.Message
+                try { $computer = Get-WmiObject -Class Win32_ComputerSystem -ErrorAction Stop | Select-Object -First 1 }
+                catch { throw ('Computer identity query failed through CIM and WMI. CIM: {0} | WMI: {1}' -f $cimComputerError,$_.Exception.Message) }
+            }
+            if (-not $computer) { throw 'Computer identity query returned no Win32_ComputerSystem instance.' }
+            $board = $null
+            $bios = $null
+            try {
+                $operatingSystem = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop | Select-Object -First 1
+            } catch {
+                $cimOsError = $_.Exception.Message
+                try { $operatingSystem = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction Stop | Select-Object -First 1 }
+                catch { throw ('Windows identity query failed through CIM and WMI. CIM: {0} | WMI: {1}' -f $cimOsError,$_.Exception.Message) }
+            }
+            if (-not $operatingSystem) { throw 'Windows identity query returned no Win32_OperatingSystem instance.' }
+            $boards = @()
+            $bios = $null
+            $systemProduct = $null
+            $enclosureRows = @()
+            $processors = @()
+            $videoControllers = @()
+            try { $boards = @(Get-CimInstance -ClassName Win32_BaseBoard -ErrorAction Stop) } catch {}
+            $board = $boards | Select-Object -First 1
+            try { $bios = Get-CimInstance -ClassName Win32_BIOS -ErrorAction Stop | Select-Object -First 1 } catch {}
+            try { $systemProduct = Get-CimInstance -ClassName Win32_ComputerSystemProduct -ErrorAction Stop | Select-Object -First 1 } catch {}
+            try { $enclosureRows = @(Get-CimInstance -ClassName Win32_SystemEnclosure -ErrorAction Stop) } catch {}
+            try { $processors = @(Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop | ForEach-Object { [string]$_.Name } | Where-Object { $_ } | Select-Object -Unique) } catch {}
+            try { $videoControllers = @(Get-CimInstance -ClassName Win32_VideoController -ErrorAction Stop | ForEach-Object { [string]$_.Name } | Where-Object { $_ } | Select-Object -Unique) } catch {}
+
+            # Build a conservative system identity profile. SMBIOS values are often generic
+            # on custom-built systems, so the profile records confidence and never treats
+            # a motherboard vendor as proof of the complete computer OEM.
+            $systemManufacturer = [string]$computer.Manufacturer
+            $systemModel = [string]$computer.Model
+            $systemSku = [string]$computer.SystemSKUNumber
+            $systemFamily = [string]$computer.SystemFamily
+            $productVendor = if ($systemProduct) { [string]$systemProduct.Vendor } else { '' }
+            $productName = if ($systemProduct) { [string]$systemProduct.Name } else { '' }
+            $productVersion = if ($systemProduct) { [string]$systemProduct.Version } else { '' }
+            $chassisCodes = @($enclosureRows | ForEach-Object { @($_.ChassisTypes) } | ForEach-Object { try { [int]$_ } catch {} } | Where-Object { $_ -gt 0 } | Select-Object -Unique)
+            $portableChassisCodes = @(8,9,10,11,12,14,18,21,30,31,32)
+            $desktopChassisCodes = @(3,4,5,6,7,13,15,16,17)
+            $platformType = 'Unknown form factor'
+            if (@($chassisCodes | Where-Object { $_ -in $portableChassisCodes }).Count -gt 0 -or [int]$computer.PCSystemType -eq 2) { $platformType = 'Portable / laptop-class system' }
+            elseif (@($chassisCodes | Where-Object { $_ -in $desktopChassisCodes }).Count -gt 0 -or [int]$computer.PCSystemType -in @(1,3)) { $platformType = 'Desktop / workstation-class system' }
+            elseif ([int]$computer.PCSystemType -eq 4 -or [int]$computer.PCSystemType -eq 5 -or [int]$computer.PCSystemType -eq 7) { $platformType = 'Server-class system' }
+            $genericIdentityPattern = '(?i)to be filled|default string|system manufacturer|system product name|unknown|not specified|o\.e\.m\.|base board product|product name'
+            $identityEvidence = @($systemManufacturer,$systemModel,$systemSku,$productVendor,$productName) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) -and [string]$_ -notmatch $genericIdentityPattern }
+            $computerLooksBranded = ([string]$systemManufacturer -notmatch $genericIdentityPattern) -and ([string]$systemModel -notmatch $genericIdentityPattern) -and -not [string]::IsNullOrWhiteSpace($systemModel)
+            $systemClass = if ($computerLooksBranded) { 'Branded OEM / prebuilt identity detected' } elseif ($board -and [string]$board.Manufacturer -and [string]$board.Manufacturer -notmatch $genericIdentityPattern) { 'Likely custom-built or SMBIOS-generic system; motherboard identity available' } else { 'System identity incomplete; component-level detection will be primary' }
+            $identityConfidence = if ($computerLooksBranded -and $systemSku) { 'High' } elseif ($computerLooksBranded -or ($productVendor -and $productName -and $productName -notmatch $genericIdentityPattern)) { 'Moderate' } elseif ($identityEvidence.Count -gt 0) { 'Limited' } else { 'Low' }
+            $boardSummary = @($boards | ForEach-Object { (([string]$_.Manufacturer).Trim() + ' ' + ([string]$_.Product).Trim()).Trim() } | Where-Object { $_ } | Select-Object -Unique)
+
+            # Read the actual installed signed-driver inventory separately from PnP health.
+            # Win32_PnPSignedDriver exposes provider, version, date, INF and signature state.
+            $signedDriverMap = @{}
+            try {
+                $signedDrivers = Get-CimInstance -ClassName Win32_PnPSignedDriver -ErrorAction Stop
+                foreach ($signedDriver in $signedDrivers) {
+                    $driverKey = ([string]$signedDriver.DeviceID).ToUpperInvariant()
+                    if (-not [string]::IsNullOrWhiteSpace($driverKey)) {
+                        $signedDriverMap[$driverKey] = $signedDriver
+                    }
+                }
+            } catch {}
+
+            $errorMap = @{
+                0 = 'OK'; 1 = 'Not configured'; 2 = 'Not started'; 3 = 'Driver corrupted'
+                4 = 'Device not working'; 5 = 'Device failure'; 6 = 'Cannot communicate'
+                7 = 'Driver required'; 8 = 'Driver load failed'; 9 = 'Invalid driver'
+                10 = 'Cannot start'; 11 = 'Device failure'; 12 = 'Insufficient resources'
+                13 = 'Device not found'; 14 = 'Restart required'; 15 = 'Re-enumeration required'
+                16 = 'Resource conflict'; 17 = 'Reconfiguration required'; 18 = 'Reinstall driver'
+                19 = 'Registry configuration issue'; 20 = 'VxD loader failure'; 21 = 'Restart required'
+                22 = 'Disabled'; 23 = 'System failure'; 24 = 'Device not present'
+                25 = 'Configuration pending'; 26 = 'Configuration pending'; 27 = 'No resources'
+                28 = 'Driver not installed'; 29 = 'Firmware disabled'; 30 = 'IRQ conflict'
+                31 = 'Driver cannot load'
+            }
+
+            $deviceRows = @()
+            try {
+                try {
+                    $pnpDevices = @(Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction Stop)
+                } catch {
+                    $cimPnpError = $_.Exception.Message
+                    try { $pnpDevices = @(Get-WmiObject -Class Win32_PnPEntity -ErrorAction Stop) }
+                    catch { throw ('Plug and Play enumeration failed through CIM and WMI. CIM: {0} | WMI: {1}' -f $cimPnpError,$_.Exception.Message) }
+                }
+                if ($null -eq $pnpDevices) { throw 'Plug and Play enumeration returned a null result.' }
+                if (@($pnpDevices).Count -eq 0) { throw 'Plug and Play enumeration completed but returned zero devices; refusing to report a misleading successful scan.' }
+                foreach ($device in $pnpDevices) {
+                    $errorCode = 0
+                    try { if ($null -ne $device.ConfigManagerErrorCode) { $errorCode = [int]$device.ConfigManagerErrorCode } } catch {}
+                    $statusText = if ($errorMap.ContainsKey($errorCode)) { [string]$errorMap[$errorCode] } else { if ($errorCode -eq 0) { 'OK' } else { 'Error' } }
+                    $hardwareIds = @()
+                    $compatibleIds = @()
+                    try { $hardwareIds = @($device.HardwareID | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { ([string]$_).Trim().ToUpperInvariant() } | Select-Object -Unique) } catch {}
+                    try { $compatibleIds = @($device.CompatibleID | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { ([string]$_).Trim().ToUpperInvariant() } | Select-Object -Unique) } catch {}
+                    $installedDriver = $null
+                    $deviceKey = ([string]$device.DeviceID).ToUpperInvariant()
+                    if (-not [string]::IsNullOrWhiteSpace($deviceKey) -and $signedDriverMap.ContainsKey($deviceKey)) {
+                        $installedDriver = $signedDriverMap[$deviceKey]
+                    }
+                    $driverDateText = 'Not available'
+                    if ($installedDriver -and $installedDriver.DriverDate) {
+                        try { $driverDateText = ([datetime]$installedDriver.DriverDate).ToString('yyyy-MM-dd') } catch { $driverDateText = [string]$installedDriver.DriverDate }
+                    }
+                    $idVendorHint = ''
+                    $idVendorCode = ''
+                    foreach ($hardwareId in @($hardwareIds)) {
+                        if ($hardwareId -match '^PCI\\VEN_([0-9A-F]{4})') {
+                            $vendorCode = $Matches[1]
+                            $idVendorCode = 'PCI VEN_' + $vendorCode
+                            $idVendorHint = switch ($vendorCode) {
+                                '8086' { 'Intel'; break }
+                                '10DE' { 'NVIDIA'; break }
+                                '1002' { 'AMD'; break }
+                                '10EC' { 'Realtek'; break }
+                                '14E4' { 'Broadcom'; break }
+                                '168C' { 'Qualcomm / Atheros'; break }
+                                '1B4B' { 'Marvell'; break }
+                                '1022' { 'AMD'; break }
+                                '1106' { 'VIA'; break }
+                                '1AF4' { 'VirtIO'; break }
+                                default { '' }
+                            }
+                            if ($idVendorHint) { break }
+                        } elseif ($hardwareId -match '^USB\\VID_([0-9A-F]{4})') {
+                            $vendorCode = $Matches[1]
+                            $idVendorCode = 'USB VID_' + $vendorCode
+                            $idVendorHint = switch ($vendorCode) {
+                                '8087' { 'Intel'; break }
+                                '0BDA' { 'Realtek'; break }
+                                '0A5C' { 'Broadcom'; break }
+                                '0CF3' { 'Qualcomm / Atheros'; break }
+                                default { '' }
+                            }
+                            if ($idVendorHint) { break }
+                        }
+                    }
+                    $deviceRows += [pscustomobject]@{
+                        DeviceName = [string]$device.Name
+                        DeviceClass = [string]$device.PNPClass
+                        Manufacturer = [string]$device.Manufacturer
+                        HardwareIdVendorCode = $idVendorCode
+                        HardwareIdVendorHint = $idVendorHint
+                        StatusText = $statusText
+                        ErrorCode = $errorCode
+                        DriverProvider = $(if ($installedDriver -and $installedDriver.DriverProviderName) { [string]$installedDriver.DriverProviderName } else { 'Unknown' })
+                        DriverVersion = $(if ($installedDriver -and $installedDriver.DriverVersion) { [string]$installedDriver.DriverVersion } else { 'Not installed / unavailable' })
+                        DriverDate = $driverDateText
+                        DriverInf = $(if ($installedDriver) { [string]$installedDriver.InfName } else { '' })
+                        DriverIsSigned = $(if ($installedDriver) { [bool]$installedDriver.IsSigned } else { $false })
+                        DeviceId = [string]$device.DeviceID
+                        HardwareIds = $hardwareIds
+                        CompatibleIds = $compatibleIds
+                        Service = [string]$device.Service
+                    }
+                }
+            } catch {
+                throw ('Device enumeration could not complete. The scan is marked failed instead of presenting a synthetic device row. {0}' -f $_.Exception.Message)
+            }
+
+            $hardwareReadyAt = Get-Date
+            # Initialize optional update state before publishing the first hardware-only result.
+            foreach ($deviceRow in $deviceRows) {
+                $deviceRow | Add-Member -NotePropertyName UpdateStatus -NotePropertyValue 'Windows Update check running in background' -Force
+                $deviceRow | Add-Member -NotePropertyName AvailableVersion -NotePropertyValue '--' -Force
+                $deviceRow | Add-Member -NotePropertyName AvailableUpdate -NotePropertyValue '' -Force
+                $deviceRow | Add-Member -NotePropertyName UpdateId -NotePropertyValue '' -Force
+                $deviceRow | Add-Member -NotePropertyName UpdateRevision -NotePropertyValue 0 -Force
+                $deviceRow | Add-Member -NotePropertyName UpdateReady -NotePropertyValue $false -Force
+                $deviceRow | Add-Member -NotePropertyName LocalPackageReady -NotePropertyValue $false -Force
+                $deviceRow | Add-Member -NotePropertyName LocalPackageFolder -NotePropertyValue $null -Force
+                $deviceRow | Add-Member -NotePropertyName UpdateDownloadSize -NotePropertyValue 0 -Force
+                $deviceRow | Add-Member -NotePropertyName MatchCandidateCount -NotePropertyValue 0 -Force
+                $deviceRow | Add-Member -NotePropertyName MatchConfidence -NotePropertyValue 'Pending Windows Update check' -Force
+                $deviceRow | Add-Member -NotePropertyName MatchReason -NotePropertyValue '' -Force
+                $deviceRow | Add-Member -NotePropertyName CandidateOptions -NotePropertyValue @() -Force
+                $deviceRow | Add-Member -NotePropertyName RecommendedUpdateId -NotePropertyValue '' -Force
+                $deviceRow | Add-Member -NotePropertyName RecommendedUpdateRevision -NotePropertyValue 0 -Force
+            }
+            [pscustomobject]@{
+                ScanStage = 'HardwareReady'
+                ComputerManufacturer = [string]$computer.Manufacturer
+                ComputerModel = [string]$computer.Model
+                BoardManufacturer = $(if ($board) { [string]$board.Manufacturer } else { '' })
+                BoardProduct = $(if ($board) { [string]$board.Product } else { '' })
+                WindowsCaption = [string]$operatingSystem.Caption
+                WindowsVersion = [string]$operatingSystem.Version
+                WindowsBuild = [string]$operatingSystem.BuildNumber
+                WindowsArchitecture = [string]$operatingSystem.OSArchitecture
+                InstalledDriverCount = $signedDriverMap.Count
+                HardwareScanSeconds = [math]::Round(($hardwareReadyAt - $driverWorkerStartedAt).TotalSeconds,2)
+                Devices = @($deviceRows)
+            }
+
+            # Query Microsoft's Windows Update Agent for driver updates currently offered
+            # to this exact Windows installation. This is a read-only search: no download
+            # or installation is performed. Match candidates by hardware/compatible IDs.
+            $wuSearchStartedAt = Get-Date
+            $wuDriverUpdates = @()
+            $wuScanStatus = 'Unavailable'
+            $wuScanMessage = ''
+            try {
+                $wuSession = New-Object -ComObject Microsoft.Update.Session
+                $wuSearcher = $wuSession.CreateUpdateSearcher()
+                $wuResult = $wuSearcher.Search("IsInstalled=0 and IsHidden=0 and Type='Driver'")
+                for ($updateIndex = 0; $updateIndex -lt $wuResult.Updates.Count; $updateIndex++) {
+                    $wuUpdate = $wuResult.Updates.Item($updateIndex)
+                    $wuHardwareId = ''
+                    $wuVersion = ''
+                    $wuManufacturer = ''
+                    $wuModel = ''
+                    $wuClass = ''
+                    try { $wuHardwareId = [string]$wuUpdate.DriverHardwareID } catch {}
+                    try { $wuVersion = [string]$wuUpdate.DriverVersion } catch {}
+                    try { $wuManufacturer = [string]$wuUpdate.DriverManufacturer } catch {}
+                    try { $wuModel = [string]$wuUpdate.DriverModel } catch {}
+                    try { $wuClass = [string]$wuUpdate.DriverClass } catch {}
+                    $wuDriverDate = [datetime]::MinValue
+                    try { if ($wuUpdate.DriverDate) { $wuDriverDate = [datetime]$wuUpdate.DriverDate } } catch {}
+                    if (-not [string]::IsNullOrWhiteSpace($wuHardwareId)) {
+                        $wuDriverUpdates += [pscustomobject]@{
+                            Title = [string]$wuUpdate.Title
+                            HardwareId = $wuHardwareId.Trim().ToUpperInvariant()
+                            Version = $wuVersion
+                            DriverDate = $wuDriverDate
+                            Manufacturer = $wuManufacturer
+                            Model = $wuModel
+                            DriverClass = $wuClass
+                            UpdateId = [string]$wuUpdate.Identity.UpdateID
+                            UpdateRevision = [int]$wuUpdate.Identity.RevisionNumber
+                            IsDownloaded = [bool]$wuUpdate.IsDownloaded
+                            MaxDownloadSize = [int64]$wuUpdate.MaxDownloadSize
+                        }
+                    }
+                }
+                $wuScanStatus = 'Completed'
+                $wuScanMessage = ('Windows Update returned {0} driver candidate(s).' -f $wuDriverUpdates.Count)
+            } catch {
+                $wuScanStatus = 'Failed'
+                $wuScanMessage = [string]$_.Exception.Message
+            }
+
+            $wuSearchFinishedAt = Get-Date
+            $matchedUpdateCount = 0
+            foreach ($deviceRow in $deviceRows) {
+                $deviceRow.UpdateStatus = $(if ($wuScanStatus -eq 'Completed') { 'No matching update offered' } else { 'Online check unavailable' })
+                $deviceRow.MatchConfidence = 'No match'
+                if ($wuScanStatus -ne 'Completed') { continue }
+                $deviceHardwareIds = @($deviceRow.HardwareIds | ForEach-Object { ([string]$_).Trim().ToUpperInvariant() } | Where-Object { $_ } | Select-Object -Unique)
+                $deviceCompatibleIds = @($deviceRow.CompatibleIds | ForEach-Object { ([string]$_).Trim().ToUpperInvariant() } | Where-Object { $_ } | Select-Object -Unique)
+                $rankedMatches = @()
+
+                # Rank every Windows Update candidate for this device instead of
+                # accepting the first result returned by the update service.
+                # Exact Hardware IDs outrank Compatible IDs; earlier (more
+                # specific) IDs in the PnP list outrank broader identifiers.
+                foreach ($candidate in $wuDriverUpdates) {
+                    $matchTypeRank = 99
+                    $matchIdIndex = 9999
+                    $matchType = ''
+                    for ($idIndex = 0; $idIndex -lt $deviceHardwareIds.Count; $idIndex++) {
+                        if ($deviceHardwareIds[$idIndex] -eq [string]$candidate.HardwareId) {
+                            $matchTypeRank = 0; $matchIdIndex = $idIndex; $matchType = 'Exact Hardware ID'; break
+                        }
+                    }
+                    if ($matchTypeRank -eq 99) {
+                        for ($idIndex = 0; $idIndex -lt $deviceCompatibleIds.Count; $idIndex++) {
+                            if ($deviceCompatibleIds[$idIndex] -eq [string]$candidate.HardwareId) {
+                                $matchTypeRank = 1; $matchIdIndex = $idIndex; $matchType = 'Compatible ID'; break
+                            }
+                        }
+                    }
+                    if ($matchTypeRank -eq 99) { continue }
+
+                    $modelRank = 1
+                    $candidateModel = ([string]$candidate.Model).Trim()
+                    $deviceName = ([string]$deviceRow.DeviceName).Trim()
+                    if ($candidateModel -and $deviceName -and ($candidateModel.IndexOf($deviceName,[StringComparison]::OrdinalIgnoreCase) -ge 0 -or $deviceName.IndexOf($candidateModel,[StringComparison]::OrdinalIgnoreCase) -ge 0)) { $modelRank = 0 }
+                    $manufacturerRank = 1
+                    $candidateManufacturer = ([string]$candidate.Manufacturer).Trim()
+                    $deviceManufacturer = ([string]$deviceRow.Manufacturer).Trim()
+                    if ($candidateManufacturer -and $deviceManufacturer -and ($candidateManufacturer.IndexOf($deviceManufacturer,[StringComparison]::OrdinalIgnoreCase) -ge 0 -or $deviceManufacturer.IndexOf($candidateManufacturer,[StringComparison]::OrdinalIgnoreCase) -ge 0)) { $manufacturerRank = 0 }
+                    $versionSort = [version]'0.0'
+                    try { if (-not [string]::IsNullOrWhiteSpace([string]$candidate.Version)) { $versionSort = [version]([string]$candidate.Version) } } catch {}
+                    $rankedMatches += [pscustomobject]@{
+                        Candidate = $candidate
+                        MatchTypeRank = $matchTypeRank
+                        MatchIdIndex = $matchIdIndex
+                        MatchType = $matchType
+                        ModelRank = $modelRank
+                        ManufacturerRank = $manufacturerRank
+                        VersionSort = $versionSort
+                        DriverDate = [datetime]$candidate.DriverDate
+                    }
+                }
+
+                $deviceRow.MatchCandidateCount = $rankedMatches.Count
+                if ($rankedMatches.Count -gt 0) {
+                    # Preserve the full ranked candidate inventory for Professional mode.
+                    # The Smart experience still consumes only the top-ranked recommendation.
+                    $orderedMatches = @($rankedMatches | Sort-Object @{ Expression = { $_.MatchTypeRank }; Ascending = $true }, @{ Expression = { $_.MatchIdIndex }; Ascending = $true }, @{ Expression = { $_.ModelRank }; Ascending = $true }, @{ Expression = { $_.ManufacturerRank }; Ascending = $true }, @{ Expression = { $_.VersionSort }; Descending = $true }, @{ Expression = { $_.DriverDate }; Descending = $true }, @{ Expression = { $_.Candidate.Title }; Ascending = $true })
+                    $candidateOptions = @()
+                    $candidateRank = 0
+                    foreach ($rankedCandidate in $orderedMatches) {
+                        $candidateRank++
+                        $candidate = $rankedCandidate.Candidate
+                        $candidateOptions += [pscustomobject]@{
+                            Rank = $candidateRank
+                            Title = [string]$candidate.Title
+                            Version = [string]$candidate.Version
+                            DriverDate = $(if ($candidate.DriverDate -and [datetime]$candidate.DriverDate -ne [datetime]::MinValue) { ([datetime]$candidate.DriverDate).ToString('yyyy-MM-dd') } else { 'Not supplied' })
+                            Manufacturer = [string]$candidate.Manufacturer
+                            Model = [string]$candidate.Model
+                            DriverClass = [string]$candidate.DriverClass
+                            UpdateId = [string]$candidate.UpdateId
+                            UpdateRevision = [int]$candidate.UpdateRevision
+                            HardwareId = [string]$candidate.HardwareId
+                            MatchType = [string]$rankedCandidate.MatchType
+                            MatchConfidence = $(if ($rankedCandidate.MatchTypeRank -eq 0) { 'High – exact Hardware ID' } else { 'Moderate – Compatible ID' })
+                            MatchIdIndex = [int]$rankedCandidate.MatchIdIndex
+                            ModelRank = [int]$rankedCandidate.ModelRank
+                            ManufacturerRank = [int]$rankedCandidate.ManufacturerRank
+                            IsDownloaded = [bool]$candidate.IsDownloaded
+                            MaxDownloadSize = [int64]$candidate.MaxDownloadSize
+                            Source = 'Microsoft Windows Update Agent'
+                            SourceAdapter = 'WindowsUpdateAgent'
+                            SourceUpdateId = [string]$candidate.UpdateId
+                            IsInstallable = $false
+                            VerificationState = 'Windows Update applicability offered; package validation still pending'
+                            SourceType = 'MicrosoftWU'
+                            MatchReason = ('{0}; ID priority #{1}; model match={2}; manufacturer match={3}' -f $rankedCandidate.MatchType,($rankedCandidate.MatchIdIndex + 1),($rankedCandidate.ModelRank -eq 0),($rankedCandidate.ManufacturerRank -eq 0))
+                        }
+                    }
+                    $deviceRow.CandidateOptions = @($candidateOptions)
+                    # Ranking is deterministic: ID quality/specificity first,
+                    # then model/manufacturer hints, then version and date.
+                    $bestMatch = $rankedMatches | Sort-Object @{ Expression = { $_.MatchTypeRank }; Ascending = $true }, @{ Expression = { $_.MatchIdIndex }; Ascending = $true }, @{ Expression = { $_.ModelRank }; Ascending = $true }, @{ Expression = { $_.ManufacturerRank }; Ascending = $true }, @{ Expression = { $_.VersionSort }; Descending = $true }, @{ Expression = { $_.DriverDate }; Descending = $true }, @{ Expression = { $_.Candidate.Title }; Ascending = $true } | Select-Object -First 1
+                    $matchedUpdate = $bestMatch.Candidate
+                    $matchedUpdateCount++
+                    $deviceRow.MatchConfidence = $(if ($bestMatch.MatchTypeRank -eq 0) { 'High – exact hardware match' } else { 'Moderate – compatible ID match' })
+                    $deviceRow.MatchReason = ('{0}; ID priority #{1}; {2} candidate(s) compared' -f $bestMatch.MatchType,($bestMatch.MatchIdIndex + 1),$rankedMatches.Count)
+                    $deviceRow.UpdateStatus = ('Best of {0}: {1}' -f $rankedMatches.Count,$bestMatch.MatchType)
+                    $deviceRow.AvailableVersion = $(if ($matchedUpdate.Version) { [string]$matchedUpdate.Version } else { 'Version not supplied' })
+                    $deviceRow.AvailableUpdate = [string]$matchedUpdate.Title
+                    $deviceRow.UpdateId = [string]$matchedUpdate.UpdateId
+                    $deviceRow.UpdateRevision = [int]$matchedUpdate.UpdateRevision
+                    $deviceRow.RecommendedUpdateId = [string]$matchedUpdate.UpdateId
+                    $deviceRow.RecommendedUpdateRevision = [int]$matchedUpdate.UpdateRevision
+                    $deviceRow.UpdateReady = [bool]$matchedUpdate.IsDownloaded
+                    $deviceRow.LocalPackageReady = $false
+                    $deviceRow.LocalPackageFolder = $null
+                    try {
+                        $safeDeviceName = ([string]$deviceRow.DeviceId -replace '[^A-Za-z0-9._-]','_')
+                        if ($safeDeviceName.Length -gt 70) { $safeDeviceName = $safeDeviceName.Substring(0,70) }
+                        $safeUpdateId = ([string]$matchedUpdate.UpdateId -replace '[^A-Fa-f0-9-]','')
+                        $localFolder = Join-Path $DriverPackageRoot ('{0}_{1}_r{2}' -f $safeDeviceName,$safeUpdateId,[int]$matchedUpdate.UpdateRevision)
+                        $manifestPath = Join-Path $localFolder 'AMR_DriverPackage_Manifest.json'
+                        if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+                            $localManifest = Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                            $manifestFilesPresent = (@($localManifest.Files).Count -gt 0)
+                            foreach ($manifestFile in @($localManifest.Files)) {
+                                $manifestFilePath = Join-Path $localFolder ([string]$manifestFile.FileName)
+                                if (-not (Test-Path -LiteralPath $manifestFilePath -PathType Leaf)) { $manifestFilesPresent = $false; break }
+                                if ([int64](Get-Item -LiteralPath $manifestFilePath -ErrorAction Stop).Length -ne [int64]$manifestFile.SizeBytes) { $manifestFilesPresent = $false; break }
+                            }
+                            $manifestInfsPresent = (@($localManifest.InstallableInfFiles).Count -gt 0)
+                            foreach ($relativeInf in @($localManifest.InstallableInfFiles)) {
+                                $relativeInf = [string]$relativeInf
+                                if ([IO.Path]::IsPathRooted($relativeInf) -or @($relativeInf -split '[\\/]') -contains '..') { $manifestInfsPresent = $false; break }
+                                $infPath = Join-Path (Join-Path $localFolder '_AMR_Expanded') $relativeInf
+                                if (-not (Test-Path -LiteralPath $infPath -PathType Leaf)) { $manifestInfsPresent = $false; break }
+                            }
+                            if ([bool]$localManifest.Installable -and [string]$localManifest.UpdateId -eq [string]$matchedUpdate.UpdateId -and [int]$localManifest.Revision -eq [int]$matchedUpdate.UpdateRevision -and $manifestInfsPresent -and $manifestFilesPresent) {
+                                $deviceRow.LocalPackageReady = $true
+                                $deviceRow.LocalPackageFolder = $localFolder
+                                $deviceRow.UpdateReady = $true
+                            }
+                        }
+                    } catch {}
+                    $deviceRow.UpdateDownloadSize = [int64]$matchedUpdate.MaxDownloadSize
+                    if ($deviceRow.LocalPackageReady) { $deviceRow.UpdateStatus = ('AMR package ready to install • best of {0}' -f $rankedMatches.Count) }
+                    elseif ($deviceRow.UpdateReady) { $deviceRow.UpdateStatus = ('Windows Update cache ready • best of {0}' -f $rankedMatches.Count) }
+                }
+            }
+
+            $enrichmentStartedAt = Get-Date
+            $oemProfile = Get-AMRDriverOEMModelProfile -ComputerManufacturer ([string]$computer.Manufacturer) -ComputerModel ([string]$computer.Model) -SystemSKU $systemSku -SystemFamily $systemFamily -ProductVendor $productVendor -ProductName $productName -ProductVersion $productVersion -BoardManufacturer $(if($board){[string]$board.Manufacturer}else{''}) -BoardProduct $(if($board){[string]$board.Product}else{''}) -BoardInventory @($boardSummary)
+            foreach($deviceRow in $deviceRows) {
+                $coverage = Get-AMRDriverHardwareCoverage -Device $deviceRow
+                foreach($property in $coverage.PSObject.Properties) { $deviceRow | Add-Member -NotePropertyName $property.Name -NotePropertyValue $property.Value -Force }
+                if([string]::IsNullOrWhiteSpace([string]$deviceRow.HardwareIdVendorHint) -and -not [string]::IsNullOrWhiteSpace([string]$coverage.HardwareVendorName)) { $deviceRow | Add-Member -NotePropertyName HardwareIdVendorHint -NotePropertyValue ([string]$coverage.HardwareVendorName) -Force }
+                if([string]::IsNullOrWhiteSpace([string]$deviceRow.HardwareIdVendorCode)) {
+                    if($coverage.PciVendorId) { $deviceRow | Add-Member -NotePropertyName HardwareIdVendorCode -NotePropertyValue ('PCI VEN_'+[string]$coverage.PciVendorId) -Force }
+                    elseif($coverage.UsbVendorId) { $deviceRow | Add-Member -NotePropertyName HardwareIdVendorCode -NotePropertyValue ('USB VID_'+[string]$coverage.UsbVendorId) -Force }
+                    elseif($coverage.AcpiVendorCode) { $deviceRow | Add-Member -NotePropertyName HardwareIdVendorCode -NotePropertyValue ('ACPI '+[string]$coverage.AcpiVendorCode) -Force }
+                }
+                $deviceRow | Add-Member -NotePropertyName OEMMatchSummary -NotePropertyValue (([string]$oemProfile.OEMVendor+' '+[string]$oemProfile.Confidence).Trim()) -Force
+                $deviceRow | Add-Member -NotePropertyName VendorSourceCandidates -NotePropertyValue @(Get-AMRDriverVendorSourceAdapters -Device $deviceRow -OEMProfile $oemProfile -WindowsContext (([string]$operatingSystem.Caption+' '+[string]$operatingSystem.OSArchitecture).Trim())) -Force
+            }
+            $enrichmentFinishedAt = Get-Date
+
+            [pscustomobject]@{
+                ScanStage = 'Completed'
+                OEMModelProfile = $oemProfile
+                HardwareScanSeconds = [math]::Round(($hardwareReadyAt - $driverWorkerStartedAt).TotalSeconds,2)
+                WUScanSeconds = [math]::Round(($wuSearchFinishedAt - $wuSearchStartedAt).TotalSeconds,2)
+                EnrichmentSeconds = [math]::Round(($enrichmentFinishedAt - $enrichmentStartedAt).TotalSeconds,2)
+                TotalWorkerSeconds = [math]::Round(($enrichmentFinishedAt - $driverWorkerStartedAt).TotalSeconds,2)
+                InstalledDriverCount = $signedDriverMap.Count
+                WUScanStatus = $wuScanStatus
+                WUScanMessage = $wuScanMessage
+                WUDriverCandidateCount = $wuDriverUpdates.Count
+                WUMatchedDeviceCount = $matchedUpdateCount
+                WUMultipleCandidateDeviceCount = @($deviceRows | Where-Object { [int]$_.MatchCandidateCount -gt 1 }).Count
+                ComputerManufacturer = [string]$computer.Manufacturer
+                ComputerModel = [string]$computer.Model
+                ComputerSystemSKU = $systemSku
+                ComputerSystemFamily = $systemFamily
+                SystemProductVendor = $productVendor
+                SystemProductName = $productName
+                SystemProductVersion = $productVersion
+                PlatformType = $platformType
+                SystemClass = $systemClass
+                IdentityConfidence = $identityConfidence
+                SystemIdentitySummary = ('{0} • {1} (identity confidence: {2}) • SKU: {3} • Family: {4} • SMBIOS product: {5} {6} • BIOS: {7} • CPU: {8} • GPU(s): {9} • Board(s): {10}' -f $platformType,$systemClass,$identityConfidence,$(if($systemSku){$systemSku}else{'not supplied'}),$(if($systemFamily){$systemFamily}else{'not supplied'}),$productVendor,$productName,$(if($bios -and $bios.SMBIOSBIOSVersion){[string]$bios.SMBIOSBIOSVersion}else{'not supplied'}),$(if($processors.Count){$processors -join '; '}else{'not detected'}),$(if($videoControllers.Count){$videoControllers -join '; '}else{'not detected'}),$(if($boardSummary.Count){$boardSummary -join '; '}else{'not detected'}))
+                ProcessorNames = @($processors)
+                VideoControllerNames = @($videoControllers)
+                BoardInventory = @($boardSummary)
+                ChassisTypes = @($chassisCodes)
+                BoardManufacturer = $(if ($board) { [string]$board.Manufacturer } else { '' })
+                BoardProduct = $(if ($board) { [string]$board.Product } else { '' })
+                BIOSVersion = $(if ($bios) { [string]$bios.SMBIOSBIOSVersion } else { '' })
+                WindowsCaption = [string]$operatingSystem.Caption
+                WindowsVersion = [string]$operatingSystem.Version
+                WindowsBuild = [string]$operatingSystem.BuildNumber
+                WindowsArchitecture = [string]$operatingSystem.OSArchitecture
+                Devices = @($deviceRows)
+                ScanTime = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+            }
+        }
+
+        $scanGeneration=[int]$script:DriverOperationState.Generation+1
+        $script:DriverOperationState=[pscustomobject]@{Name='DeviceScan';State='Running';StartedAt=(Get-Date);Generation=$scanGeneration;ScanGeneration=[int]$script:DriverScanGeneration;CanCancel=$false;Status='Scanning devices and Windows Update'}
+        if (-not $script:DriverScanTimer) {
+            $script:DriverScanTimer = New-Object System.Windows.Threading.DispatcherTimer
+            $script:DriverScanTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+            $script:DriverScanTimer.Add_Tick({
+                $job = $script:DriverScanJob
+                if (-not $job) {
+                    $script:DriverScanTimer.Stop()
+                    try {
+                        if ($script:DriverOperationState.Name -eq 'DeviceScan') { $script:DriverOperationState = [pscustomobject]@{Name='Idle';State='Idle';StartedAt=$null;Generation=[int]$script:DriverOperationState.Generation;CanCancel=$false;Status='Ready'} }
+                        $scanButton = C 'ScanDriversBtn'
+                        if ($scanButton) { $scanButton.IsEnabled = $true; $scanButton.Content = '⌕  Scan Device' }
+                        (C 'DriverScanStatus').Text = 'Scan stopped because its background job reference was lost. Start a new scan; review Diagnostics if this repeats.'
+                        Write-AMRDiagnostic -Severity 'ERROR' -Area 'DriverCenter' -Operation 'ScanJobMissing' -Message 'The scan timer fired but DriverScanJob was null; UI state was recovered.'
+                        Update-AMRDriverActionButtons
+                    } catch { Write-AMRDiagnostic -Severity 'ERROR' -Area 'DriverCenter' -Operation 'ScanJobMissingRecovery' -Message 'Failed to recover the scan UI after the background job reference was lost.' -ErrorRecord $_ }
+                    return
+                }
+                if ($job.State -eq 'Running') {
+                    try {
+                        $availableStages = @(Receive-Job -Job $job -Keep -ErrorAction SilentlyContinue)
+                        $hardwareStage = @($availableStages | Where-Object { $_ -and $_.ScanStage -eq 'HardwareReady' } | Select-Object -Last 1)
+                        if ($hardwareStage.Count -gt 0 -and -not $script:DriverScanPartialShown) {
+                            $script:DriverScanPartialShown = $true
+                            $stage = $hardwareStage[0]
+                            $stageDevices = @($stage.Devices)
+                            $script:DriverAllDeviceRows = @($stageDevices)
+                            (C 'DriverComputerModel').Text = $(if([string]::IsNullOrWhiteSpace([string]$stage.ComputerModel)){'Model unavailable'}else{[string]$stage.ComputerModel})
+                            (C 'DriverComputerManufacturer').Text = 'Manufacturer: ' + $(if($stage.ComputerManufacturer){[string]$stage.ComputerManufacturer}else{'Unknown'})
+                            (C 'DriverBoardModel').Text = $(if($stage.BoardProduct){[string]$stage.BoardProduct}else{'Motherboard model unavailable'})
+                            (C 'DriverBoardManufacturer').Text = 'Manufacturer: ' + $(if($stage.BoardManufacturer){[string]$stage.BoardManufacturer}else{'Unknown'})
+                            (C 'DriverWindowsInfo').Text = ('{0} • {1} • Build {2} • {3}' -f $stage.WindowsCaption,$stage.WindowsVersion,$stage.WindowsBuild,$stage.WindowsArchitecture)
+                            (C 'DriverDeviceCount').Text = [string]$stageDevices.Count
+                            (C 'DriverProblemCount').Text = [string]@($stageDevices | Where-Object { [int]$_.ErrorCode -ne 0 }).Count
+                            Set-AMRDriverExperienceMode -Mode $script:DriverExperienceMode
+                            (C 'DriverScanStatus').Text = ('Hardware inventory ready: {0} devices detected. Windows Update driver matching is continuing in the background; the interface is available.' -f $stageDevices.Count)
+                            (C 'DriverActionStatus').Text = 'Device inventory is ready. AMR is checking applicable Windows Update driver candidates in the background.'
+                        }
+                    } catch {
+                        Write-AMRDiagnostic -Severity 'WARNING' -Area 'DriverCenter' -Operation 'ProgressiveHardwareDisplay' -Message ([string]$_.Exception.Message) -ErrorRecord $_
+                    }
+                    return
+                }
+                if ($job.State -notin @('Completed','Failed','Stopped')) { return }
+
+                $script:DriverScanTimer.Stop()
+                try {
+                    if ($job.State -ne 'Completed') {
+                        $jobState = [string]$job.State
+                        $jobReason = ''
+                        try { if ($job.JobStateInfo -and $job.JobStateInfo.Reason) { $jobReason = [string]$job.JobStateInfo.Reason } } catch {}
+                        $jobErrorLines = @()
+                        try { foreach ($child in @($job.ChildJobs)) { foreach ($record in @($child.Error)) { $jobErrorLines += [string]$record.ToString() } } } catch {}
+                        try { $null = Receive-Job -Job $job -ErrorAction SilentlyContinue -ErrorVariable receiveErrors 2>&1; foreach ($record in @($receiveErrors)) { $jobErrorLines += [string]$record.ToString() } } catch { $jobErrorLines += [string]$_.Exception.Message }
+                        $detail = @('State: '+$jobState)
+                        if ($jobReason) { $detail += 'Reason: '+$jobReason }
+                        if ($jobErrorLines.Count -gt 0) { $detail += 'Worker errors: '+($jobErrorLines -join ' | ') }
+                        $failureText = $detail -join ' | '
+                        Write-AMRDiagnostic -Severity 'ERROR' -Area 'DriverCenter' -Operation 'ScanBackgroundJob' -Message $failureText -Target ('JobId='+[string]$job.Id)
+                        throw ('Hardware scan background job did not complete. '+$failureText)
+                    }
+
+                    $receivedScanRecords = @(Receive-Job -Job $job -ErrorAction Stop)
+                    $scanResult = @($receivedScanRecords | Where-Object { $_ -and $_.ScanStage -eq 'Completed' } | Select-Object -Last 1)
+                    if($scanResult.Count -eq 0) { $scanResult = @($receivedScanRecords | Select-Object -Last 1) }
+                    if ($scanResult.Count -eq 0 -or -not $scanResult[0]) { throw 'The hardware scan returned no final results.' }
+                    $scanResult = $scanResult[0]
+
+                    $devices = @($scanResult.Devices | Sort-Object @{ Expression = { if ([int]$_.ErrorCode -ne 0) { 0 } else { 1 } } }, DeviceClass, DeviceName)
+                    $script:DriverOEMModelProfile = $scanResult.OEMModelProfile
+                    foreach($deviceRow in $devices){
+                        # Normalize scan-result state on the UI thread. Some provider/result paths
+                        # can return a row without optional update metadata; strict mode must not
+                        # let a missing UpdateReady property abort the DispatcherTimer callback.
+                        if(-not $deviceRow.PSObject.Properties['UpdateReady']){$deviceRow | Add-Member -NotePropertyName UpdateReady -NotePropertyValue $false -Force}
+                        if(-not $deviceRow.PSObject.Properties['UpdateId']){$deviceRow | Add-Member -NotePropertyName UpdateId -NotePropertyValue '' -Force}
+                        if(-not $deviceRow.PSObject.Properties['UpdateRevision']){$deviceRow | Add-Member -NotePropertyName UpdateRevision -NotePropertyValue 0 -Force}
+                        # Initialize optional per-device state before strict-mode UI handlers inspect it.
+                        if(-not $deviceRow.PSObject.Properties['ProfessionalDiscoveredCandidates']){$deviceRow | Add-Member -NotePropertyName ProfessionalDiscoveredCandidates -NotePropertyValue @() -Force}
+                        if(-not $deviceRow.PSObject.Properties['VendorPackageCandidates']){$deviceRow | Add-Member -NotePropertyName VendorPackageCandidates -NotePropertyValue @() -Force}
+                        if(-not $deviceRow.PSObject.Properties['VendorPackageDiscoveryErrors']){$deviceRow | Add-Member -NotePropertyName VendorPackageDiscoveryErrors -NotePropertyValue @() -Force}
+                        if(-not $deviceRow.PSObject.Properties['ProfessionalSelectedCandidate']){$deviceRow | Add-Member -NotePropertyName ProfessionalSelectedCandidate -NotePropertyValue $null -Force}
+                        if(-not $deviceRow.PSObject.Properties['SourceAdapter']){$deviceRow | Add-Member -NotePropertyName SourceAdapter -NotePropertyValue '' -Force}
+                        if(-not $deviceRow.PSObject.Properties['LocalPackageReady']){$deviceRow | Add-Member -NotePropertyName LocalPackageReady -NotePropertyValue $false -Force}
+                        if(-not $deviceRow.PSObject.Properties['LocalPackageFolder']){$deviceRow | Add-Member -NotePropertyName LocalPackageFolder -NotePropertyValue '' -Force}
+                        if(-not $deviceRow.PSObject.Properties['HardwareIds']){$deviceRow | Add-Member -NotePropertyName HardwareIds -NotePropertyValue @() -Force}
+                        if(-not $deviceRow.PSObject.Properties['CompatibleIds']){$deviceRow | Add-Member -NotePropertyName CompatibleIds -NotePropertyValue @() -Force}
+                        if(-not $deviceRow.PSObject.Properties['HardwareIdVendorHint']){$deviceRow | Add-Member -NotePropertyName HardwareIdVendorHint -NotePropertyValue '' -Force}
+                        if(-not $deviceRow.PSObject.Properties['HardwareIdVendorCode']){$deviceRow | Add-Member -NotePropertyName HardwareIdVendorCode -NotePropertyValue '' -Force}
+                    }
+                    $issueCount = @($devices | Where-Object { [int]$_.ErrorCode -ne 0 }).Count
+                    (C 'DriverComputerModel').Text = $(if ([string]::IsNullOrWhiteSpace($scanResult.ComputerModel)) { 'Model unavailable' } else { [string]$scanResult.ComputerModel })
+                    (C 'DriverComputerManufacturer').Text = 'Manufacturer: ' + $(if ($scanResult.ComputerManufacturer) { $scanResult.ComputerManufacturer } else { 'Unknown' })
+                    (C 'DriverBoardModel').Text = $(if ($scanResult.BoardProduct) { [string]$scanResult.BoardProduct } else { 'Motherboard model unavailable' })
+                    (C 'DriverBoardManufacturer').Text = 'Manufacturer: ' + $(if ($scanResult.BoardManufacturer) { $scanResult.BoardManufacturer } else { 'Unknown' })
+                    (C 'DriverSystemIdentitySummary').Text = ([string]$scanResult.SystemIdentitySummary + ' • OEM/model match: ' + [string]$script:DriverOEMModelProfile.IdentityClass + ' (' + [string]$script:DriverOEMModelProfile.Confidence + ')' + ' • Matched OEM: ' + $(if($script:DriverOEMModelProfile.OEMVendor){[string]$script:DriverOEMModelProfile.OEMVendor}else{'not resolved'}) + ' • Board vendor: ' + $(if($script:DriverOEMModelProfile.BoardVendor){[string]$script:DriverOEMModelProfile.BoardVendor}else{'not resolved'}))
+                    (C 'DriverWindowsInfo').Text = ('{0} • {1} • Build {2} • {3}' -f $scanResult.WindowsCaption, $scanResult.WindowsVersion, $scanResult.WindowsBuild, $scanResult.WindowsArchitecture)
+                    $script:DriverCatalogWindowsContext = (([string]$scanResult.WindowsCaption + ' ' + [string]$scanResult.WindowsArchitecture).Trim())
+                    $script:DriverComputerModel = [string]$scanResult.ComputerModel
+                    $script:DriverBoardModel = [string]$scanResult.BoardProduct
+                    $script:DriverWindowsContext = [string]$script:DriverCatalogWindowsContext
+                    (C 'DriverDeviceCount').Text = [string]$devices.Count
+                    (C 'DriverProblemCount').Text = [string]$issueCount
+                    $script:DriverAllDeviceRows = @($devices)
+                    (C 'DriverDeviceList').SelectedItems.Clear()
+                    Set-AMRDriverExperienceMode -Mode $script:DriverExperienceMode
+                    Update-AMRDriverActionButtons
+                    $readyCount = @($devices | Where-Object { $_.UpdateReady }).Count
+                    $updateMatchCount = [int]$scanResult.WUMatchedDeviceCount
+                    $wuSummary = if ($scanResult.WUScanStatus -eq 'Completed') {
+                        ('Microsoft Windows Update check completed: {0} applicable driver candidate(s), {1} device match(es), {2} device(s) had multiple candidates ranked, {3} already downloaded and ready.' -f $scanResult.WUDriverCandidateCount, $updateMatchCount, [int]$scanResult.WUMultipleCandidateDeviceCount, $readyCount)
+                    } else {
+                        ('Microsoft Windows Update check unavailable: {0}' -f $scanResult.WUScanMessage)
+                    }
+                    $identifiedVendorCount=@($devices | Where-Object { $_.HardwareVendorName }).Count
+                    $directIdVendorCount=@($devices | Where-Object { $_.HardwareCoverageStatus -in @('PCI vendor identified','USB vendor identified','Audio codec vendor identified','ACPI vendor identified') }).Count
+                    $unresolvedVendorCount=@($devices | Where-Object { -not $_.HardwareVendorName }).Count
+                    $sourceLeadCount=@($devices | ForEach-Object { @($_.VendorSourceCandidates).Count } | Measure-Object -Sum).Sum
+                    (C 'DriverScanStatus').Text = ('Scan completed {0}. {1} devices; {2} device issue(s); {3} installed driver records; {4} vendor identities resolved ({5} from direct hardware identifiers); {6} devices with unresolved vendor identity; {7} official source leads prepared. {8} {9} Use Smart Select to review AMR recommendations, then Start Smart Install to prepare only your approved choices.' -f $scanResult.ScanTime, $devices.Count, $issueCount, $scanResult.InstalledDriverCount, $identifiedVendorCount, $directIdVendorCount, $unresolvedVendorCount, $sourceLeadCount, $wuSummary, 'Exact Hardware ID matches remain primary; OEM/model context is supporting evidence and unverified source leads cannot install.')
+
+                    $support = Get-AMRDriverSupportSource -ComputerManufacturer ([string]$scanResult.ComputerManufacturer) -BoardManufacturer ([string]$scanResult.BoardManufacturer)
+                    $script:DriverSupportUrl = $support.Url
+                    $script:DriverSupportName = $support.Name
+                    $supportButton = C 'OpenOfficialSupportBtn'
+                    $supportButton.IsEnabled = $true
+                    $supportButton.Content = 'Open ' + $support.Name + ' ↗'
+                    Write-AMRLog ("Driver Center scan completed. Computer='{0} {1}', SystemClass='{2}', Platform='{3}', IdentityConfidence='{4}', SKU='{5}', Board='{6}', Boards={7}, CPUs={8}, GPUs={9}, Devices={10}, Issues={11}, WU candidates={12}, WU device matches={13}, multi-candidate devices={14}, WU status={15}, Support='{16}', Hardware={17}s, WU={18}s, Enrichment={19}s, Total={20}s." -f $scanResult.ComputerManufacturer, $scanResult.ComputerModel, $scanResult.SystemClass, $scanResult.PlatformType, $scanResult.IdentityConfidence, $scanResult.ComputerSystemSKU, $scanResult.BoardProduct, @($scanResult.BoardInventory).Count, @($scanResult.ProcessorNames).Count, @($scanResult.VideoControllerNames).Count, $devices.Count, $issueCount, $scanResult.WUDriverCandidateCount, $scanResult.WUMatchedDeviceCount, $scanResult.WUMultipleCandidateDeviceCount, $scanResult.WUScanStatus, $support.Name, $scanResult.HardwareScanSeconds, $scanResult.WUScanSeconds, $scanResult.EnrichmentSeconds, $scanResult.TotalWorkerSeconds) SUCCESS Overview
+                } catch {
+                    $scanFailure = $_
+                    $failureMessage = [string]$scanFailure.Exception.Message
+                    try { (C 'DriverScanStatus').Text = 'Scan failed: ' + $failureMessage } catch {}
+                    Write-AMRLog ('Driver Center scan failed: ' + $failureMessage) ERROR Overview
+                    Write-AMRDiagnostic -Severity 'ERROR' -Area 'DriverCenter' -Operation 'ScanResultProcessing' -Message $failureMessage -ErrorRecord $scanFailure -Target ('Generation='+[string]$script:DriverScanGeneration)
+                } finally {
+                    try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
+                    $script:DriverScanJob = $null
+                    $script:DriverScanPartialShown = $false
+                    if($script:DriverOperationState.Name -eq 'DeviceScan'){$script:DriverOperationState=[pscustomobject]@{Name='Idle';State='Idle';StartedAt=$null;Generation=[int]$script:DriverOperationState.Generation;CanCancel=$false;Status='Ready'}}
+                    $scanButton = C 'ScanDriversBtn'
+                    $scanButton.IsEnabled = $true
+                    $scanButton.Content = '⌕  Scan Device'
+                    Update-AMRDriverActionButtons
+                }
+            })
+        }
+        $script:DriverScanTimer.Start()
+        Write-AMRLog 'Started asynchronous hardware and Windows device discovery.' INFO Overview
+    } catch {
+        $scanStartFailure = $_
+        if ($script:DriverScanTimer) { $script:DriverScanTimer.Stop() }
+        if ($script:DriverScanJob) { try { Stop-Job -Job $script:DriverScanJob -ErrorAction SilentlyContinue } catch {}; try { Remove-Job -Job $script:DriverScanJob -Force -ErrorAction SilentlyContinue } catch {} }
+        $script:DriverScanJob = $null
+        if($script:DriverOperationState.Name -eq 'DeviceScan'){$script:DriverOperationState=[pscustomobject]@{Name='Idle';State='Idle';StartedAt=$null;Generation=[int]$script:DriverOperationState.Generation;CanCancel=$false;Status='Ready'}}
+        $button.IsEnabled = $true
+        $button.Content = '⌕  Scan Device'
+        Update-AMRDriverActionButtons
+        (C 'DriverScanStatus').Text = 'Could not start scan: ' + $scanStartFailure.Exception.Message
+        Write-AMRLog ('Could not start Driver Center scan: ' + $scanStartFailure.Exception.Message) ERROR Overview
+        Write-AMRDiagnostic -Severity 'ERROR' -Area 'DriverCenter' -Operation 'ScanStart' -Message ([string]$scanStartFailure.Exception.Message) -ErrorRecord $scanStartFailure -Target ('Generation='+[string]$script:DriverScanGeneration)
+    }
+}
+
+# Driver update actions use Windows Update Agent only for updates explicitly offered
+# to this machine. No third-party driver-pack executables are downloaded or run.
+function Set-AMRDriverExperienceMode {
+    param([ValidateSet('Smart','Advanced')][string]$Mode)
+
+    $script:DriverExperienceMode = $Mode
+    $smartButton = C 'DriverSmartModeBtn'
+    $advancedButton = C 'DriverAdvancedModeBtn'
+    $description = C 'DriverModeDescription'
+    $deviceList = C 'DriverDeviceList'
+    $scrollViewer = C 'DriverCenterScrollViewer'
+
+    # Defensive normalization for rows retained from earlier scans or alternate providers.
+    foreach($row in @($script:DriverAllDeviceRows)) {
+        if($row -and -not $row.PSObject.Properties['UpdateReady']){$row | Add-Member -NotePropertyName UpdateReady -NotePropertyValue $false -Force}
+        if($row -and -not $row.PSObject.Properties['UpdateId']){$row | Add-Member -NotePropertyName UpdateId -NotePropertyValue '' -Force}
+        if($row -and -not $row.PSObject.Properties['LocalPackageReady']){$row | Add-Member -NotePropertyName LocalPackageReady -NotePropertyValue $false -Force}
+    }
+
+    if ($Mode -eq 'Smart') {
+        if ($smartButton) { $smartButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#176B50'); $smartButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#34D399'); $smartButton.FontWeight = 'Bold' }
+        if ($advancedButton) { $advancedButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#303846'); $advancedButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#526176'); $advancedButton.FontWeight = 'Normal' }
+        if ($description) { $description.Text = 'Smart View: Smart Select recommends which confirmed driver candidates deserve attention. Smart Install separately prepares and installs only the choices you approve.' }
+        if ($scrollViewer) { $scrollViewer.Padding = [System.Windows.Thickness]::new(10,8,10,16) }
+
+        # Keep only the practical columns visible to a non-technical user.
+        if ($deviceList -and $deviceList.View -and $deviceList.View.Columns.Count -ge 13) {
+            $widths = @(260,105,0,120,0,0,0,0,0,0,310,0,0)
+            for ($i = 0; $i -lt $widths.Count; $i++) { $deviceList.View.Columns[$i].Width = $widths[$i] }
+        }
+        if ($deviceList) {
+            $deviceList.MaxHeight = 360
+            $deviceList.MinHeight = 220
+            $deviceList.Height = 360
+            $smartRows = @($script:DriverAllDeviceRows | Where-Object {
+                ([int]$_.ErrorCode -ne 0) -or
+                (-not [string]::IsNullOrWhiteSpace([string]$_.UpdateId)) -or
+                [bool]$_.UpdateReady -or [bool]$_.LocalPackageReady
+            })
+            $deviceList.ItemsSource = $smartRows
+            $deviceList.SelectedItems.Clear()
+            $emptyMessage = C 'DriverScanStatus'
+            if ($emptyMessage -and $script:DriverAllDeviceRows.Count -gt 0 -and $smartRows.Count -eq 0) {
+                $emptyMessage.Text = 'Scan complete: no device problems or applicable driver updates were found. Your current drivers appear to need no action.'
+            }
+        }
+
+        foreach ($name in @('DriverCandidateManagerBtn','DriverSourceManagerBtn','DriverCatalogSearchBtn','DriverRollbackCheckBtn','OpenOfficialSupportBtn','DriverExportReportBtn','DriverExportHistoryBtn','DriverSelectReadyBtn','DriverClearSelectionBtn','DriverInstallBatchBtn','DriverInstallPlanBtn','DriverOpenRecoveryBtn','DriverDownloadSelectedBtn','DriverInstallSelectedBtn')) {
+            $control = C $name
+            if ($control) { $control.Visibility = 'Collapsed' }
+        }
+        foreach ($name in @('DriverComputerSummaryCard','DriverSummaryMetrics')) {
+            $control = C $name
+            if ($control) { $control.Visibility = 'Visible' }
+        }
+        $identityToggle = C 'DriverIdentityToggleBtn'; if ($identityToggle) { $identityToggle.Visibility='Collapsed'; $identityToggle.Content='Show system identity & platform details' }
+        foreach ($name in @('DriverRollbackStatus','DriverSelectionSummary')) {
+            $control = C $name
+            if ($control) { $control.Visibility = 'Collapsed' }
+        }
+        $smartSelectButton = C 'DriverSmartSelectBtn'
+        if ($smartSelectButton) { $smartSelectButton.Visibility = 'Visible'; $smartSelectButton.Content = '✦ Smart Select' }
+        $smartInstallButton = C 'DriverStartSmartInstallBtn'
+        if ($smartInstallButton) { $smartInstallButton.Visibility = 'Visible'; $smartInstallButton.Content = 'Start Smart Install' }
+    }
+    else {
+        if ($smartButton) { $smartButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#303846'); $smartButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#526176'); $smartButton.FontWeight = 'Normal' }
+        if ($advancedButton) { $advancedButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#244A70'); $advancedButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4B83B8'); $advancedButton.FontWeight = 'Bold' }
+        if ($description) { $description.Text = 'Professional Driver Center: compare every retained Windows Update match, choose an alternative, investigate official OEM/vendor sources, inspect rollback options and export reports.' }
+        if ($scrollViewer) { $scrollViewer.Padding = [System.Windows.Thickness]::new(4,4,4,8) }
+
+        if ($deviceList -and $deviceList.View -and $deviceList.View.Columns.Count -ge 13) {
+            $widths = @(245,105,145,115,150,135,95,190,190,75,250,130,55)
+            for ($i = 0; $i -lt $widths.Count; $i++) { $deviceList.View.Columns[$i].Width = $widths[$i] }
+        }
+        if ($deviceList) {
+            $deviceList.MaxHeight = 100000
+            $deviceList.MinHeight = 480
+            $deviceList.Height = 480
+            if ($script:DriverAllDeviceRows -and $script:DriverAllDeviceRows.Count -gt 0) {
+                $deviceList.ItemsSource = @($script:DriverAllDeviceRows)
+                $deviceList.SelectedItems.Clear()
+            }
+        }
+        foreach ($name in @('DriverCandidateManagerBtn','DriverSourceManagerBtn','DriverCatalogSearchBtn','DriverRollbackCheckBtn','OpenOfficialSupportBtn','DriverExportReportBtn','DriverExportHistoryBtn','DriverSelectReadyBtn','DriverClearSelectionBtn','DriverInstallBatchBtn','DriverInstallPlanBtn','DriverOpenRecoveryBtn','DriverDownloadSelectedBtn','DriverInstallSelectedBtn')) {
+            $control = C $name
+            if ($control) { $control.Visibility = 'Visible' }
+        }
+        $metricsCard = C 'DriverSummaryMetrics'; if ($metricsCard) { $metricsCard.Visibility='Collapsed' }
+        $identityCard = C 'DriverComputerSummaryCard'; if ($identityCard) { $identityCard.Visibility='Collapsed' }
+        $identityToggle = C 'DriverIdentityToggleBtn'; if ($identityToggle) { $identityToggle.Visibility='Visible'; $identityToggle.Content='Show system identity & platform details' }
+        foreach ($name in @('DriverRollbackStatus','DriverSelectionSummary')) {
+            $control = C $name
+            if ($control) { $control.Visibility = 'Visible' }
+        }
+        $smartSelectButton = C 'DriverSmartSelectBtn'
+        if ($smartSelectButton) { $smartSelectButton.Visibility = 'Collapsed' }
+        $smartInstallButton = C 'DriverStartSmartInstallBtn'
+        if ($smartInstallButton) { $smartInstallButton.Visibility = 'Collapsed' }
+        $downloadButton = C 'DriverDownloadSelectedBtn'
+        $installButton = C 'DriverInstallSelectedBtn'
+        if ($downloadButton) { $downloadButton.Content = 'Download & Save Package' }
+        if ($installButton) { $installButton.Content = 'Install Ready Update' }
+    }
+    Update-AMRDriverActionButtons
+}
+
+function Update-AMRDriverActionButtons {
+    $list = C 'DriverDeviceList'
+    # WPF can retain rows produced by older/alternate result paths. Normalize before
+    # reading optional update properties while Set-StrictMode is active.
+    $rowsToNormalize = @($script:DriverAllDeviceRows)
+    if($list) { $rowsToNormalize += @($list.ItemsSource) }
+    foreach($row in $rowsToNormalize) {
+        if($row -and -not $row.PSObject.Properties['UpdateReady']){$row | Add-Member -NotePropertyName UpdateReady -NotePropertyValue $false -Force}
+        if($row -and -not $row.PSObject.Properties['UpdateId']){$row | Add-Member -NotePropertyName UpdateId -NotePropertyValue '' -Force}
+        if($row -and -not $row.PSObject.Properties['UpdateRevision']){$row | Add-Member -NotePropertyName UpdateRevision -NotePropertyValue 0 -Force}
+        if($row -and -not $row.PSObject.Properties['HardwareIds']){$row | Add-Member -NotePropertyName HardwareIds -NotePropertyValue @() -Force}
+    }
+    $selected = $list.SelectedItem
+    $hasCandidate = $false
+    $isReady = $false
+    $hasHardwareId = $false
+    if ($selected) {
+        $hasCandidate = -not [string]::IsNullOrWhiteSpace([string]$selected.UpdateId)
+        $isReady = ($hasCandidate -and [bool]$selected.UpdateReady)
+        $hasHardwareId = (@($selected.HardwareIds | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0)
+    }
+    $selectedRows = @($list.SelectedItems)
+    $readySelectedRows = @($selectedRows | Where-Object { $_.UpdateReady -and -not [string]::IsNullOrWhiteSpace([string]$_.UpdateId) })
+    $readySelectedCount = $readySelectedRows.Count
+    $allRows = @($list.ItemsSource)
+    $readyAvailableRows = @($allRows | Where-Object { $_.UpdateReady -and -not [string]::IsNullOrWhiteSpace([string]$_.UpdateId) })
+    $readyAvailableCount = $readyAvailableRows.Count
+    $availableUpdateKeys = @{}
+    foreach ($row in $allRows) {
+        if ([string]::IsNullOrWhiteSpace([string]$row.UpdateId)) { continue }
+        $key = ('{0}|{1}' -f [string]$row.UpdateId,[int]$row.UpdateRevision)
+        $availableUpdateKeys[$key] = $true
+    }
+    $selectedUpdateKeys = @{}
+    foreach ($row in $readySelectedRows) {
+        $key = ('{0}|{1}' -f [string]$row.UpdateId,[int]$row.UpdateRevision)
+        $selectedUpdateKeys[$key] = $true
+    }
+    $summary = C 'DriverSelectionSummary'
+    if ($summary) {
+        $summary.Text = ('Selection: {0} row(s) selected • {1} ready row(s) • {2} unique package(s) selected / {3} available' -f $selectedRows.Count,$readySelectedCount,$selectedUpdateKeys.Count,$availableUpdateKeys.Count)
+        $summary.ToolTip = ('{0} unique ready update(s) selected for batch installation.' -f $selectedUpdateKeys.Count)
+    }
+    $driverOperationBusy = [bool]$script:DriverActionJob -or [bool]$script:DriverScanJob -or [bool]$script:DriverManagedJob -or ($script:DriverOperationState.State -eq 'Running')
+    (C 'DriverDownloadSelectedBtn').IsEnabled = ($hasCandidate -and -not $isReady -and -not $driverOperationBusy)
+    (C 'DriverInstallSelectedBtn').IsEnabled = ($isReady -and -not $driverOperationBusy)
+    try { (C 'ScanDriversBtn').IsEnabled = (-not $driverOperationBusy) } catch {}
+    try { (C 'DriverRollbackCheckBtn').IsEnabled = ($null -ne $selected -and -not [string]::IsNullOrWhiteSpace([string]$selected.DeviceId) -and -not $driverOperationBusy) } catch {}
+    (C 'DriverSelectReadyBtn').IsEnabled = ($readyAvailableCount -gt 0 -and -not $driverOperationBusy)
+    (C 'DriverClearSelectionBtn').IsEnabled = ($selectedRows.Count -gt 0 -and -not $driverOperationBusy)
+    (C 'DriverInstallBatchBtn').Content = ('Install Selected Ready ({0})' -f $selectedUpdateKeys.Count)
+    (C 'DriverInstallBatchBtn').IsEnabled = ($selectedUpdateKeys.Count -gt 0 -and -not $driverOperationBusy -and -not $script:DriverBatchActive)
+    try { (C 'DriverInstallPlanBtn').IsEnabled = ($selectedUpdateKeys.Count -gt 0 -and -not $driverOperationBusy -and -not $script:DriverBatchActive) } catch {}
+    $smartCandidateCount = @($script:DriverAllDeviceRows | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.UpdateId) }).Count
+    $smartSelectedCount = @((C 'DriverDeviceList').SelectedItems | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.UpdateId) }).Count
+    $smartBusy = [bool]$script:DriverActionJob -or [bool]$script:DriverScanJob -or [bool]$script:DriverManagedJob -or ($script:DriverOperationState.State -eq 'Running') -or [bool]$script:DriverBatchActive -or [bool]$script:DriverSmartQueueActive
+    try {
+        $smartSelectButton = C 'DriverSmartSelectBtn'
+        if ($smartSelectButton) { $smartSelectButton.IsEnabled = ($smartCandidateCount -gt 0 -and -not $smartBusy) }
+        $smartButton = C 'DriverStartSmartInstallBtn'
+        $smartButton.IsEnabled = ([bool]$script:DriverSmartSelectionReady -and $smartSelectedCount -gt 0 -and -not $smartBusy)
+        if ($script:DriverSmartQueueActive) { $smartButton.Content = ('Preparing drivers… ({0}/{1})' -f $script:DriverSmartDownloadCompleted,$script:DriverSmartDownloadTotal) }
+        elseif ($script:DriverSmartSelectionReady) { $smartButton.Content = ('Start Smart Install ({0})' -f $smartSelectedCount) }
+        else { $smartButton.Content = 'Start Smart Install' }
+    } catch {}
+    (C 'DriverCatalogSearchBtn').IsEnabled = ($hasHardwareId -and -not $script:DriverActionJob -and -not $script:DriverScanJob -and -not $script:DriverManagedJob -and $script:DriverOperationState.State -ne 'Running')
+    try {
+        $candidateManager = C 'DriverCandidateManagerBtn'
+        if ($candidateManager) { $candidateManager.IsEnabled = ($null -ne $selected -and (@($selected.CandidateOptions).Count -gt 0 -or @($selected.ProfessionalDiscoveredCandidates).Count -gt 0) -and -not $driverOperationBusy) }
+        $sourceManager = C 'DriverSourceManagerBtn'
+        if ($sourceManager) { $sourceManager.IsEnabled = ($null -ne $selected -and -not [string]::IsNullOrWhiteSpace([string]$selected.DeviceId) -and -not $driverOperationBusy) }
+    } catch {}
+
+    # Route support to the selected device vendor where possible.
+    $supportButton = C 'OpenOfficialSupportBtn'
+    if ($selected -and -not [string]::IsNullOrWhiteSpace([string]$script:DriverSupportUrl)) {
+        $deviceSupport = Get-AMRDriverDeviceSupportSource -DeviceManufacturer ([string]$selected.Manufacturer) -DeviceName ([string]$selected.DeviceName) -ComputerModel ([string]$script:DriverComputerModel) -BoardModel ([string]$script:DriverBoardModel) -WindowsContext ([string]$script:DriverWindowsContext) -FallbackName ([string]$script:DriverSupportName) -FallbackUrl ([string]$script:DriverSupportUrl)
+        $supportButton.Content = 'Open ' + $deviceSupport.Name + ' ↗'
+        $supportButton.IsEnabled = -not [string]::IsNullOrWhiteSpace([string]$deviceSupport.Url)
+        $supportButton.ToolTip = ($deviceSupport.RoutingNote + ' Search terms: ' + $deviceSupport.SearchTerms)
+    } elseif (-not [string]::IsNullOrWhiteSpace([string]$script:DriverSupportUrl)) {
+        $supportButton.Content = 'Open ' + $script:DriverSupportName + ' ↗'
+        $supportButton.IsEnabled = $true
+        $supportButton.ToolTip = 'Official support source for this computer or motherboard.'
+    }
+}
+
+function Add-AMRDriverHistoryEntry {
+    param(
+        [string]$Action,
+        [string]$Device,
+        [string]$Update,
+        [string]$Version,
+        [string]$Status,
+        [string]$Details
+    )
+    try {
+        $entry = [pscustomobject]@{
+            Timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+            Action = $Action
+            Device = $Device
+            Update = $Update
+            Version = $Version
+            Status = $Status
+            Details = $Details
+        }
+        if (Test-Path -LiteralPath $script:DriverHistoryFile -PathType Leaf) {
+            $entry | Export-Csv -LiteralPath $script:DriverHistoryFile -NoTypeInformation -Append -Encoding UTF8 -ErrorAction Stop
+        } else {
+            $entry | Export-Csv -LiteralPath $script:DriverHistoryFile -NoTypeInformation -Encoding UTF8 -ErrorAction Stop
+        }
+    } catch {
+        Write-AMRLog ('Could not write Driver Center history: ' + $_.Exception.Message) WARNING Overview
+    }
+}
+
+(C 'DriverExportReportBtn').Add_Click({
+    try {
+        $rows = @((C 'DriverDeviceList').ItemsSource)
+        if ($rows.Count -eq 0) {
+            Show-AMRMessage 'Run Scan Device before exporting a driver inventory report.' 'Driver Center Report' OK Information | Out-Null
+            return
+        }
+        $destination = Join-Path $script:ExportDir ("DriverCenter_ScanReport_{0}.csv" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+        $rows | Select-Object DeviceName,DeviceClass,Manufacturer,StatusText,ErrorCode,DriverProvider,DriverVersion,DriverDate,DriverInf,DriverIsSigned,DeviceId,HardwareIds,CompatibleIds,UpdateStatus,AvailableVersion,AvailableUpdate,UpdateReady,UpdateDownloadSize | Export-Csv -LiteralPath $destination -NoTypeInformation -Encoding UTF8 -ErrorAction Stop
+        Show-AMRMessage ("Driver inventory report exported to:`n" + $destination) 'Export Complete' OK Information | Out-Null
+        Write-AMRLog ('Exported Driver Center scan report: ' + $destination) SUCCESS Overview
+    } catch {
+        Show-AMRMessage ('Could not export Driver Center scan report: ' + $_.Exception.Message) 'Export Error' OK Error | Out-Null
+        Write-AMRLog ('Driver Center scan report export failed: ' + $_.Exception.Message) ERROR Overview
+    }
+})
+
+(C 'DriverExportHistoryBtn').Add_Click({
+    try {
+        if (-not (Test-Path -LiteralPath $script:DriverHistoryFile -PathType Leaf)) {
+            Show-AMRMessage 'No Driver Center download or installation history has been recorded yet.' 'Driver Center History' OK Information | Out-Null
+            return
+        }
+        $destination = Join-Path $script:ExportDir ("DriverCenterHistory_{0}.csv" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+        Copy-Item -LiteralPath $script:DriverHistoryFile -Destination $destination -Force -ErrorAction Stop
+        Show-AMRMessage ("Driver Center history exported to:`n" + $destination) 'Export Complete' OK Information | Out-Null
+        Write-AMRLog ('Exported Driver Center history: ' + $destination) SUCCESS Overview
+    } catch {
+        Show-AMRMessage ('Could not export Driver Center history: ' + $_.Exception.Message) 'Export Error' OK Error | Out-Null
+    }
+})
+
+(C 'DriverOpenDownloadsBtn').Add_Click({
+    try {
+        $driverDownloadsRoot = Join-Path $script:DownloadDir 'Drivers'
+        New-Item -ItemType Directory -Path $driverDownloadsRoot -Force -ErrorAction Stop | Out-Null
+        Start-Process -FilePath 'explorer.exe' -ArgumentList ('"{0}"' -f $driverDownloadsRoot) -ErrorAction Stop
+    } catch {
+        Show-AMRMessage ('Could not open the driver downloads folder: ' + $_.Exception.Message) 'Driver Downloads' OK Error | Out-Null
+    }
+})
+
+function Get-AMRDriverUpdateSelectionKey {
+    param([object]$Row)
+    if (-not $Row) { return '' }
+    return ('{0}|{1}' -f [string]$Row.UpdateId,[int]$Row.UpdateRevision)
+}
+
+function Get-AMRSmartSelectionRecommendations {
+    param([object[]]$Rows)
+    # This is a selection engine, not an installation planner. It consumes only candidates
+    # already matched/ranked by the scan engine, removes duplicate update identities, and
+    # prioritizes devices reporting a problem for review. Installation order is decided later.
+    $seen = @{}
+    $recommendations = @()
+    foreach ($row in @($Rows)) {
+        if (-not $row -or [string]::IsNullOrWhiteSpace([string]$row.UpdateId)) { continue }
+        $key = Get-AMRDriverUpdateSelectionKey -Row $row
+        if ([string]::IsNullOrWhiteSpace($key) -or $seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        $reason = if ([int]$row.ErrorCode -ne 0) {
+            'A confirmed update candidate is available for a device reporting a problem.'
+        } elseif ([bool]$row.UpdateReady) {
+            'A confirmed applicable update is already available and its package is ready.'
+        } else {
+            'A confirmed applicable update is available; its package must be prepared and validated first.'
+        }
+        $recommendations += [pscustomobject]@{
+            Row = $row
+            Key = $key
+            Reason = $reason
+            NeedsPreparation = (-not [bool]$row.UpdateReady)
+            DeviceProblem = ([int]$row.ErrorCode -ne 0)
+        }
+    }
+    return @($recommendations | Sort-Object @{Expression={if ($_.DeviceProblem) {0} else {1}}}, @{Expression={if ($_.NeedsPreparation) {1} else {0}}}, @{Expression={[string]$_.Row.DeviceName}})
+}
+
+function Invoke-AMRSmartSelect {
+    if ($script:DriverSmartQueueActive -or $script:DriverActionJob -or $script:DriverScanJob -or $script:DriverManagedJob -or $script:DriverBatchActive) { return }
+    $allRows = @($script:DriverAllDeviceRows)
+    if ($allRows.Count -eq 0) {
+        Show-AMRMessage 'Run Scan Device first. Smart Select needs a current hardware and driver inventory.' 'Smart Select' OK Information | Out-Null
+        return
+    }
+
+    # Selection is a recommendation-only operation: it does not download, prepare, or install anything.
+    # Candidate matching/ranking is supplied by the scan engine; this stage deduplicates update identities.
+    $candidateRows = @($allRows | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.UpdateId) })
+    if ($candidateRows.Count -eq 0) {
+        $issueCount = @($allRows | Where-Object { [int]$_.ErrorCode -ne 0 }).Count
+        $script:DriverSmartSelectionReady = $false
+        $script:DriverSmartSelectedKeys = @()
+        (C 'DriverDeviceList').SelectedItems.Clear()
+        $message = if ($issueCount -gt 0) {
+            ('Smart Select found {0} device issue(s), but the scan did not return a confirmed compatible driver candidate. No driver has been selected. Professional mode can investigate additional sources.' -f $issueCount)
+        } else {
+            'No applicable driver candidates were found. No selection is needed; your scanned drivers appear to need no action.'
+        }
+        (C 'DriverActionStatus').Text = $message
+        Update-AMRDriverActionButtons
+        Show-AMRMessage $message 'Smart Select Results' OK Information | Out-Null
+        return
+    }
+
+    $ranked = @(Get-AMRSmartSelectionRecommendations -Rows $candidateRows)
+    $recommendedRows = @($ranked | ForEach-Object { $_.Row })
+    $keys = @($ranked | ForEach-Object { [string]$_.Key })
+    $script:DriverSmartSelectedKeys = @($keys)
+    $script:DriverSmartSelectionReady = ($recommendedRows.Count -gt 0)
+    $script:DriverSmartSelectionTime = Get-Date
+
+    $list = C 'DriverDeviceList'
+    try { $list.SelectedItems.Clear() } catch {}
+    foreach ($row in $recommendedRows) { try { [void]$list.SelectedItems.Add($row) } catch {} }
+
+    $readyCount = @($recommendedRows | Where-Object { [bool]$_.UpdateReady }).Count
+    $downloadCount = $recommendedRows.Count - $readyCount
+    $issueWithoutCandidate = @($allRows | Where-Object { [int]$_.ErrorCode -ne 0 -and [string]::IsNullOrWhiteSpace([string]$_.UpdateId) }).Count
+    $lines = @()
+    $index = 0
+    foreach ($entry in $ranked | Select-Object -First 10) {
+        $index++
+        $row = $entry.Row
+        $state = if ([bool]$row.UpdateReady) { 'Package already ready' } else { 'Candidate needs preparation' }
+        $lines += ('{0}. {1} — {2} — {3}' -f $index,[string]$row.DeviceName,[string]$row.AvailableVersion,$state)
+    }
+    if ($ranked.Count -gt 10) { $lines += ('… and {0} more recommendation(s)' -f ($ranked.Count - 10)) }
+    $details = if ($lines.Count -gt 0) { $lines -join "`n" } else { 'No recommendation details are available.' }
+    $message = "Smart Select completed. No files were downloaded and no drivers were installed.`n`nRecommended unique updates: $($recommendedRows.Count)`nAlready ready: $readyCount`nNeed download and validation: $downloadCount`nDevice issues without a confirmed candidate: $issueWithoutCandidate`n`n$details`n`nAMR selected only candidates returned by the current scan and removed duplicate update identities. Review the highlighted rows. You can change the selection before choosing Start Smart Install."
+    (C 'DriverActionStatus').Text = ('Smart Select recommended {0} unique driver update(s): {1} ready, {2} need preparation. Review the highlighted rows; nothing has been downloaded or installed.' -f $recommendedRows.Count,$readyCount,$downloadCount)
+    Update-AMRDriverActionButtons
+    Show-AMRMessage $message 'Smart Select Results' OK Information | Out-Null
+}
+
+function Complete-AMRSmartInstallPreparation {
+    $list = C 'DriverDeviceList'
+    $approvedKeys = @($script:DriverSmartSelectedKeys)
+    $readyRows = @($script:DriverAllDeviceRows | Where-Object {
+        [bool]$_.UpdateReady -and -not [string]::IsNullOrWhiteSpace([string]$_.UpdateId) -and
+        ($approvedKeys -contains (Get-AMRDriverUpdateSelectionKey -Row $_))
+    })
+    $failedOrUnready = @($script:DriverAllDeviceRows | Where-Object {
+        -not [string]::IsNullOrWhiteSpace([string]$_.UpdateId) -and
+        ($approvedKeys -contains (Get-AMRDriverUpdateSelectionKey -Row $_)) -and -not [bool]$_.UpdateReady
+    }).Count
+    if ($readyRows.Count -eq 0) {
+        (C 'DriverActionStatus').Text = ('Smart Install preparation finished, but none of the {0} selected package(s) passed the Ready-to-install checks. No driver was installed.' -f $approvedKeys.Count)
+        Show-AMRMessage 'None of the selected packages passed the Ready-to-install checks. No driver was installed. Review the selected rows or use Professional for investigation.' 'Smart Install Preparation' OK Warning | Out-Null
+        Update-AMRDriverActionButtons
+        return
+    }
+
+    # Only the exact Smart Select-approved update identities can proceed to the installation plan.
+    try { $list.SelectedItems.Clear() } catch {}
+    foreach ($row in $readyRows) { try { [void]$list.SelectedItems.Add($row) } catch {} }
+    $selectedReady = @($list.SelectedItems | Where-Object { $_.UpdateReady -and -not [string]::IsNullOrWhiteSpace([string]$_.UpdateId) })
+    $preparationNote = if ($failedOrUnready -gt 0) { ' ' + $failedOrUnready + ' selected candidate(s) could not be prepared and were excluded.' } else { '' }
+    (C 'DriverActionStatus').Text = ('Smart Install prepared {0} of {1} selected package(s).{2} Review the installation plan; nothing installs until you approve it.' -f $selectedReady.Count,$approvedKeys.Count,$preparationNote)
+    Update-AMRDriverActionButtons
+    if ($failedOrUnready -gt 0) { Show-AMRMessage (('{0} selected package(s) could not be prepared safely and will be excluded. Only verified-ready packages will appear in the installation plan.' -f $failedOrUnready)) 'Some Drivers Not Ready' OK Warning | Out-Null }
+    if ($selectedReady.Count -gt 0) { Show-AMRDriverInstallPlan }
+}
+
+function Start-AMRSmartInstall {
+    if ($script:DriverSmartQueueActive -or $script:DriverActionJob -or $script:DriverScanJob -or $script:DriverManagedJob -or $script:DriverBatchActive) { return }
+    $allRows = @($script:DriverAllDeviceRows)
+    if ($allRows.Count -eq 0) {
+        Show-AMRMessage 'Run Scan Device first, then use Smart Select before starting Smart Install.' 'Smart Install' OK Information | Out-Null
+        return
+    }
+    if (-not $script:DriverSmartSelectionReady -or @($script:DriverSmartSelectedKeys).Count -eq 0) {
+        Show-AMRMessage 'Smart Select has not created a recommendation set yet. Run Smart Select first, review its highlighted choices, then start Smart Install.' 'Smart Select Required' OK Information | Out-Null
+        return
+    }
+
+    $list = C 'DriverDeviceList'
+    $selectedRows = @($list.SelectedItems | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.UpdateId) })
+    if ($selectedRows.Count -eq 0) {
+        Show-AMRMessage 'No recommended drivers are selected. Run Smart Select again or select one or more candidate rows before continuing.' 'Selection Required' OK Information | Out-Null
+        return
+    }
+    $selectedKeys = @($selectedRows | ForEach-Object { Get-AMRDriverUpdateSelectionKey -Row $_ } | Select-Object -Unique)
+    $approvedKeys = @($script:DriverSmartSelectedKeys)
+    $changed = (@(Compare-Object -ReferenceObject ($approvedKeys | Sort-Object) -DifferenceObject ($selectedKeys | Sort-Object)).Count -gt 0)
+    if ($changed) {
+        $choice = Show-AMRMessage 'Your highlighted selection has changed since Smart Select. Do you want Smart Install to use exactly the currently selected candidate rows? AMR will still validate every package and will not install without a separate final approval.' 'Confirm Changed Selection' YesNo Question
+        if ($choice -ne 'Yes') { return }
+        $script:DriverSmartSelectedKeys = @($selectedKeys)
+        $script:DriverSmartSelectionTime = Get-Date
+    }
+
+    $candidateRows = @($selectedRows | Where-Object { $script:DriverSmartSelectedKeys -contains (Get-AMRDriverUpdateSelectionKey -Row $_) })
+    $plan = @(Get-AMRDriverInstallPlan -Rows $candidateRows)
+    if ($plan.Count -eq 0) {
+        Show-AMRMessage 'The current selection contains no unique confirmed update candidates.' 'Smart Install' OK Information | Out-Null
+        return
+    }
+
+    $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $admin) {
+        Show-AMRMessage 'Smart Select can run without elevation, but preparing and installing driver packages requires Administrator permissions. Reopen AMR as Administrator, scan again, and repeat Smart Select before starting Smart Install.' 'Administrator permission required' OK Warning | Out-Null
+        return
+    }
+
+    $downloadQueue = @($plan | Where-Object { -not [bool]$_.Row.UpdateReady } | ForEach-Object { $_.Row })
+    $readyCount = @($plan | Where-Object { [bool]$_.Row.UpdateReady }).Count
+    $preview = @($plan | Select-Object -First 8 | ForEach-Object {
+        $state = if ($_.Row.UpdateReady) { 'Already ready' } else { 'Needs download and validation' }
+        '• ' + [string]$_.Row.DeviceName + ' — ' + [string]$_.Row.AvailableVersion + ' (' + $state + ')'
+    }) -join "`n"
+    if ($plan.Count -gt 8) { $preview += "`n• … and $($plan.Count - 8) more selected candidate(s)" }
+    $consent = "Smart Install preparation`n`nSelected unique candidates: $($plan.Count)`nAlready ready: $readyCount`nTo download and validate: $($downloadQueue.Count)`n`n$preview`n`nSmart Select has already made the recommendation. Smart Install will use only the selected candidates shown above, prepare packages sequentially using the AMR internal engine first, and use Windows Update only as a fallback. It will NOT install automatically. After preparation, you will review a separate installation plan and approve installation. Continue?"
+    if ((Show-AMRMessage $consent 'Start Smart Install Preparation?' YesNo Question) -ne 'Yes') { return }
+
+    if ($downloadQueue.Count -eq 0) {
+        Complete-AMRSmartInstallPreparation
+        return
+    }
+
+    $script:DriverSmartQueueActive = $true
+    $script:DriverSmartDownloadQueue = @($downloadQueue | Select-Object -Skip 1)
+    $script:DriverSmartDownloadTotal = $downloadQueue.Count
+    $script:DriverSmartDownloadCompleted = 0
+    $firstDownload = $downloadQueue[0]
+    (C 'DriverActionStatus').Text = ('Smart Install: preparing selected package 1 of {0} — {1}. No installation will begin without your final approval.' -f $script:DriverSmartDownloadTotal,[string]$firstDownload.DeviceName)
+    Update-AMRDriverActionButtons
+    Start-AMRDriverUpdateAction -Action Download -Device $firstDownload -SkipConfirmation
+    if (-not $script:DriverActionJob) {
+        $script:DriverSmartQueueActive = $false
+        $script:DriverSmartDownloadQueue = @()
+        (C 'DriverActionStatus').Text = 'Smart Install could not start the first selected package download. Review the results and retry.'
+        Update-AMRDriverActionButtons
+    }
+}
+
+function Start-AMRDriverUpdateAction {
+    param(
+        [ValidateSet('Download','Install')][string]$Action,
+        [object]$Device = $null,
+        [switch]$SkipConfirmation,
+        [switch]$FromBatch,
+        [switch]$RestorePointPrepared,
+        [string]$PreparedRestorePointStatus = ''
+    )
+    if ($script:DriverManagedJob -or ($script:DriverOperationState.State -eq 'Running' -and $script:DriverOperationState.Name -notin @('Idle'))) { (C 'DriverActionStatus').Text='Wait for the active driver operation to finish first.'; return }
+    if ($script:DriverActionJob -and $script:DriverActionJob.State -in @('Running','NotStarted')) { return }
+    if ($script:DriverScanJob -and $script:DriverScanJob.State -in @('Running','NotStarted')) {
+        (C 'DriverActionStatus').Text = 'Wait for the current device scan to finish before starting a driver operation.'
+        return
+    }
+    $selected = if ($Device) { $Device } else { (C 'DriverDeviceList').SelectedItem }
+    $selectedCatalogCandidate = $null
+    if($selected){$selectedCatalogCandidate=$selected.ProfessionalSelectedCandidate}
+    $isCatalogPackage = ($selected -and [string]$selected.SourceAdapter -eq 'MicrosoftUpdateCatalog' -and $selectedCatalogCandidate -and [bool]$selectedCatalogCandidate.IsInstallable -and -not [string]::IsNullOrWhiteSpace([string]$selected.LocalPackageFolder))
+    if (-not $selected -or ([string]::IsNullOrWhiteSpace([string]$selected.UpdateId) -and -not $isCatalogPackage)) {
+        Show-AMRMessage 'Select a verified Windows Update candidate or a Catalog package that has passed Windows Driver Store staging.' 'Driver Center' OK Information | Out-Null
+        return
+    }
+    if($isCatalogPackage -and $Action -eq 'Download') {
+        if(-not (Test-Path -LiteralPath (Join-Path ([string]$selected.LocalPackageFolder) 'AMR_DriverPackage_Manifest.json') -PathType Leaf)) { Show-AMRMessage 'The verified Catalog package manifest is missing. Run Verify & Acquire Package again.' 'Catalog Package' OK Warning | Out-Null; return }
+        $selected.UpdateReady=$true; $selected.LocalPackageReady=$true; $selected.UpdateStatus='Catalog package already acquired and staged; no second download required.'
+        (C 'DriverActionStatus').Text='The selected Catalog package is already downloaded, verified and staged by Windows. No second download was performed.'
+        Update-AMRDriverActionButtons
+        return
+    }
+    if ($Action -eq 'Install') {
+        if (-not [bool]$selected.UpdateReady) {
+            Show-AMRMessage 'This update is not downloaded yet. Download it first.' 'Driver Center' OK Information | Out-Null
+            return
+        }
+        $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        if (-not $admin) {
+            Show-AMRMessage 'Installing a device driver requires administrator permissions. Close the app and reopen it as Administrator, then scan again.' 'Administrator permission required' OK Warning | Out-Null
+            return
+        }
+        if (-not $SkipConfirmation) {
+            $sourceLabel=if($isCatalogPackage){'Microsoft Update Catalog package staged by Windows'}else{'Microsoft-matched driver update'}
+            $confirmText = "Install this $sourceLabel?`n`nDevice: $($selected.DeviceName)`nUpdate: $($selected.AvailableUpdate)`nVersion: $($selected.AvailableVersion)`n`nThe installation may temporarily affect the device and may require restarting Windows. Continue?"
+            if ((Show-AMRMessage $confirmText 'Confirm Driver Installation' YesNo Warning) -ne 'Yes') { return }
+        }
+    } else {
+        $sizeText = if ([int64]$selected.UpdateDownloadSize -gt 0) { ('Approx. download size: {0:N1} MB' -f ([int64]$selected.UpdateDownloadSize / 1MB)) } else { 'Download size not supplied by the update service.' }
+        $confirmText = "Download this Microsoft-matched driver update?`n`nDevice: $($selected.DeviceName)`nUpdate: $($selected.AvailableUpdate)`nVersion: $($selected.AvailableVersion)`n$sizeText`n`nAMR will use its internal HTTPS download and package-validation engine first. If the package format is supported, AMR will save and prepare it for local installation without downloading it a second time. Windows Update is used only if AMR cannot complete or safely prepare the package. Nothing will be installed until you choose Install Ready Update. Continue?"
+        if (-not $SkipConfirmation) { if ((Show-AMRMessage $confirmText 'Confirm Driver Download' YesNo Question) -ne 'Yes') { return } }
+    }
+
+    $restorePointStatus = 'Not applicable to download'
+    if ($Action -eq 'Install') {
+        if ($FromBatch -and -not [string]::IsNullOrWhiteSpace([string]$script:DriverBatchRestorePointStatus)) {
+            $restorePointStatus = [string]$script:DriverBatchRestorePointStatus
+        } elseif ($RestorePointPrepared) {
+            $restorePointStatus = [string]$PreparedRestorePointStatus
+            if ([string]::IsNullOrWhiteSpace($restorePointStatus)) { $restorePointStatus='No verified AMR restore point was available; user explicitly approved continuing.' }
+            if ($FromBatch) { $script:DriverBatchRestorePointStatus = $restorePointStatus }
+        } else {
+            try {
+                $null=Start-AMRDriverManagedWorker -Operation RestorePoint -Device $selected -AllowDuringBatch:$FromBatch
+                (C 'DriverActionStatus').Text='Creating and verifying a System Restore point in the background before installation…'
+                (C 'DriverOperationProgress').Visibility='Visible'
+                (C 'DriverOperationProgress').IsIndeterminate=$true
+                $poll=New-Object System.Windows.Threading.DispatcherTimer
+                $poll.Interval=[TimeSpan]::FromMilliseconds(500)
+                $poll.Add_Tick(({
+                    if(-not $script:DriverManagedJob){$poll.Stop();return}
+                    if($script:DriverManagedJob.State -in @('Completed','Failed','Stopped')){
+                        $poll.Stop()
+                        try {
+                            $preflight=Complete-AMRDriverManagedWorker
+                            if(-not $preflight){throw 'Restore Point preflight returned no result.'}
+                            $approvedStatus=''
+                            if([bool]$preflight.Success){
+                                $approvedStatus=[string]$preflight.Status
+                                Write-AMRLog ('Driver install preflight created restore point: '+$approvedStatus) SUCCESS Overview
+                            } elseif($preflight.ExistingState){
+                                $existingState=$preflight.ExistingState
+                                $existingPointTime=[datetime]$existingState.CreationTime
+                                $existingPointAge=(Get-Date)-$existingPointTime
+                                $reusePrompt="AMR could not create a fresh restore point before this installation.`n`nA previously verified AMR restore point exists:`n$($existingState.Description)`nCreated: $existingPointTime`nAge: $([math]::Max(0,[int]$existingPointAge.TotalHours)) hour(s)`n`nThis older point is NOT a snapshot immediately before the current driver change. Do you explicitly want to continue using it?"
+                                if((Show-AMRMessage $reusePrompt 'Use Older Restore Point?' YesNo Warning) -eq 'Yes'){
+                                    $approvedStatus=('User approved previously verified AMR restore point #{0} ({1}); a fresh point could not be created: {2}' -f $existingState.SequenceNumber,$existingPointTime,[string]$preflight.Failure)
+                                    Write-AMRLog $approvedStatus WARNING Overview
+                                }
+                            } else {
+                                $continueWithout=Show-AMRMessage ("AMR could not create or verify a System Restore point before this driver installation.`n`nReason: $($preflight.Failure)`n`nContinue without a verified AMR restore point? This reduces recovery options if the driver causes problems.") 'Restore Point Unavailable' YesNo Warning
+                                if($continueWithout -eq 'Yes'){$approvedStatus='No verified AMR restore point was available; user explicitly approved continuing.'}
+                            }
+                            if([string]::IsNullOrWhiteSpace($approvedStatus)){
+                                if($FromBatch){$script:DriverBatchActive=$false;$script:DriverBatchQueue=@();$script:DriverBatchTotal=0;$script:DriverBatchCompleted=0;$script:DriverBatchResults=@();$script:DriverBatchRestorePointStatus=$null;$script:DriverBatchRebootRequired=$false}
+                                (C 'DriverOperationProgress').IsIndeterminate=$false
+                                (C 'DriverOperationProgress').Visibility='Collapsed'
+                                (C 'DriverActionStatus').Text='Installation cancelled because no restore-point option was approved.'
+                                Update-AMRDriverActionButtons
+                                return
+                            }
+                            $restoreDisplayState=if($preflight.Success){$preflight.RestoreState}else{$preflight.ExistingState}
+                            if($restoreDisplayState){(C 'DriverRestorePointStatus').Text=('Verified AMR restore point #{0} • {1} • {2}' -f $restoreDisplayState.SequenceNumber,$restoreDisplayState.Description,$restoreDisplayState.CreationTime);(C 'DriverSmartRestoreBtn').IsEnabled=$true}
+                            (C 'DriverOperationProgress').IsIndeterminate=$false
+                            (C 'DriverOperationProgress').Visibility='Collapsed'
+                            Start-AMRDriverUpdateAction -Action $Action -Device $selected -SkipConfirmation -FromBatch:$FromBatch -RestorePointPrepared -PreparedRestorePointStatus $approvedStatus
+                        } catch {
+                            (C 'DriverOperationProgress').IsIndeterminate=$false
+                            (C 'DriverOperationProgress').Visibility='Collapsed'
+                            (C 'DriverActionStatus').Text='Restore Point preflight failed: '+[string]$_.Exception.Message
+                            Show-AMRMessage ([string]$_.Exception.Message) 'Restore Point Preflight' OK Error | Out-Null
+                            if($FromBatch){$script:DriverBatchActive=$false;$script:DriverBatchQueue=@();$script:DriverBatchRestorePointStatus=$null}
+                            Update-AMRDriverActionButtons
+                        }
+                    }
+                }).GetNewClosure())
+                $script:DriverManagedTimer=$poll; $poll.Start()
+                return
+            } catch {
+                (C 'DriverActionStatus').Text='Could not start restore-point preflight: '+[string]$_.Exception.Message
+                Show-AMRMessage ([string]$_.Exception.Message) 'Restore Point Preflight' OK Error | Out-Null
+                return
+            }
+        }
+    }
+
+    $updateId = [string]$selected.UpdateId
+    $revision = [int]$selected.UpdateRevision
+    (C 'DriverDownloadSelectedBtn').IsEnabled = $false
+    (C 'DriverInstallSelectedBtn').IsEnabled = $false
+    (C 'DriverCatalogSearchBtn').IsEnabled = $false
+    (C 'ScanDriversBtn').IsEnabled = $false
+    (C 'DriverRollbackCheckBtn').IsEnabled = $false
+    (C 'DriverActionStatus').Text = if ($FromBatch -and $script:DriverBatchActive) { 'Batch installation: starting item {0} of {1} — {2}' -f ($script:DriverBatchCompleted + 1),$script:DriverBatchTotal,[string]$selected.DeviceName } elseif ($Action -eq 'Download') { 'Starting AMR internal driver download and package-inspection engine…' } else { 'Preparing the selected driver installation…' }
+    (C 'DriverOperationProgress').Visibility = 'Visible'
+    (C 'DriverOperationProgress').IsIndeterminate = $false
+    (C 'DriverOperationProgress').Value = 0
+
+    $script:DriverActionProgressFile = Join-Path $env:TEMP ('AMR_DriverProgress_{0}.json' -f [guid]::NewGuid().ToString('N'))
+    $hardwareIdsText = (@($selected.HardwareIds) | ForEach-Object { [string]$_ }) -join "`n"
+    $compatibleIdsText = (@($selected.CompatibleIds) | ForEach-Object { [string]$_ }) -join "`n"
+    $driverPackageRoot = Join-Path $script:DownloadDir 'Drivers'
+    $safeTargetDeviceName = ([string]$selected.DeviceId -replace '[^A-Za-z0-9._-]','_')
+    if ($safeTargetDeviceName.Length -gt 70) { $safeTargetDeviceName = $safeTargetDeviceName.Substring(0,70) }
+    $safeTargetUpdateId = ([string]$updateId -replace '[^A-Fa-f0-9-]','')
+    $localPackageFolder = Join-Path $driverPackageRoot ('{0}_{1}_r{2}' -f $safeTargetDeviceName,$safeTargetUpdateId,$revision)
+    $targetAvailableVersion = [string]$selected.AvailableVersion
+    $targetSourceAdapter = if($isCatalogPackage){'MicrosoftUpdateCatalog'}else{[string]$selected.SourceAdapter}
+    if($isCatalogPackage -and -not [string]::IsNullOrWhiteSpace([string]$selected.LocalPackageFolder)){$localPackageFolder=[string]$selected.LocalPackageFolder}
+    $script:DriverActionJob = Start-Job -ArgumentList $updateId,$revision,$Action,[string]$selected.DeviceId,$hardwareIdsText,$compatibleIdsText,$script:DriverActionProgressFile,$driverPackageRoot,$restorePointStatus,$localPackageFolder,$targetAvailableVersion,$targetSourceAdapter -ScriptBlock {
+        param($TargetUpdateId,$TargetRevision,$RequestedAction,$TargetDeviceId,$TargetHardwareIdsText,$TargetCompatibleIdsText,$ProgressFile,$TargetDownloadRoot,$RestorePointStatus,$TargetLocalPackageFolder,$TargetAvailableVersion,$TargetSourceAdapter)
+        $ErrorActionPreference = 'Stop'
+        function Get-AMRTargetDriverState {
+            param([string]$DeviceInstanceId)
+            $driver = $null; $device = $null
+            try { $driver = Get-CimInstance -ClassName Win32_PnPSignedDriver -ErrorAction Stop | Where-Object { ([string]$_.DeviceID).Equals($DeviceInstanceId,[System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1 } catch {}
+            try { $device = Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction Stop | Where-Object { ([string]$_.PNPDeviceID).Equals($DeviceInstanceId,[System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1 } catch {}
+            if (-not $driver) { return [pscustomobject]@{ Found=$false; DriverVersion=''; InfName=''; ProviderName=''; IsSigned=$false; ConfigManagerErrorCode=$null; Status='Driver record not found' } }
+            $errorCode = $null; if ($device) { try { $errorCode = [int]$device.ConfigManagerErrorCode } catch {} }
+            return [pscustomobject]@{ Found=$true; DriverVersion=[string]$driver.DriverVersion; InfName=[string]$driver.InfName; ProviderName=[string]$driver.DriverProviderName; IsSigned=[bool]$driver.IsSigned; ConfigManagerErrorCode=$errorCode; Status=[string]$(if ($device) { $device.Status } else { 'Device state unavailable' }) }
+        }
+        function Test-AMRInfExactHardwareId {
+            param([string]$InfText,[string[]]$DeviceIds)
+            foreach ($line in ($InfText -split '\r?\n')) {
+                $content = ([string]$line -split ';',2)[0]
+                if ([string]::IsNullOrWhiteSpace($content)) { continue }
+                foreach ($part in ($content -split ',')) {
+                    $token = ([string]$part).Trim().Trim('"').Trim()
+                    foreach ($deviceId in $DeviceIds) {
+                        if (-not [string]::IsNullOrWhiteSpace([string]$deviceId) -and $token.Equals(([string]$deviceId).Trim(),[System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+                    }
+                }
+            }
+            return $false
+        }
+        function Export-AMRPreviousDriverPackage {
+            param($DriverState,[string]$DeviceInstanceId,[string]$DeviceLabel)
+            $result = [pscustomobject]@{ Available=$false; Status='No exportable previous OEM driver package was identified.'; Path=''; InfName=[string]$DriverState.InfName }
+            $infName = [string]$DriverState.InfName
+            if ($infName -notmatch '(?i)^oem\d+\.inf$') { $result.Status='Previous driver is not identified as an exportable OEM Driver Store package.'; return $result }
+            $pnputil = Join-Path $env:WINDIR 'System32\pnputil.exe'
+            if (-not (Test-Path -LiteralPath $pnputil -PathType Leaf)) { $result.Status='PnPUtil unavailable; previous driver package export skipped.'; return $result }
+            try {
+                $root = Join-Path $env:ProgramData 'AMR Windows Utility\DriverRecovery'
+                $safeDevice = ($DeviceInstanceId -replace '[^A-Za-z0-9._-]','_')
+                if ($safeDevice.Length -gt 90) { $safeDevice=$safeDevice.Substring(0,90) }
+                $folder = Join-Path $root ((Get-Date).ToString('yyyyMMdd-HHmmss') + '_' + $safeDevice)
+                New-Item -ItemType Directory -Path $folder -Force -ErrorAction Stop | Out-Null
+                $exportOutput = (& $pnputil '/export-driver' $infName $folder 2>&1 | Out-String)
+                $exitCode = [int]$LASTEXITCODE
+                $infFiles = @(Get-ChildItem -LiteralPath $folder -Filter '*.inf' -File -Recurse -ErrorAction SilentlyContinue)
+                if ($exitCode -ne 0 -or $infFiles.Count -lt 1) { throw ('PnPUtil could not export the previous package. Exit={0}. {1}' -f $exitCode,$exportOutput.Trim()) }
+                $fileHashes = @(Get-ChildItem -LiteralPath $folder -File -Recurse | ForEach-Object { [pscustomobject]@{ RelativePath=$_.FullName.Substring($folder.Length).TrimStart('\'); SizeBytes=[int64]$_.Length; SHA256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256 -ErrorAction Stop).Hash } })
+                $manifest = [pscustomobject]@{ Product='AMR Driver Recovery Snapshot'; CreatedAt=(Get-Date).ToString('o'); DeviceInstanceId=$DeviceInstanceId; DeviceName=$DeviceLabel; PreviousInf=$infName; PreviousVersion=[string]$DriverState.DriverVersion; PreviousProvider=[string]$DriverState.ProviderName; ExportFolder=$folder; Files=$fileHashes; RestoreMethod='Advanced user may reinstall the exported signed package through Device Manager or PnPUtil after reviewing device compatibility.' }
+                $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $folder 'AMR_PreviousDriver_Manifest.json') -Encoding UTF8 -ErrorAction Stop
+                $result.Available=$true; $result.Status='Previous OEM driver package exported and SHA-256 inventoried.'; $result.Path=$folder
+            } catch { $result.Status='Previous driver export unavailable: ' + [string]$_.Exception.Message }
+            return $result
+        }
+        try {
+            $target = $null
+            $collection = $null
+            if([string]$TargetSourceAdapter -eq 'MicrosoftUpdateCatalog') {
+                if($TargetUpdateId -notmatch '^[0-9a-fA-F-]{36}$'){throw 'The selected Catalog update identity is invalid.'}
+                $catalogManifestPath=Join-Path $TargetLocalPackageFolder 'AMR_DriverPackage_Manifest.json'
+                if(-not(Test-Path -LiteralPath $catalogManifestPath -PathType Leaf)){throw 'The verified Catalog package manifest is missing. Reacquire and stage the package.'}
+                $catalogManifest=Get-Content -LiteralPath $catalogManifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                if([string]$catalogManifest.SourceAdapter -ne 'MicrosoftUpdateCatalog' -or [string]$catalogManifest.UpdateId -ne [string]$TargetUpdateId -or -not [bool]$catalogManifest.Installable -or -not [bool]$catalogManifest.StagedByWindows){throw 'Catalog package identity or Windows staging state did not pass pre-install verification.'}
+                if([string]$catalogManifest.DeviceInstanceId -ne [string]$TargetDeviceId){throw 'The staged Catalog package belongs to a different device instance.'}
+            } else {
+                $session = New-Object -ComObject Microsoft.Update.Session
+                $searcher = $session.CreateUpdateSearcher()
+                $searchResult = $searcher.Search("IsInstalled=0 and IsHidden=0 and Type='Driver'")
+                for ($i = 0; $i -lt $searchResult.Updates.Count; $i++) {
+                    $candidate = $searchResult.Updates.Item($i)
+                    if ([string]$candidate.Identity.UpdateID -eq [string]$TargetUpdateId -and [int]$candidate.Identity.RevisionNumber -eq [int]$TargetRevision) { $target = $candidate; break }
+                }
+                if (-not $target) { throw 'The selected update is no longer offered. Run Scan Device again to refresh the catalog.' }
+                $currentUpdateHardwareId = ''
+                try { $currentUpdateHardwareId = ([string]$target.DriverHardwareID).Trim().ToUpperInvariant() } catch {}
+                if (-not [string]::IsNullOrWhiteSpace($currentUpdateHardwareId)) {
+                    $validDeviceIds = @(($TargetHardwareIdsText -split '\r?\n') + ($TargetCompatibleIdsText -split '\r?\n') | ForEach-Object { ([string]$_).Trim().ToUpperInvariant() } | Where-Object { $_ })
+                    if ($validDeviceIds -notcontains $currentUpdateHardwareId) { throw 'Safety check stopped the operation: the current Windows Update hardware ID no longer matches the selected device. Run Scan Device again.' }
+                }
+                $collection = New-Object -ComObject Microsoft.Update.UpdateColl
+                [void]$collection.Add($target)
+            }
+            if ($RequestedAction -eq 'Download') {
+                if (-not $target.EulaAccepted) { $target.AcceptEula() }
+                # Phase 5.3 architecture: AMR's internal transfer and package-preparation
+                # engine is the primary path. Windows Update downloads into its cache ONLY
+                # when AMR cannot produce a locally installable, integrity-checked package.
+                $savedCopy = $false
+                $savedCopyMessage = ''
+                $savedFolder = $null
+                $savedFiles = @()
+                $localInstallReady = $false
+                $localInstallableInfFiles = @()
+                $wuaCacheReady = $false
+                $wuaDownloadError = ''
+                $directFailure = ''
+                try {
+                    try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
+                    $safeDeviceName = ([string]$TargetDeviceId -replace '[^A-Za-z0-9._-]','_')
+                    if ($safeDeviceName.Length -gt 70) { $safeDeviceName = $safeDeviceName.Substring(0,70) }
+                    $safeUpdateId = ([string]$TargetUpdateId -replace '[^A-Fa-f0-9-]','')
+                    if ([string]::IsNullOrWhiteSpace($safeUpdateId)) { throw 'The update identifier could not be converted into a safe folder name.' }
+                    $savedFolder = Join-Path $TargetDownloadRoot (('{0}_{1}_r{2}' -f $safeDeviceName,$safeUpdateId,[int]$TargetRevision))
+                    if (Test-Path -LiteralPath $savedFolder -PathType Container) {
+                        # Never trust an old or partial folder as a fresh download. Start clean
+                        # for this exact UpdateID/revision; unrelated package folders are untouched.
+                        Remove-Item -LiteralPath $savedFolder -Recurse -Force -ErrorAction Stop
+                    }
+                    New-Item -ItemType Directory -Path $savedFolder -Force -ErrorAction Stop | Out-Null
+                    $contentItems = @()
+                    try {
+                        for ($contentIndex = 0; $contentIndex -lt [int]$target.DownloadContents.Count; $contentIndex++) {
+                            $contentItems += $target.DownloadContents.Item($contentIndex)
+                        }
+                    } catch { throw ('The update metadata did not expose its official content URL collection: ' + $_.Exception.Message) }
+                    if ($contentItems.Count -eq 0) { throw 'The update metadata did not expose downloadable package content.' }
+                    $contentIndex = 0
+                    $aggregateBytes = [int64]0
+                    $aggregateTotal = [int64]0
+                    foreach ($contentItem in $contentItems) {
+                        $contentUrl = [string]$contentItem.DownloadUrl
+                        $parsedContentUri = $null
+                        if (-not [Uri]::TryCreate($contentUrl,[UriKind]::Absolute,[ref]$parsedContentUri)) { throw 'The official package content URL was invalid.' }
+                        if ($parsedContentUri.Scheme -ne 'https') { throw ('A package content URL did not use HTTPS. Host: ' + $parsedContentUri.Host) }
+                        $contentIndex++
+                        $urlLeaf = [IO.Path]::GetFileName($parsedContentUri.AbsolutePath)
+                        if ([string]::IsNullOrWhiteSpace($urlLeaf)) { $urlLeaf = ('DriverContent_{0}.bin' -f $contentIndex) }
+                        $urlLeaf = [Uri]::UnescapeDataString($urlLeaf) -replace '[^A-Za-z0-9._-]','_'
+                        if ($urlLeaf.Length -gt 120) { $urlLeaf = $urlLeaf.Substring($urlLeaf.Length - 120) }
+                        $finalContentPath = Join-Path $savedFolder ('{0:D2}_{1}' -f $contentIndex,$urlLeaf)
+                        $partialContentPath = $finalContentPath + '.part'
+                        $downloadSucceeded = $false
+                        $lastContentError = $null
+                        $expectedFileLength = [int64]0
+                        for ($contentAttempt = 1; $contentAttempt -le 3; $contentAttempt++) {
+                            $response = $null; $inputStream = $null; $outputStream = $null
+                            try {
+                                $request = [System.Net.HttpWebRequest]::Create($parsedContentUri)
+                                $request.Method = 'GET'
+                                $request.UserAgent = 'AMR-Windows-Utility-DriverCenter/1.0'
+                                $request.Timeout = 60000
+                                $request.ReadWriteTimeout = 60000
+                                $request.AllowAutoRedirect = $true
+                                $request.MaximumAutomaticRedirections = 5
+                                $request.UseDefaultCredentials = $false
+                                $request.Proxy = [System.Net.WebRequest]::DefaultWebProxy
+                                if ($request.Proxy) { $request.Proxy.Credentials = [System.Net.CredentialCache]::DefaultCredentials }
+                                $response = $request.GetResponse()
+                                if ([int]$response.StatusCode -lt 200 -or [int]$response.StatusCode -ge 300) { throw ('HTTP status ' + [int]$response.StatusCode) }
+                                if ($response.ResponseUri.Scheme -ne 'https') { throw 'The content endpoint redirected away from HTTPS.' }
+                                if ([string]$response.ContentType -match '(?i)text/html|application/json') { throw ('The endpoint returned ' + [string]$response.ContentType + ' instead of package content.') }
+                                $contentLength = [int64]$response.ContentLength
+                                if ($contentLength -gt 4GB) { throw 'A single package content file exceeded the 4 GB safety limit.' }
+                                if ($contentLength -gt 0) { $expectedFileLength = $contentLength }
+                                $aggregateTotal = $aggregateBytes + $expectedFileLength
+                                if ($aggregateTotal -gt 4GB) { throw 'The complete package exceeded the 4 GB safety limit.' }
+                                $inputStream = $response.GetResponseStream()
+                                $outputStream = [IO.File]::Open($partialContentPath,[IO.FileMode]::Create,[IO.FileAccess]::Write,[IO.FileShare]::None)
+                                $buffer = New-Object byte[] 65536
+                                $fileBytes = [int64]0; $lastProgressBytes = [int64]0; $lastProgressAt = Get-Date
+                                while (($readCount = $inputStream.Read($buffer,0,$buffer.Length)) -gt 0) {
+                                    $outputStream.Write($buffer,0,$readCount)
+                                    $fileBytes += $readCount
+                                    if ($fileBytes -gt 4GB -or ($aggregateBytes + $fileBytes) -gt 4GB) { throw 'The package exceeded the 4 GB safety limit while downloading.' }
+                                    $progressNow = Get-Date
+                                    $elapsed = [Math]::Max(0.1,($progressNow - $lastProgressAt).TotalSeconds)
+                                    $speed = [Math]::Max(0,($fileBytes - $lastProgressBytes) / $elapsed)
+                                    $currentPercent = if ($contentLength -gt 0) { [int][Math]::Min(99,($fileBytes / $contentLength) * 100) } else { 0 }
+                                    $payload = [pscustomobject]@{ Percent=$currentPercent; BytesDownloaded=($aggregateBytes + $fileBytes); BytesTotal=$aggregateTotal; SpeedBytesPerSecond=$speed; Stage='DirectDownload'; FileIndex=$contentIndex; FileCount=$contentItems.Count; Updated=$progressNow.ToString('o') }
+                                    $payload | ConvertTo-Json -Compress | Set-Content -LiteralPath ($ProgressFile + '.tmp') -Encoding UTF8
+                                    Move-Item -LiteralPath ($ProgressFile + '.tmp') -Destination $ProgressFile -Force
+                                    $lastProgressBytes = $fileBytes; $lastProgressAt = $progressNow
+                                }
+                                $outputStream.Flush(); $outputStream.Dispose(); $outputStream = $null
+                                $inputStream.Dispose(); $inputStream = $null
+                                $response.Dispose(); $response = $null
+                                if ($fileBytes -le 0) { throw 'The downloaded package content was empty.' }
+                                if ($contentLength -gt 0 -and $fileBytes -ne $contentLength) { throw ('Content length mismatch. Expected {0}, received {1}.' -f $contentLength,$fileBytes) }
+                                Move-Item -LiteralPath $partialContentPath -Destination $finalContentPath -Force
+                                $fileHash = (Get-FileHash -LiteralPath $finalContentPath -Algorithm SHA256 -ErrorAction Stop).Hash
+                                $savedFiles += [pscustomobject]@{ FileName=[IO.Path]::GetFileName($finalContentPath); SizeBytes=$fileBytes; SHA256=$fileHash; SourceHost=$parsedContentUri.Host }
+                                $aggregateBytes += $fileBytes
+                                $downloadSucceeded = $true
+                                break
+                            } catch {
+                                $lastContentError = $_.Exception.Message
+                                if ($contentAttempt -lt 3) { Start-Sleep -Seconds ([int](2 * $contentAttempt)) }
+                            } finally {
+                                if ($outputStream) { try { $outputStream.Dispose() } catch {} }
+                                if ($inputStream) { try { $inputStream.Dispose() } catch {} }
+                                if ($response) { try { $response.Dispose() } catch {} }
+                            }
+                        }
+                        if (-not $downloadSucceeded) { throw ('AMR could not download package content file {0}: {1}' -f $contentIndex,$lastContentError) }
+                    }
+                    # Inspect package types instead of treating every payload as an opaque file.
+                    # Driver INF packages are prepared for local installation; unsupported or
+                    # incomplete formats deliberately trigger the Windows Update fallback.
+                    $inspectionRoot = Join-Path $savedFolder '_AMR_Expanded'
+                    New-Item -ItemType Directory -Path $inspectionRoot -Force | Out-Null
+                    $expandExe = Join-Path $env:WINDIR 'System32\expand.exe'
+                    foreach ($savedFile in @($savedFiles)) {
+                        $sourceFile = Join-Path $savedFolder ([string]$savedFile.FileName)
+                        $extension = [IO.Path]::GetExtension($sourceFile).ToLowerInvariant()
+                        if ($extension -notin @('.inf','.cab','.zip','.psf')) {
+                            $probeStream = [IO.File]::OpenRead($sourceFile)
+                            try {
+                                $probeBytes = New-Object byte[] 8
+                                $probeRead = $probeStream.Read($probeBytes,0,$probeBytes.Length)
+                            } finally { $probeStream.Dispose() }
+                            if ($probeRead -ge 4 -and $probeBytes[0] -eq 0x4D -and $probeBytes[1] -eq 0x53 -and $probeBytes[2] -eq 0x43 -and $probeBytes[3] -eq 0x46) { $extension = '.cab' }
+                            elseif ($probeRead -ge 2 -and $probeBytes[0] -eq 0x50 -and $probeBytes[1] -eq 0x4B) { $extension = '.zip' }
+                            else {
+                                $headerText = ''
+                                try { $headerText = Get-Content -LiteralPath $sourceFile -TotalCount 12 -ErrorAction Stop | Out-String } catch {}
+                                if ($headerText -match '(?im)^\s*\[Version\]') { $extension = '.inf' }
+                            }
+                        }
+                        if ($extension -in @('.inf','.cat','.sys','.dll','.dat','.bin')) {
+                            $inspectionFileName = [IO.Path]::GetFileName($sourceFile)
+                            if ($extension -eq '.inf' -and [IO.Path]::GetExtension($inspectionFileName).ToLowerInvariant() -ne '.inf') { $inspectionFileName = [IO.Path]::GetFileNameWithoutExtension($inspectionFileName) + '.inf' }
+                            Copy-Item -LiteralPath $sourceFile -Destination (Join-Path $inspectionRoot $inspectionFileName) -Force
+                        } elseif ($extension -eq '.cab') {
+                            $cabFolder = Join-Path $inspectionRoot ([IO.Path]::GetFileNameWithoutExtension($sourceFile))
+                            New-Item -ItemType Directory -Path $cabFolder -Force | Out-Null
+                            if (-not (Test-Path -LiteralPath $expandExe -PathType Leaf)) { throw 'Windows package extractor (expand.exe) is unavailable.' }
+                            $expandOutput = (& $expandExe '-F:*' $sourceFile $cabFolder 2>&1 | Out-String)
+                            if ($LASTEXITCODE -ne 0) { throw ('AMR could not inspect the driver CAB package. ' + $expandOutput.Trim()) }
+                        } elseif ($extension -eq '.zip') {
+                            $zipFolder = Join-Path $inspectionRoot ([IO.Path]::GetFileNameWithoutExtension($sourceFile))
+                            Expand-Archive -LiteralPath $sourceFile -DestinationPath $zipFolder -Force -ErrorAction Stop
+                        } elseif ($extension -eq '.psf') {
+                            # PSF express payloads are differential content, not standalone driver packages.
+                            continue
+                        } else {
+                            throw ('AMR does not have a safe local installer for package type ' + $(if ($extension) { $extension } else { '(no extension)' }) + '.')
+                        }
+                    }
+                    $allInfFiles = @(Get-ChildItem -LiteralPath $inspectionRoot -Filter '*.inf' -File -Recurse -ErrorAction Stop)
+                    if ($allInfFiles.Count -eq 0) { throw 'The downloaded content did not contain an INF driver package that AMR can install locally.' }
+                    $hardwareIds = @(($TargetHardwareIdsText -split '\r?\n') | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+                    $compatibleIds = @(($TargetCompatibleIdsText -split '\r?\n') | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+                    $infCandidates = @()
+                    foreach ($infFile in $allInfFiles) {
+                        $infText = Get-Content -LiteralPath $infFile.FullName -Raw -ErrorAction Stop
+                        $matchRank = 99; $matchIndex = 999; $matchLength = 0
+                        for ($idIndex = 0; $idIndex -lt $hardwareIds.Count; $idIndex++) {
+                            $candidateId = [string]$hardwareIds[$idIndex]
+                            if (Test-AMRInfExactHardwareId -InfText $infText -DeviceIds @($candidateId)) {
+                                $matchRank = 0; $matchIndex = $idIndex; $matchLength = $candidateId.Length; break
+                            }
+                        }
+                        if ($matchRank -ne 0) {
+                            for ($idIndex = 0; $idIndex -lt $compatibleIds.Count; $idIndex++) {
+                                $candidateId = [string]$compatibleIds[$idIndex]
+                                if (Test-AMRInfExactHardwareId -InfText $infText -DeviceIds @($candidateId)) {
+                                    $matchRank = 1; $matchIndex = $idIndex; $matchLength = $candidateId.Length; break
+                                }
+                            }
+                        }
+                        if ($matchRank -eq 99) { continue }
+                        $catalogNames = @([regex]::Matches($infText,'(?im)^\s*CatalogFile(?:\.[^=\r\n]+)?\s*=\s*([^;\r\n]+)') | ForEach-Object { $_.Groups[1].Value.Trim().Trim('"') } | Where-Object { $_ })
+                        $catalogValid = $false
+                        foreach ($catalogName in $catalogNames) {
+                            if ([IO.Path]::IsPathRooted($catalogName) -or $catalogName -match '(^|[\\/])\.\.([\\/]|$)') { continue }
+                            $catalogPath = Join-Path $infFile.DirectoryName $catalogName
+                            if (Test-Path -LiteralPath $catalogPath -PathType Leaf) {
+                                try { $catalogSignature = Get-AuthenticodeSignature -FilePath $catalogPath -ErrorAction Stop; if ($catalogSignature.Status -eq 'Valid') { $catalogValid = $true; break } } catch {}
+                            }
+                        }
+                        if ($catalogValid) {
+                            $relativeInf = $infFile.FullName.Substring($inspectionRoot.Length).TrimStart('\')
+                            $infCandidates += [pscustomobject]@{ RelativePath=$relativeInf; MatchRank=$matchRank; MatchIndex=$matchIndex; MatchLength=$matchLength; FileName=$infFile.Name }
+                        }
+                    }
+                    if ($infCandidates.Count -gt 0) {
+                        $bestInfCandidate = $infCandidates | Sort-Object @{Expression={$_.MatchRank};Ascending=$true},@{Expression={$_.MatchIndex};Ascending=$true},@{Expression={$_.MatchLength};Descending=$true},@{Expression={$_.FileName};Ascending=$true} | Select-Object -First 1
+                        $localInstallableInfFiles = @([string]$bestInfCandidate.RelativePath)
+                    }
+                    if (@($localInstallableInfFiles).Count -eq 0) { throw 'No INF matched the selected device with a valid signed catalog. AMR will use the Windows Update installation path instead.' }
+                    $manifest = [pscustomobject]@{
+                        Product='AMR Windows Utility - Driver Center'
+                        UpdateTitle=[string]$target.Title
+                        UpdateId=[string]$TargetUpdateId
+                        Revision=[int]$TargetRevision
+                        DeviceId=[string]$TargetDeviceId
+                        DownloadedAt=(Get-Date).ToString('o')
+                        DownloadEngine='AMR Internal HTTPS Engine'
+                        Installable=$true
+                        InstallMethod='PnPUtil with INF and signed catalog validation'
+                        InstallableInfFiles=@($localInstallableInfFiles)
+                        Files=@($savedFiles)
+                    }
+                    $manifest | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath (Join-Path $savedFolder 'AMR_DriverPackage_Manifest.json') -Encoding UTF8
+                    $savedCopy = $true
+                    $localInstallReady = $true
+                    $savedCopyMessage = ('AMR downloaded, SHA-256 checked and prepared {0} content file(s); {1} signed INF package(s) match the selected device.' -f $savedFiles.Count,$localInstallableInfFiles.Count)
+                    $completePayload = [pscustomobject]@{ Percent=100; BytesDownloaded=$aggregateBytes; BytesTotal=$aggregateTotal; SpeedBytesPerSecond=0; Stage='DirectDownloadCompleted'; Updated=(Get-Date).ToString('o') }
+                    $completePayload | ConvertTo-Json -Compress | Set-Content -LiteralPath ($ProgressFile + '.tmp') -Encoding UTF8
+                    Move-Item -LiteralPath ($ProgressFile + '.tmp') -Destination $ProgressFile -Force
+                } catch {
+                    $directFailure = [string]$_.Exception.Message
+                    $savedCopyMessage = 'AMR internal engine could not prepare a safe local driver package: ' + $directFailure
+                    $savedCopy = $false
+                    $localInstallReady = $false
+                    $localInstallableInfFiles = @()
+                }
+                # Fallback is deliberately conditional: no WUA cache transfer when AMR has
+                # produced a locally installable package. This removes the normal double download.
+                if (-not $localInstallReady) {
+                    if ($savedFolder -and (Test-Path -LiteralPath $savedFolder -PathType Container)) {
+                        try { Remove-Item -LiteralPath $savedFolder -Recurse -Force -ErrorAction Stop } catch {}
+                    }
+                    $savedFolder = $null
+                    $savedFiles = @()
+                    try {
+                        $downloader = $session.CreateUpdateDownloader()
+                        $downloader.Updates = $collection
+                        $initialProgress = [pscustomobject]@{ Percent=0; BytesDownloaded=0; BytesTotal=[int64]$target.MaxDownloadSize; SpeedBytesPerSecond=0; Stage='WuaFallbackDownload'; Updated=(Get-Date).ToString('o') }
+                        $initialProgress | ConvertTo-Json -Compress | Set-Content -LiteralPath $ProgressFile -Encoding UTF8
+                        $downloadJob = $downloader.BeginDownload($null,$null,$null)
+                        $downloadStarted = Get-Date; $previousProgressBytes = [int64]0; $previousProgressAt = Get-Date
+                        while (-not [bool]$downloadJob.IsCompleted) {
+                            if (((Get-Date) - $downloadStarted).TotalMinutes -gt 180) { try { $downloadJob.RequestAbort() } catch {}; throw 'Windows Update fallback exceeded the 180-minute safety timeout.' }
+                            try {
+                                $downloadProgress = $downloadJob.GetProgress()
+                                $percent = [int][Math]::Max(0,[Math]::Min(100,[double]$downloadProgress.CurrentUpdatePercentComplete))
+                                $bytesDone = [int64]$downloadProgress.CurrentUpdateBytesDownloaded
+                                $bytesTotal = [int64]$downloadProgress.CurrentUpdateBytesToDownload
+                                if ($bytesTotal -le 0) { $bytesDone = [int64]$downloadProgress.TotalBytesDownloaded; $bytesTotal = [int64]$downloadProgress.TotalBytesToDownload }
+                                $progressNow = Get-Date; $elapsedSeconds = [Math]::Max(0.1,($progressNow - $previousProgressAt).TotalSeconds)
+                                $speedBytesPerSecond = [Math]::Max(0,($bytesDone - $previousProgressBytes) / $elapsedSeconds)
+                                $progressPayload = [pscustomobject]@{ Percent=$percent; BytesDownloaded=$bytesDone; BytesTotal=$bytesTotal; SpeedBytesPerSecond=$speedBytesPerSecond; Stage='WuaFallbackDownload'; Updated=$progressNow.ToString('o') }
+                                $previousProgressBytes = $bytesDone; $previousProgressAt = $progressNow
+                                $progressPayload | ConvertTo-Json -Compress | Set-Content -LiteralPath ($ProgressFile + '.tmp') -Encoding UTF8
+                                Move-Item -LiteralPath ($ProgressFile + '.tmp') -Destination $ProgressFile -Force
+                            } catch {}
+                            Start-Sleep -Milliseconds 500
+                        }
+                        $downloadResult = $downloader.EndDownload($downloadJob)
+                        $itemResult = $downloadResult.GetUpdateResult(0)
+                        if (-not [bool]$target.IsDownloaded -or [int]$itemResult.ResultCode -ne 2) { throw ('Windows Update fallback did not complete successfully. Result code: {0}; HRESULT: 0x{1:X8}.' -f $itemResult.ResultCode,[int]$itemResult.HResult) }
+                        $wuaCacheReady = [bool]$target.IsDownloaded
+                    } catch { $wuaDownloadError = [string]$_.Exception.Message }
+                }
+                if (-not $localInstallReady -and -not $wuaCacheReady) {
+                    throw ('AMR internal engine failed: {0} Windows Update fallback failed: {1}' -f $savedCopyMessage,$wuaDownloadError)
+                }
+                if ($localInstallReady) {
+                    $finalMessage = $savedCopyMessage + '. Windows Update was not used, so the package was downloaded only once. It is ready for local installation.'
+                } else {
+                    $finalMessage = $savedCopyMessage + '. AMR could not safely prepare this package, so Windows Update fallback completed the download and prepared its trusted installation cache.'
+                }
+                [pscustomobject]@{ Success=$true; OutcomeStatus='Success'; WuaReady=[bool]$wuaCacheReady; InstallReady=([bool]($localInstallReady -or $wuaCacheReady)); LocalInstallReady=[bool]$localInstallReady; Action='Download'; Message=$finalMessage; RebootRequired=$false; ResultCode=$(if ($wuaCacheReady) { [int]$itemResult.ResultCode } else { 2 }); SavedCopy=$localInstallReady; SavedFolder=$savedFolder; SavedFiles=@($savedFiles); SavedCopyMessage=$savedCopyMessage; WuaDownloadError=$wuaDownloadError; DirectFailure=$directFailure }
+            } else {
+                # Prefer AMR's verified local package. Windows Update installation is retained
+                # only for updates whose package format required the fallback download path.
+                $localManifestPath = Join-Path $TargetLocalPackageFolder 'AMR_DriverPackage_Manifest.json'
+                $useLocalPackage = $false
+                if (Test-Path -LiteralPath $localManifestPath -PathType Leaf) {
+                    try {
+                        $localManifest = Get-Content -LiteralPath $localManifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                        if ([bool]$localManifest.Installable -and [string]$localManifest.UpdateId -eq [string]$TargetUpdateId -and [int]$localManifest.Revision -eq [int]$TargetRevision -and @($localManifest.InstallableInfFiles).Count -gt 0) { $useLocalPackage = $true }
+                        if($useLocalPackage -and [string]$TargetSourceAdapter -eq 'MicrosoftUpdateCatalog') {
+                            if([string]$localManifest.SourceAdapter -ne 'MicrosoftUpdateCatalog' -or -not [bool]$localManifest.StagedByWindows){throw 'Catalog manifest is not marked as Windows-staged.'}
+                            foreach($expandedFile in @($localManifest.ExpandedFiles)) {
+                                $relativeExpanded=[string]$expandedFile.RelativePath
+                                if([IO.Path]::IsPathRooted($relativeExpanded) -or @($relativeExpanded -split '[\\/]') -contains '..'){throw 'Catalog manifest contains an unsafe extracted-file path.'}
+                                $expandedPath=Join-Path (Join-Path $TargetLocalPackageFolder '_AMR_Expanded') $relativeExpanded
+                                if(-not(Test-Path -LiteralPath $expandedPath -PathType Leaf)){throw ('Extracted Catalog package file is missing: '+$relativeExpanded)}
+                                $expandedItem=Get-Item -LiteralPath $expandedPath -ErrorAction Stop
+                                if([int64]$expandedItem.Length -ne [int64]$expandedFile.SizeBytes){throw ('Extracted Catalog package file size changed: '+$relativeExpanded)}
+                                $expandedHash=(Get-FileHash -LiteralPath $expandedPath -Algorithm SHA256 -ErrorAction Stop).Hash
+                                if(-not $expandedHash.Equals([string]$expandedFile.SHA256,[StringComparison]::OrdinalIgnoreCase)){throw ('Extracted Catalog package SHA-256 verification failed: '+$relativeExpanded)}
+                            }
+                            $catalogRelative=[string]$localManifest.CatalogFile
+                            if([IO.Path]::IsPathRooted($catalogRelative) -or @($catalogRelative -split '[\\/]') -contains '..'){throw 'Catalog manifest contains an unsafe catalog path.'}
+                            $catalogPath=Join-Path (Join-Path $TargetLocalPackageFolder '_AMR_Expanded') $catalogRelative
+                            $catalogSignature=Get-AuthenticodeSignature -FilePath $catalogPath -ErrorAction Stop
+                            if([string]$catalogSignature.Status -ne 'Valid' -or [string]$catalogSignature.SignerCertificate.Thumbprint -ine [string]$localManifest.CatalogSignerThumbprint){throw 'Catalog signature trust or signer thumbprint changed after package staging.'}
+                        }
+                    } catch { throw ('The AMR local package manifest could not be validated: ' + $_.Exception.Message) }
+                }
+                if ($useLocalPackage) {
+                    $verificationLines = @()
+                    foreach ($manifestFile in @($localManifest.Files)) {
+                        $manifestFileName = [string]$manifestFile.FileName
+                        if ([IO.Path]::IsPathRooted($manifestFileName) -or [IO.Path]::GetFileName($manifestFileName) -ne $manifestFileName) { throw 'The local package manifest contains an unsafe file path.' }
+                        $manifestFilePath = Join-Path $TargetLocalPackageFolder $manifestFileName
+                        if (-not (Test-Path -LiteralPath $manifestFilePath -PathType Leaf)) { throw ('Local package file is missing: ' + [string]$manifestFile.FileName) }
+                        $actualLength = (Get-Item -LiteralPath $manifestFilePath -ErrorAction Stop).Length
+                        if ([int64]$actualLength -ne [int64]$manifestFile.SizeBytes) { throw ('Local package size changed: ' + [string]$manifestFile.FileName) }
+                        $actualHash = (Get-FileHash -LiteralPath $manifestFilePath -Algorithm SHA256 -ErrorAction Stop).Hash
+                        if (-not $actualHash.Equals([string]$manifestFile.SHA256,[StringComparison]::OrdinalIgnoreCase)) { throw ('Local package SHA-256 verification failed: ' + [string]$manifestFile.FileName) }
+                        $verificationLines += ([string]$manifestFile.FileName + ': SHA-256 verified')
+                    }
+                    $pnputil = Join-Path $env:WINDIR 'System32\pnputil.exe'
+                    if (-not (Test-Path -LiteralPath $pnputil -PathType Leaf)) { throw 'Windows PnPUtil is unavailable; AMR cannot safely install the local driver package.' }
+                    $installOutput = @(); $installedInfCount = 0
+                    $driverStateBefore = Get-AMRTargetDriverState -DeviceInstanceId $TargetDeviceId
+                    $previousDriverBackup = Export-AMRPreviousDriverPackage -DriverState $driverStateBefore -DeviceInstanceId $TargetDeviceId -DeviceLabel $TargetDeviceId
+                    foreach ($relativeInf in @($localManifest.InstallableInfFiles)) {
+                        $relativeInf = [string]$relativeInf
+                        if ([IO.Path]::IsPathRooted($relativeInf) -or @($relativeInf -split '[\\/]') -contains '..') { throw 'The local package manifest contains an unsafe INF path.' }
+                        $infPath = Join-Path (Join-Path $TargetLocalPackageFolder '_AMR_Expanded') $relativeInf
+                        if (-not (Test-Path -LiteralPath $infPath -PathType Leaf)) { throw ('A prepared INF file is missing: ' + [string]$relativeInf) }
+                        $infText = Get-Content -LiteralPath $infPath -Raw -ErrorAction Stop
+                        $recheckDeviceIds = @(($TargetHardwareIdsText -split '\r?\n') + ($TargetCompatibleIdsText -split '\r?\n') | Where-Object { $_ })
+                        $validId = Test-AMRInfExactHardwareId -InfText $infText -DeviceIds $recheckDeviceIds
+                        if (-not $validId) { throw ('The prepared INF no longer contains an exact Hardware ID or Compatible ID entry for the selected device: ' + [string]$relativeInf) }
+                        $pnputilOutput = (& $pnputil '/add-driver' $infPath '/install' 2>&1 | Out-String)
+                        $pnputilExitCode = [int]$LASTEXITCODE
+                        $installOutput += $pnputilOutput
+                        if ($pnputilExitCode -ne 0) { throw ('PnPUtil rejected the signed driver package (exit {0}). {1}' -f $pnputilExitCode,$pnputilOutput.Trim()) }
+                        $installedInfCount++
+                    }
+                    if ($installedInfCount -le 0) { throw 'No matching signed INF package was installed.' }
+                    $localRebootRequired = [bool]($installOutput -match '(?i)restart|reboot')
+                    Start-Sleep -Seconds 2
+                    $driverStateAfter = Get-AMRTargetDriverState -DeviceInstanceId $TargetDeviceId
+                    $signatureAudit = if ($driverStateAfter.Found -and $driverStateAfter.IsSigned) { 'Installed device driver reports IsSigned=True.' } elseif ($driverStateAfter.Found) { 'WARNING: installed device driver reports IsSigned=False.' } else { 'The active driver record could not be queried after PnPUtil.' }
+                    $versionMatches = (-not [string]::IsNullOrWhiteSpace([string]$TargetAvailableVersion) -and ([string]$driverStateAfter.DriverVersion).Trim() -eq ([string]$TargetAvailableVersion).Trim())
+                    $deviceHealthy = ($driverStateAfter.ConfigManagerErrorCode -eq 0)
+                    $postInstallVerification = 'Pending: active driver version or device health could not yet be confirmed.'
+                    $outcomeStatus = 'CompletedVerificationPending'
+                    if ($driverStateAfter.Found -and $driverStateAfter.IsSigned -and $deviceHealthy -and $versionMatches) {
+                        $postInstallVerification = ('Passed: active signed driver version {0} is active and the device reports ConfigManagerErrorCode=0.' -f $driverStateAfter.DriverVersion)
+                        $outcomeStatus = if ($localRebootRequired) { 'InstalledRestartRequired' } else { 'InstalledAndVerified' }
+                    } elseif ($driverStateAfter.Found -and -not $driverStateAfter.IsSigned) {
+                        $postInstallVerification = 'Warning: active driver record exists but Windows reports IsSigned=False. Do not treat this as verified.'
+                    } elseif ($driverStateAfter.Found -and $null -ne $driverStateAfter.ConfigManagerErrorCode -and $driverStateAfter.ConfigManagerErrorCode -ne 0) {
+                        $postInstallVerification = ('Pending: Windows reports device problem code {0}; rescan and review Device Manager before considering this complete.' -f $driverStateAfter.ConfigManagerErrorCode)
+                    } elseif ($driverStateAfter.Found -and -not $versionMatches) {
+                        $postInstallVerification = ('Pending: active version {0} does not exactly match expected version {1}; Windows may have retained a higher-ranked driver or may require a restart.' -f $driverStateAfter.DriverVersion,$TargetAvailableVersion)
+                    }
+                    $restorePointStatus = [string]$RestorePointStatus
+                    $preInstallVerification = 'Passed: exact update identity/revision, manifest identity, package sizes, SHA-256 hashes, exact INF Hardware ID/Compatible ID field match, and valid signed catalog were checked before PnPUtil installation.'
+                    $resultMessage = if ($outcomeStatus -eq 'InstalledAndVerified') { 'AMR installed the local driver package and verified the active signed driver and device status.' } elseif ($outcomeStatus -eq 'InstalledRestartRequired') { 'PnPUtil processed the package and the expected signed driver is active; Windows reports that a restart is required.' } else { 'PnPUtil accepted the package, but AMR could not fully verify the active driver state. Rescan the device before treating the installation as complete.' }
+                    [pscustomobject]@{ Success=$true; OutcomeStatus=$outcomeStatus; Action='Install'; Message=($resultMessage + (' {0} INF package(s) processed.' -f $installedInfCount)); RebootRequired=$localRebootRequired; ResultCode=2; HResult=0; RestorePointStatus=$restorePointStatus; PreInstallVerification=$preInstallVerification; SignatureAudit=$signatureAudit; PostInstallVerification=$postInstallVerification; InstalledDriverVersion=[string]$driverStateAfter.DriverVersion; InstalledDriverInf=[string]$driverStateAfter.InfName; PreviousDriverVersion=[string]$driverStateBefore.DriverVersion; PreviousDriverBackupStatus=[string]$previousDriverBackup.Status; PreviousDriverBackupPath=[string]$previousDriverBackup.Path; DeviceConfigManagerErrorCode=$driverStateAfter.ConfigManagerErrorCode }
+                } else {
+                # Windows Update fallback is never used for a Catalog-origin package; its package must be locally verified.
+                if([string]$TargetSourceAdapter -eq 'MicrosoftUpdateCatalog'){throw 'The Catalog-origin package failed local manifest verification. Windows Update fallback is not applicable to this source.'}
+                # Windows Update fallback: use only when AMR could not prepare a safe local package.
+                if (-not [bool]$target.IsDownloaded) { throw 'Neither a verified AMR local package nor a Windows Update cached package is available. Download the update first.' }
+                if ([string]$target.Identity.UpdateID -ne [string]$TargetUpdateId -or [int]$target.Identity.RevisionNumber -ne [int]$TargetRevision) {
+                    throw 'Pre-install verification failed: the update identity or revision changed. Run Scan Device again and download the newly matched update.'
+                }
+                $preInstallVerification = 'Passed: exact Windows Update identity/revision rechecked; Windows Update reports the package fully cached. Package signature and content-hash validation are delegated to the Windows Update security pipeline before installation.'
+                # Restore-point creation/verification is completed in the UI runspace before
+                # this background job starts. PowerShell jobs do not inherit AMR functions.
+                $restorePointStatus = [string]$RestorePointStatus
+                # Capture the active driver before Windows Update installation for a reliable comparison.
+                $driverStateBefore = Get-AMRTargetDriverState -DeviceInstanceId $TargetDeviceId
+                $previousDriverBackup = Export-AMRPreviousDriverPackage -DriverState $driverStateBefore -DeviceInstanceId $TargetDeviceId -DeviceLabel $TargetDeviceId
+                # Keep Windows Update in control of package validation and installation.
+                # Use WUA's asynchronous install API so the UI can report real progress.
+                $installer = $session.CreateUpdateInstaller()
+                if ([bool]$installer.IsBusy) { throw 'Windows Update is already installing or removing an update. Wait for that operation to finish, then try again.' }
+                $installer.Updates = $collection
+                $installProgressStart = [pscustomobject]@{ Percent=0; Stage='Starting'; Updated=(Get-Date).ToString('o') }
+                $installProgressStart | ConvertTo-Json -Compress | Set-Content -LiteralPath $ProgressFile -Encoding UTF8
+                $installationJob = $installer.BeginInstall($null,$null,$null)
+                $installStarted = Get-Date
+                while (-not [bool]$installationJob.IsCompleted) {
+                    if (((Get-Date) - $installStarted).TotalMinutes -gt 180) {
+                        try { $installationJob.RequestAbort() } catch {}
+                        throw 'The Windows Update installation exceeded the 180-minute safety timeout. Check Windows Update history before retrying.'
+                    }
+                    try {
+                        $installProgress = $installationJob.GetProgress()
+                        $installPercent = [int][Math]::Max(0,[Math]::Min(100,[double]$installProgress.PercentComplete))
+                        $installPayload = [pscustomobject]@{ Percent=$installPercent; Stage='Installing'; Updated=(Get-Date).ToString('o') }
+                        $installTemp = $ProgressFile + '.tmp'
+                        $installPayload | ConvertTo-Json -Compress | Set-Content -LiteralPath $installTemp -Encoding UTF8
+                        Move-Item -LiteralPath $installTemp -Destination $ProgressFile -Force
+                    } catch {}
+                    Start-Sleep -Milliseconds 500
+                }
+                $installResult = $installer.EndInstall($installationJob)
+                $itemResult = $installResult.GetUpdateResult(0)
+                $installResultCode = [int]$itemResult.ResultCode
+                if ($installResultCode -notin @(2,3)) {
+                    throw ('Installation did not succeed. Windows Update result code: {0}; HRESULT: 0x{1:X8}' -f $installResultCode,[int]$itemResult.HResult)
+                }
+                $outcomeStatus = if ($installResultCode -eq 2) { 'Success' } else { 'CompletedWithErrors' }
+                $outcomeMessage = if ($installResultCode -eq 2) { 'Driver installation completed successfully.' } else { 'Windows Update reports that installation completed with errors. Review Windows Update history and rescan the device before assuming the driver is fully installed.' }
+                try {
+                    $installDonePayload = [pscustomobject]@{ Percent=100; Stage='Completed'; Updated=(Get-Date).ToString('o') }
+                    $installDonePayload | ConvertTo-Json -Compress | Set-Content -LiteralPath ($ProgressFile + '.tmp') -Encoding UTF8
+                    Move-Item -LiteralPath ($ProgressFile + '.tmp') -Destination $ProgressFile -Force
+                } catch {}
+                Start-Sleep -Seconds 2
+                $driverStateAfter = Get-AMRTargetDriverState -DeviceInstanceId $TargetDeviceId
+                $signatureAudit = if ($driverStateAfter.Found -and $driverStateAfter.IsSigned) { 'Installed device driver reports IsSigned=True.' } elseif ($driverStateAfter.Found) { 'WARNING: installed device driver reports IsSigned=False.' } else { 'The active driver record could not be queried after Windows Update.' }
+                $wuaRebootRequired = [bool]$installResult.RebootRequired -or [bool]$itemResult.RebootRequired
+                $versionMatches = (-not [string]::IsNullOrWhiteSpace([string]$TargetAvailableVersion) -and ([string]$driverStateAfter.DriverVersion).Trim() -eq ([string]$TargetAvailableVersion).Trim())
+                $deviceHealthy = ($driverStateAfter.ConfigManagerErrorCode -eq 0)
+                $postInstallVerification = 'Pending: active driver version or device health could not yet be confirmed.'
+                if ($driverStateAfter.Found -and $driverStateAfter.IsSigned -and $deviceHealthy -and $versionMatches) {
+                    $postInstallVerification = ('Passed: active signed driver version {0} is active and the device reports ConfigManagerErrorCode=0.' -f $driverStateAfter.DriverVersion)
+                    $outcomeStatus = if ($wuaRebootRequired) { 'InstalledRestartRequired' } else { 'InstalledAndVerified' }
+                    $outcomeMessage = if ($wuaRebootRequired) { 'Windows Update completed the driver installation; the expected signed driver is active and Windows requires a restart.' } else { 'Windows Update completed the driver installation and AMR verified the active signed driver and device status.' }
+                } else {
+                    $outcomeStatus = 'CompletedVerificationPending'
+                    if (-not $driverStateAfter.Found) { $postInstallVerification = 'Pending: Windows Update returned success, but AMR could not find the active driver record. Rescan before treating this as installed.' }
+                    elseif (-not $driverStateAfter.IsSigned) { $postInstallVerification = 'Warning: Windows reports IsSigned=False for the active driver; this is not verified.' }
+                    elseif ($null -ne $driverStateAfter.ConfigManagerErrorCode -and $driverStateAfter.ConfigManagerErrorCode -ne 0) { $postInstallVerification = ('Pending: device problem code {0} is reported after installation.' -f $driverStateAfter.ConfigManagerErrorCode) }
+                    else { $postInstallVerification = ('Pending: active version {0} does not exactly match expected version {1}.' -f $driverStateAfter.DriverVersion,$TargetAvailableVersion) }
+                    $outcomeMessage = 'Windows Update completed its operation, but AMR could not fully verify the active driver. Rescan the device before treating the installation as complete.'
+                }
+                [pscustomobject]@{ Success=$true; OutcomeStatus=$outcomeStatus; Action='Install'; Message=$outcomeMessage; RebootRequired=$wuaRebootRequired; ResultCode=$installResultCode; HResult=[int]$itemResult.HResult; RestorePointStatus=$restorePointStatus; PreInstallVerification=$preInstallVerification; SignatureAudit=$signatureAudit; PostInstallVerification=$postInstallVerification; InstalledDriverVersion=[string]$driverStateAfter.DriverVersion; InstalledDriverInf=[string]$driverStateAfter.InfName; PreviousDriverVersion=[string]$driverStateBefore.DriverVersion; PreviousDriverBackupStatus=[string]$previousDriverBackup.Status; PreviousDriverBackupPath=[string]$previousDriverBackup.Path; DeviceConfigManagerErrorCode=$driverStateAfter.ConfigManagerErrorCode }
+                }
+            }
+        } catch {
+            [pscustomobject]@{ Success=$false; Action=[string]$RequestedAction; Message=[string]$_.Exception.Message; RebootRequired=$false; ResultCode=-1 }
+        }
+    }
+    $actionGeneration=[int]$script:DriverOperationState.Generation+1
+    $script:DriverOperationState=[pscustomobject]@{Name=$(if($Action -eq 'Install'){'DriverInstall'}else{'DriverDownload'});State='Running';StartedAt=(Get-Date);Generation=$actionGeneration;ScanGeneration=[int]$script:DriverScanGeneration;CanCancel=$false;Status=$(if($Action -eq 'Install'){'Installing approved driver'}else{'Downloading and verifying driver package'})}
+
+    if (-not $script:DriverActionTimer) {
+        $script:DriverActionTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:DriverActionTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+        $script:DriverActionTimer.Add_Tick({
+            $job = $script:DriverActionJob
+            if (-not $job) { $script:DriverActionTimer.Stop(); return }
+            if ($script:DriverActionProgressFile -and (Test-Path -LiteralPath $script:DriverActionProgressFile -PathType Leaf)) {
+                try {
+                    $progressData = Get-Content -LiteralPath $script:DriverActionProgressFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                    $progressPercent = [int][Math]::Max(0,[Math]::Min(100,[double]$progressData.Percent))
+                    (C 'DriverOperationProgress').IsIndeterminate = $false
+                    (C 'DriverOperationProgress').Value = $progressPercent
+                    if ($script:DriverActionType -eq 'Download') {
+                        $doneMb = [Math]::Max(0,[double]$progressData.BytesDownloaded / 1MB)
+                        $totalMb = [Math]::Max(0,[double]$progressData.BytesTotal / 1MB)
+                        $speedMb = [Math]::Max(0,[double]$progressData.SpeedBytesPerSecond / 1MB)
+                        if ([string]$progressData.Stage -eq 'DirectDownload') {
+                            $fileIndex = [int]$progressData.FileIndex
+                            $fileCount = [int]$progressData.FileCount
+                            if ($totalMb -gt 0) {
+                                (C 'DriverActionStatus').Text = ('AMR direct download: file {0}/{1}  |  {2:N1} / {3:N1} MB  |  {4:N2} MB/s' -f $fileIndex,$fileCount,$doneMb,$totalMb,$speedMb)
+                            } else {
+                                (C 'DriverActionStatus').Text = ('AMR direct download: file {0}/{1}  |  {2:N1} MB received  |  {3:N2} MB/s' -f $fileIndex,$fileCount,$doneMb,$speedMb)
+                            }
+                        } elseif ([string]$progressData.Stage -eq 'DirectDownloadCompleted') {
+                            (C 'DriverActionStatus').Text = 'AMR download completed; validating and preparing the local driver package…'
+                        } elseif ([string]$progressData.Stage -eq 'WuaCacheDownloadCompleted') {
+                            (C 'DriverActionStatus').Text = 'Windows Update installation cache completed; finalizing…'
+                        } elseif ([string]$progressData.Stage -in @('WuaCacheDownload','WuaFallbackDownload')) {
+                            if ($totalMb -gt 0) { (C 'DriverActionStatus').Text = ('Windows Update fallback download: {0}%  |  {1:N1} / {2:N1} MB  |  {3:N2} MB/s' -f $progressPercent,$doneMb,$totalMb,$speedMb) } else { (C 'DriverActionStatus').Text = ('Windows Update fallback download: {0}%  |  {1:N1} MB received  |  {2:N2} MB/s' -f $progressPercent,$doneMb,$speedMb) }
+                        } elseif ($totalMb -gt 0) {
+                            (C 'DriverActionStatus').Text = ('Downloading via Windows Update fallback: {0}%  |  {1:N1} / {2:N1} MB  |  {3:N2} MB/s' -f $progressPercent,$doneMb,$totalMb,$speedMb)
+                        } else {
+                            (C 'DriverActionStatus').Text = ('Downloading via Windows Update fallback: {0}%  |  {1:N1} MB received  |  {2:N2} MB/s' -f $progressPercent,$doneMb,$speedMb)
+                        }
+                    } else {
+                        $stageText = if ([string]$progressData.Stage -eq 'Completed') { 'Finalizing' } else { 'Installing' }
+                        (C 'DriverActionStatus').Text = ('{0} driver via Windows Update: {1}%' -f $stageText,$progressPercent)
+                    }
+                } catch {}
+            }
+            if ($job.State -notin @('Completed','Failed','Stopped')) { return }
+            $script:DriverActionTimer.Stop()
+            try {
+                if ($job.State -ne 'Completed') {
+                    $jobOutput = Receive-Job -Job $job -ErrorAction SilentlyContinue 2>&1 | Out-String
+                    throw "Driver update operation failed. $jobOutput"
+                }
+                $actionResult = Receive-Job -Job $job -ErrorAction Stop | Select-Object -Last 1
+                if (-not $actionResult) { throw 'The driver update operation returned no result.' }
+                if (-not [bool]$actionResult.Success) { throw [string]$actionResult.Message }
+                $matchedRows = @((C 'DriverDeviceList').ItemsSource | Where-Object { [string]$_.UpdateId -eq [string]$script:DriverActionUpdateId })
+                foreach ($matchedRow in $matchedRows) {
+                    if ($actionResult.Action -eq 'Download') {
+                        $matchedRow.UpdateReady = [bool]$actionResult.InstallReady
+                        $matchedRow.LocalPackageReady = [bool]$actionResult.LocalInstallReady
+                        $matchedRow.LocalPackageFolder = if ($actionResult.LocalInstallReady) { [string]$actionResult.SavedFolder } else { $null }
+                        if ([bool]$actionResult.LocalInstallReady) {
+                            $matchedRow.UpdateStatus = 'AMR package ready to install'
+                        } elseif ([bool]$actionResult.WuaReady) {
+                            $matchedRow.UpdateStatus = 'Windows Update fallback ready to install'
+                        } else {
+                            $matchedRow.UpdateStatus = 'Download incomplete - retry required'
+                        }
+                    } else {
+                        $matchedRow.UpdateReady = $false
+                        $matchedRow.UpdateStatus = switch ([string]$actionResult.OutcomeStatus) {
+                            'InstalledAndVerified' { 'Installed and verified' }
+                            'InstalledRestartRequired' { 'Installed - restart required' }
+                            'CompletedVerificationPending' { 'Completed - verification pending' }
+                            'CompletedWithErrors' { 'Completed with errors - verify' }
+                            default { 'Installation result requires verification' }
+                        }
+                    }
+                }
+                (C 'DriverDeviceList').Items.Refresh()
+                if ($actionResult.Action -eq 'Download') {
+                    (C 'DriverActionStatus').Text = [string]$actionResult.Message
+                    if ($actionResult.SavedFolder) { $script:LastDriverPackageFolder = [string]$actionResult.SavedFolder }
+                } else {
+                    $restoreSummary = if ($actionResult.RestorePointStatus) { ' Restore point: ' + [string]$actionResult.RestorePointStatus + '.' } else { '' }
+                    $preInstallSummary = if ($actionResult.PreInstallVerification) { ' Pre-install trust check: ' + [string]$actionResult.PreInstallVerification } else { '' }
+                    $signatureSummary = if ($actionResult.SignatureAudit) { ' Post-install signature audit: ' + [string]$actionResult.SignatureAudit + '.' } else { '' }
+                    $postInstallSummary = if ($actionResult.PostInstallVerification) { ' Post-install verification: ' + [string]$actionResult.PostInstallVerification } else { '' }
+                    $previousBackupSummary = if ($actionResult.PreviousDriverBackupStatus) { ' Previous driver recovery: ' + [string]$actionResult.PreviousDriverBackupStatus + $(if ($actionResult.PreviousDriverBackupPath) { ' Folder: ' + [string]$actionResult.PreviousDriverBackupPath } else { '' }) } else { '' }
+                    (C 'DriverActionStatus').Text = [string]$actionResult.Message + $preInstallSummary + $restoreSummary + $previousBackupSummary + $signatureSummary + $postInstallSummary + $(if ($actionResult.RebootRequired) { ' Restart Windows to complete the update, then scan again.' } elseif ([string]$actionResult.OutcomeStatus -ne 'InstalledAndVerified') { ' Run Scan Device again before treating the driver as installed.' } else { ' Driver state verified.' })
+                }
+                $historyDetails = 'ResultCode=' + $actionResult.ResultCode
+                if ($actionResult.Action -eq 'Download') {
+                    $historyDetails += '; SavedCopy=' + [string][bool]$actionResult.SavedCopy
+                    if ($actionResult.SavedFolder) { $historyDetails += '; SavedFolder=' + [string]$actionResult.SavedFolder }
+                    if ($actionResult.SavedCopyMessage) { $historyDetails += '; SavedCopyMessage=' + [string]$actionResult.SavedCopyMessage }
+                    if ($actionResult.WuaDownloadError) { $historyDetails += '; WuaDownloadError=' + [string]$actionResult.WuaDownloadError }
+                    if ($actionResult.DirectFailure) { $historyDetails += '; AMRInternalEngineFallbackReason=' + [string]$actionResult.DirectFailure }
+                    if ($null -ne $actionResult.LocalInstallReady) { $historyDetails += '; LocalInstallReady=' + [string][bool]$actionResult.LocalInstallReady }
+                    if ($null -ne $actionResult.WuaReady) { $historyDetails += '; WuaReady=' + [string][bool]$actionResult.WuaReady }
+                    foreach ($savedFile in @($actionResult.SavedFiles)) {
+                        if ($savedFile) { $historyDetails += ('; File={0}; SizeBytes={1}; SHA256={2}' -f $savedFile.FileName,$savedFile.SizeBytes,$savedFile.SHA256) }
+                    }
+                }
+                if ($actionResult.RestorePointStatus) { $historyDetails += '; RestorePoint=' + $actionResult.RestorePointStatus }
+                if ($actionResult.PreInstallVerification) { $historyDetails += '; PreInstallVerification=' + $actionResult.PreInstallVerification }
+                if ($actionResult.SignatureAudit) { $historyDetails += '; PostInstallSignatureAudit=' + $actionResult.SignatureAudit }
+                if ($actionResult.PostInstallVerification) { $historyDetails += '; PostInstallVerification=' + [string]$actionResult.PostInstallVerification }
+                if ($actionResult.InstalledDriverVersion) { $historyDetails += '; ActiveDriverVersion=' + [string]$actionResult.InstalledDriverVersion }
+                if ($actionResult.InstalledDriverInf) { $historyDetails += '; ActiveDriverInf=' + [string]$actionResult.InstalledDriverInf }
+                if ($actionResult.PreviousDriverVersion) { $historyDetails += '; PreviousDriverVersion=' + [string]$actionResult.PreviousDriverVersion }
+                if ($actionResult.PreviousDriverBackupStatus) { $historyDetails += '; PreviousDriverBackup=' + [string]$actionResult.PreviousDriverBackupStatus }
+                if ($actionResult.PreviousDriverBackupPath) { $historyDetails += '; PreviousDriverBackupPath=' + [string]$actionResult.PreviousDriverBackupPath }
+                if ($null -ne $actionResult.DeviceConfigManagerErrorCode) { $historyDetails += '; DeviceConfigManagerErrorCode=' + [string]$actionResult.DeviceConfigManagerErrorCode }
+                $historyStatus = if ($actionResult.OutcomeStatus) { [string]$actionResult.OutcomeStatus } else { 'Success' }
+                if ($actionResult.HResult) { $historyDetails += ('; HResult=0x{0:X8}' -f [int]$actionResult.HResult) }
+                Add-AMRDriverHistoryEntry -Action $actionResult.Action -Device ([string]$script:DriverActionDeviceName) -Update ([string]$script:DriverActionUpdateTitle) -Version ([string]$script:DriverActionVersion) -Status $historyStatus -Details $historyDetails
+                $completionLogLevel = if ($historyStatus -in @('Success','InstalledAndVerified','InstalledRestartRequired')) { 'SUCCESS' } else { 'WARNING' }
+                Write-AMRLog ("Driver update {0} completed with status {1}. UpdateId={2}; ResultCode={3}; RebootRequired={4}." -f $actionResult.Action,$historyStatus,$script:DriverActionUpdateId,$actionResult.ResultCode,$actionResult.RebootRequired) $completionLogLevel Overview
+                if ($actionResult.Action -eq 'Install' -and $actionResult.RebootRequired -and -not $script:DriverBatchActive) {
+                    Show-AMRMessage 'The driver installation completed and Windows reports that a restart is required. Save your work and restart when convenient.' 'Restart Required' OK Information | Out-Null
+                }
+                if ($script:DriverBatchActive -and $actionResult.Action -eq 'Install') {
+                    $script:DriverBatchResults += [pscustomobject]@{ Device=[string]$script:DriverActionDeviceName; Update=[string]$script:DriverActionUpdateTitle; Success=($historyStatus -in @('InstalledAndVerified','InstalledRestartRequired')); RebootRequired=[bool]$actionResult.RebootRequired; Status=[string]$historyStatus }
+                    if ([bool]$actionResult.RebootRequired) { $script:DriverBatchRebootRequired = $true }
+                }
+            } catch {
+                (C 'DriverActionStatus').Text = 'Driver operation failed: ' + $_.Exception.Message
+                Add-AMRDriverHistoryEntry -Action ([string]$script:DriverActionType) -Device ([string]$script:DriverActionDeviceName) -Update ([string]$script:DriverActionUpdateTitle) -Version ([string]$script:DriverActionVersion) -Status 'Failed' -Details ([string]$_.Exception.Message)
+                Write-AMRLog ('Driver update action failed: ' + $_.Exception.Message) ERROR Overview
+                if ($script:DriverBatchActive -and $script:DriverActionType -eq 'Install') {
+                    $script:DriverBatchResults += [pscustomobject]@{ Device=[string]$script:DriverActionDeviceName; Update=[string]$script:DriverActionUpdateTitle; Success=$false; RebootRequired=$false; Status='Failed'; Details=[string]$_.Exception.Message }
+                } elseif ($script:DriverSmartQueueActive -and [string]$script:DriverActionType -eq 'Download') {
+                    (C 'DriverActionStatus').Text = ('Smart Install could not prepare {0}: {1}. AMR will continue with the remaining candidates.' -f [string]$script:DriverActionDeviceName,[string]$_.Exception.Message)
+                    Write-AMRLog ('Smart Install package preparation failed and will be skipped: ' + [string]$_.Exception.Message) WARNING Overview
+                } else {
+                    Show-AMRMessage ('Driver update operation failed:`n' + $_.Exception.Message) 'Driver Center' OK Error | Out-Null
+                }
+            } finally {
+                $wasBatchInstall = ($script:DriverBatchActive -and [string]$script:DriverActionType -eq 'Install')
+                $wasSmartDownload = ($script:DriverSmartQueueActive -and [string]$script:DriverActionType -eq 'Download')
+                try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
+                $script:DriverActionJob = $null
+                if($script:DriverOperationState.Name -in @('DriverDownload','DriverInstall')){$script:DriverOperationState=[pscustomobject]@{Name='Idle';State='Idle';StartedAt=$null;Generation=[int]$script:DriverOperationState.Generation;CanCancel=$false;Status='Ready'}}
+                $script:DriverActionUpdateId = $null
+                $script:DriverActionType = $null
+                $script:DriverActionDeviceName = $null
+                $script:DriverActionUpdateTitle = $null
+                $script:DriverActionVersion = $null
+                (C 'DriverOperationProgress').Visibility = 'Collapsed'
+                (C 'DriverOperationProgress').Value = 0
+                if ($script:DriverActionProgressFile) {
+                    try { Remove-Item -LiteralPath $script:DriverActionProgressFile -Force -ErrorAction SilentlyContinue } catch {}
+                    try { Remove-Item -LiteralPath ($script:DriverActionProgressFile + '.tmp') -Force -ErrorAction SilentlyContinue } catch {}
+                }
+                $script:DriverActionProgressFile = $null
+                Update-AMRDriverActionButtons
+                if ($wasSmartDownload) {
+                    $script:DriverSmartDownloadCompleted++
+                    if (@($script:DriverSmartDownloadQueue).Count -gt 0) {
+                        $nextSmartDevice = $script:DriverSmartDownloadQueue[0]
+                        if (@($script:DriverSmartDownloadQueue).Count -gt 1) { $script:DriverSmartDownloadQueue = @($script:DriverSmartDownloadQueue | Select-Object -Skip 1) } else { $script:DriverSmartDownloadQueue = @() }
+                        (C 'DriverActionStatus').Text = ('Smart Install: preparing package {0} of {1} — {2}. Failed packages will be skipped; no driver is installed automatically.' -f ($script:DriverSmartDownloadCompleted + 1),$script:DriverSmartDownloadTotal,[string]$nextSmartDevice.DeviceName)
+                        Start-AMRDriverUpdateAction -Action Download -Device $nextSmartDevice -SkipConfirmation
+                        if (-not $script:DriverActionJob) {
+                            $script:DriverSmartQueueActive = $false
+                            $script:DriverSmartDownloadQueue = @()
+                            (C 'DriverActionStatus').Text = 'Smart Install download queue stopped because the next package operation could not start. Review the results and retry if needed.'
+                            Update-AMRDriverActionButtons
+                        }
+                    } else {
+                        $script:DriverSmartQueueActive = $false
+                        $script:DriverSmartDownloadTotal = 0
+                        $script:DriverSmartDownloadCompleted = 0
+                        $script:DriverSmartDownloadQueue = @()
+                        Complete-AMRSmartInstallPreparation
+                    }
+                }
+                if ($wasBatchInstall) {
+                    $script:DriverBatchCompleted++
+                    while (@($script:DriverBatchQueue).Count -gt 0 -and -not $script:DriverActionJob -and -not $script:DriverBatchRebootRequired) {
+                        $nextBatchDevice = $script:DriverBatchQueue[0]
+                        if (@($script:DriverBatchQueue).Count -gt 1) { $script:DriverBatchQueue = @($script:DriverBatchQueue | Select-Object -Skip 1) } else { $script:DriverBatchQueue = @() }
+                        try {
+                            Start-AMRDriverUpdateAction -Action Install -Device $nextBatchDevice -SkipConfirmation -FromBatch
+                            if (-not $script:DriverActionJob) {
+                                $script:DriverBatchResults += [pscustomobject]@{ Device=[string]$nextBatchDevice.DeviceName; Update=[string]$nextBatchDevice.AvailableUpdate; Success=$false; RebootRequired=$false; Status='Failed to start'; Details='The update action did not create a background job.' }
+                                $script:DriverBatchCompleted++
+                            }
+                        } catch {
+                            $script:DriverBatchResults += [pscustomobject]@{ Device=[string]$nextBatchDevice.DeviceName; Update=[string]$nextBatchDevice.AvailableUpdate; Success=$false; RebootRequired=$false; Status='Failed to start'; Details=[string]$_.Exception.Message }
+                            $script:DriverBatchCompleted++
+                        }
+                    }
+                    if ((@($script:DriverBatchQueue).Count -eq 0 -or $script:DriverBatchRebootRequired) -and -not $script:DriverActionJob) {
+                        if ($script:DriverBatchRebootRequired -and @($script:DriverBatchQueue).Count -gt 0) {
+                            foreach ($deferredDevice in @($script:DriverBatchQueue)) { $script:DriverBatchResults += [pscustomobject]@{ Device=[string]$deferredDevice.DeviceName; Update=[string]$deferredDevice.AvailableUpdate; Success=$false; RebootRequired=$false; Status='Deferred - restart required'; Details='Queue paused at a Windows restart boundary. Restart Windows, scan again, and review remaining updates.' } }
+                            $script:DriverBatchQueue = @()
+                        }
+                        $batchSuccessCount = @($script:DriverBatchResults | Where-Object { $_.Success }).Count
+                        $batchFailureCount = @($script:DriverBatchResults | Where-Object { -not $_.Success }).Count
+                        $batchRebootText = if ($script:DriverBatchRebootRequired) { ' Windows requires a restart to complete one or more updates. No restart was performed.' } else { ' No restart was requested by Windows.' }
+                        (C 'DriverActionStatus').Text = ('Batch plan paused/completed: {0} succeeded, {1} failed or deferred.{2} Run Scan Device again to verify installed versions.' -f $batchSuccessCount,$batchFailureCount,$batchRebootText)
+                        $deferredCount = @($script:DriverBatchResults | Where-Object { $_.Status -eq 'Deferred - restart required' }).Count
+                        $batchSummary = "Batch driver installation plan paused/completed.`n`nSucceeded: $batchSuccessCount`nFailed or deferred: $batchFailureCount`nDeferred after restart boundary: $deferredCount`n$batchRebootText`n`nRestart if requested, run Scan Device again, then review and start any remaining updates."
+                        $script:DriverBatchActive = $false
+                        $script:DriverBatchQueue = @()
+                        $script:DriverBatchTotal = 0
+                        $script:DriverBatchCompleted = 0
+                        $script:DriverBatchRebootRequired = $false
+                        $script:DriverBatchResults = @()
+                        $script:DriverBatchRestorePointStatus = $null
+                        Update-AMRDriverActionButtons
+                        Show-AMRMessage $batchSummary 'Batch Installation Results' OK Information | Out-Null
+                    }
+                }
+            }
+        })
+    }
+    $script:DriverActionUpdateId = $updateId
+    $script:DriverActionType = $Action
+    $script:DriverActionDeviceName = [string]$selected.DeviceName
+    $script:DriverActionUpdateTitle = [string]$selected.AvailableUpdate
+    $script:DriverActionVersion = [string]$selected.AvailableVersion
+    $script:DriverActionTimer.Start()
+}
+
+function Select-AMRReadyDriverUpdates {
+    $list = C 'DriverDeviceList'
+    $list.SelectedItems.Clear()
+    foreach ($row in @($list.ItemsSource | Where-Object { $_.UpdateReady -and -not [string]::IsNullOrWhiteSpace([string]$_.UpdateId) })) {
+        [void]$list.SelectedItems.Add($row)
+    }
+    Update-AMRDriverActionButtons
+    (C 'DriverActionStatus').Text = ('Selected {0} downloaded update(s) ready for installation. Review the highlighted rows, then choose Install Selected Ready.' -f @($list.SelectedItems | Where-Object { $_.UpdateReady }).Count)
+}
+
+function Clear-AMRDriverSelection {
+    (C 'DriverDeviceList').SelectedItems.Clear()
+    Update-AMRDriverActionButtons
+    (C 'DriverActionStatus').Text = 'Driver selection cleared.'
+}
+
+function Get-AMRDriverInstallPlan {
+    param([object[]]$Rows)
+    # A conservative, explainable ordering heuristic. This is not a claim of vendor dependency metadata.
+    $seen = @{}; $unique = @()
+    foreach ($row in @($Rows)) {
+        if (-not $row -or [string]::IsNullOrWhiteSpace([string]$row.UpdateId)) { continue }
+        $key = ('{0}|{1}' -f [string]$row.UpdateId,[int]$row.UpdateRevision)
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        $classText = (([string]$row.DeviceClass) + ' ' + [string]$row.DriverClass + ' ' + [string]$row.DeviceName).ToLowerInvariant()
+        $priority = 50; $group = 'Other devices'; $reason = 'No special dependency class detected; install after platform-level drivers.'
+        if ($classText -match 'system|chipset|smbus|pci|processor|motherboard') { $priority=10; $group='Platform / chipset'; $reason='Platform-level device class; schedule early.' }
+        elseif ($classText -match 'storage|sata|raid|scsi|nvme|controller') { $priority=20; $group='Storage / controllers'; $reason='Storage/controller class; schedule before peripheral drivers.' }
+        elseif ($classText -match 'network|ethernet|wireless|wi-fi|bluetooth') { $priority=30; $group='Network / connectivity'; $reason='Connectivity class; schedule after platform and storage.' }
+        elseif ($classText -match 'display|video|graphics') { $priority=40; $group='Display / graphics'; $reason='Graphics class; schedule after platform drivers.' }
+        elseif ($classText -match 'audio|sound|media') { $priority=45; $group='Audio / media'; $reason='Audio/media class; schedule after platform drivers.' }
+        $unique += [pscustomobject]@{ Row=$row; Priority=$priority; Group=$group; Reason=$reason; Key=$key }
+    }
+    return @($unique | Sort-Object Priority, @{Expression={[string]$_.Row.DeviceName}})
+}
+
+function Show-AMRDriverInstallPlan {
+    $selectedRows = @((C 'DriverDeviceList').SelectedItems | Where-Object { $_.UpdateReady -and -not [string]::IsNullOrWhiteSpace([string]$_.UpdateId) })
+    if ($selectedRows.Count -eq 0) { Show-AMRMessage 'Select one or more Ready driver packages first.' 'Install Planning' OK Information | Out-Null; return }
+    $plan = @(Get-AMRDriverInstallPlan -Rows $selectedRows)
+    if ($plan.Count -eq 0) { return }
+    $lines = @(); $index=0
+    foreach ($entry in $plan) {
+        $index++
+        $row=$entry.Row
+        $version=if ([string]::IsNullOrWhiteSpace([string]$row.AvailableVersion)) {'version not reported'} else {[string]$row.AvailableVersion}
+        $lines += ('{0}. [{1}] {2} — {3} ({4})' -f $index,$entry.Group,[string]$row.DeviceName,[string]$row.AvailableUpdate,$version)
+    }
+    $body = "AMR proposed installation order`n`n" + ($lines -join "`n") + "`n`nPlanning rules: platform/chipset → storage/controllers → network → graphics → audio → other devices. This is a conservative class-based heuristic, not a vendor-provided dependency graph. Each package is revalidated immediately before installation. If Windows requests a restart, the remaining queue will pause until you restart and scan again. A verified System Restore point is created before the batch; AMR also attempts to export the currently installed OEM driver package for each device when Windows permits it.`n`nContinue with this plan?"
+    if ((Show-AMRMessage $body 'Review Driver Installation Plan' YesNo Warning) -ne 'Yes') { return }
+    Start-AMRDriverBatchInstall -ApprovedPlan $plan
+}
+
+function Start-AMRDriverBatchInstall {
+    param([object[]]$ApprovedPlan)
+    if ($script:DriverManagedJob -or $script:DriverActionJob -or $script:DriverScanJob -or $script:DriverOperationState.State -eq 'Running' -or $script:DriverBatchActive -or $script:DriverSmartQueueActive) { return }
+    $selectedRows = @((C 'DriverDeviceList').SelectedItems | Where-Object { $_.UpdateReady -and -not [string]::IsNullOrWhiteSpace([string]$_.UpdateId) })
+    if ($selectedRows.Count -eq 0) {
+        Show-AMRMessage 'Select one or more rows marked Ready to install. Use Select All Ready to select every downloaded update.' 'Selection Required' OK Information | Out-Null
+        return
+    }
+    $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $admin) {
+        Show-AMRMessage 'Installing device drivers requires administrator permissions. Reopen AMR as Administrator, scan again, then retry.' 'Administrator permission required' OK Warning | Out-Null
+        return
+    }
+    # Use the reviewed plan when supplied; otherwise create the same deterministic plan.
+    $plan = if ($ApprovedPlan -and $ApprovedPlan.Count -gt 0) { @($ApprovedPlan) } else { @(Get-AMRDriverInstallPlan -Rows $selectedRows) }
+    $uniqueRows = @($plan | ForEach-Object { $_.Row })
+    if ($uniqueRows.Count -eq 0) { return }
+    $preview = @($uniqueRows | Select-Object -First 12 | ForEach-Object { '• ' + [string]$_.DeviceName + ' — ' + [string]$_.AvailableUpdate + ' (' + [string]$_.AvailableVersion + ')' }) -join "`n"
+    if ($uniqueRows.Count -gt 12) { $preview += "`n• … and $($uniqueRows.Count - 12) more update(s)" }
+    $confirmText = "Install $($uniqueRows.Count) selected ready driver update(s) in AMR's planned order, one at a time?`n`n$preview`n`nEach update will be revalidated by Windows Update before installation. Failed items will be recorded and the remaining queue will continue. If Windows requests a restart, AMR pauses the remaining queue; restart and scan again before continuing. AMR will NOT restart automatically. Continue?"
+    if (-not ($ApprovedPlan -and $ApprovedPlan.Count -gt 0)) {
+        if ((Show-AMRMessage $confirmText 'Confirm Batch Driver Installation' YesNo Warning) -ne 'Yes') { return }
+    }
+
+    $script:DriverBatchActive = $true
+    $script:DriverBatchTotal = $uniqueRows.Count
+    $script:DriverBatchCompleted = 0
+    $script:DriverBatchResults = @()
+    $script:DriverBatchRestorePointStatus = $null
+    $script:DriverBatchRebootRequired = $false
+    if ($uniqueRows.Count -gt 1) { $script:DriverBatchQueue = @($uniqueRows | Select-Object -Skip 1) } else { $script:DriverBatchQueue = @() }
+    (C 'DriverActionStatus').Text = ('Batch installation starting: {0} update(s), sequential processing.' -f $uniqueRows.Count)
+    Start-AMRDriverUpdateAction -Action Install -Device $uniqueRows[0] -SkipConfirmation -FromBatch
+}
+
+function Open-AMRDriverRecoveryFolder {
+    $root = Join-Path $env:ProgramData 'AMR Windows Utility\DriverRecovery'
+    try {
+        if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+            Show-AMRMessage 'No previous-driver recovery exports have been created yet. AMR creates an export automatically before an installation when Windows exposes an exportable OEM driver package.' 'Driver Recovery Backups' OK Information | Out-Null
+            return
+        }
+        Start-Process -FilePath 'explorer.exe' -ArgumentList @($root) -ErrorAction Stop
+    } catch { Show-AMRMessage ('Could not open the driver recovery folder: ' + [string]$_.Exception.Message) 'Driver Recovery Backups' OK Error | Out-Null }
+}
+
+function Invoke-AMRDriverRollbackCheck {
+    $selected = (C 'DriverDeviceList').SelectedItem
+    if (-not $selected -or [string]::IsNullOrWhiteSpace([string]$selected.DeviceId)) {
+        Show-AMRMessage 'Select a device row first.' 'Driver Rollback' OK Information | Out-Null
+        return
+    }
+    if($script:DriverManagedJob -or $script:DriverActionJob -or $script:DriverScanJob){return}
+    $deviceSnapshot=$selected
+    try {
+        $null=Start-AMRDriverManagedWorker -Operation RollbackCheck -Device $deviceSnapshot
+        (C 'DriverRollbackStatus').Text='Checking Windows Driver Store and AMR recovery manifests in the background…'
+        (C 'DriverActionStatus').Text='Rollback availability check is running in the background.'
+        $poll=New-Object System.Windows.Threading.DispatcherTimer
+        $poll.Interval=[TimeSpan]::FromMilliseconds(450)
+        $poll.Add_Tick(({
+            if(-not $script:DriverManagedJob){$poll.Stop();return}
+            if($script:DriverManagedJob.State -in @('Completed','Failed','Stopped')){
+                $poll.Stop()
+                try {
+                    $result=Complete-AMRDriverManagedWorker
+                    if(-not $result){throw 'Rollback availability check returned no result.'}
+                    (C 'DriverRollbackStatus').Text=[string]$result.Status
+                    (C 'DriverActionStatus').Text='Rollback availability check completed. No driver was changed.'
+                    Write-AMRLog ("Rollback availability checked for '{0}' ({1}). {2}" -f $result.DeviceName,$result.DeviceId,$result.CandidateText) INFO Overview
+                    $confirm="Selected device:`n$($result.DeviceName)`n`n$($result.CurrentInf)`n`n$($result.Status)`n`nOpen Device Manager now? AMR will not change or remove any driver."
+                    if((Show-AMRMessage $confirm 'Check Driver Rollback' YesNo Information) -eq 'Yes'){Start-Process -FilePath 'devmgmt.msc' -ErrorAction Stop}
+                } catch {
+                    (C 'DriverRollbackStatus').Text='Rollback check failed: '+[string]$_.Exception.Message
+                    Show-AMRMessage ([string]$_.Exception.Message) 'Driver Rollback' OK Error | Out-Null
+                }
+            }
+        }).GetNewClosure())
+        $script:DriverManagedTimer=$poll; $poll.Start()
+    } catch {
+        (C 'DriverRollbackStatus').Text='Could not start rollback check: '+[string]$_.Exception.Message
+        Show-AMRMessage ([string]$_.Exception.Message) 'Driver Rollback' OK Error | Out-Null
+    }
+}
+
+(C 'DriverRollbackCheckBtn').Add_Click({ Invoke-AMRDriverRollbackCheck })
+(C 'DriverOpenRecoveryBtn').Add_Click({ Open-AMRDriverRecoveryFolder })
+
+(C 'DriverSmartModeBtn').Add_Click({ Set-AMRDriverExperienceMode -Mode Smart })
+(C 'DriverSmartSelectBtn').Add_Click({ Invoke-AMRSmartSelect })
+(C 'DriverStartSmartInstallBtn').Add_Click({ Start-AMRSmartInstall })
+(C 'DriverAdvancedModeBtn').Add_Click({ Set-AMRDriverExperienceMode -Mode Advanced })
+(C 'DriverIdentityToggleBtn').Add_Click({
+    $identityCard=C 'DriverComputerSummaryCard'; $identityToggle=C 'DriverIdentityToggleBtn'
+    if($identityCard -and $identityToggle){
+        if($identityCard.Visibility -eq 'Visible'){$identityCard.Visibility='Collapsed';$identityToggle.Content='Show system identity & platform details'}
+        else{$identityCard.Visibility='Visible';$identityToggle.Content='Hide system identity & platform details'}
+    }
+})
+(C 'DriverCancelManagedOperationBtn').Add_Click({
+    try {
+        if(-not $script:DriverManagedJob){return}
+        if(-not $script:DriverOperationState.CanCancel){Show-AMRMessage 'This operation is in a protected stage and cannot be safely interrupted. Please wait for it to finish.' 'Operation Cannot Be Cancelled' OK Information | Out-Null;return}
+        if((Show-AMRMessage ('Cancel the current {0} operation?' -f $script:DriverOperationState.Name) 'Cancel Background Operation' YesNo Warning) -ne 'Yes'){return}
+        Stop-AMRDriverManagedWorker
+        (C 'DriverActionStatus').Text='Background operation cancelled safely.'
+        Update-AMRDriverActionButtons
+    } catch { Show-AMRMessage ([string]$_.Exception.Message) 'Cancel Operation' OK Error | Out-Null }
+})
+Set-AMRDriverExperienceMode -Mode Smart
+
+(C 'DriverDeviceList').Add_SelectionChanged({ Update-AMRDriverActionButtons })
+(C 'DriverDownloadSelectedBtn').Add_Click({ Start-AMRDriverUpdateAction -Action Download })
+(C 'DriverInstallSelectedBtn').Add_Click({ Start-AMRDriverUpdateAction -Action Install })
+(C 'DriverSelectReadyBtn').Add_Click({ Select-AMRReadyDriverUpdates })
+(C 'DriverClearSelectionBtn').Add_Click({ Clear-AMRDriverSelection })
+(C 'DriverInstallBatchBtn').Add_Click({ Start-AMRDriverBatchInstall })
+(C 'DriverInstallPlanBtn').Add_Click({ Show-AMRDriverInstallPlan })
+function ConvertFrom-AMRDriverCatalogCellText {
+    param([AllowNull()][string]$Html)
+    if ([string]::IsNullOrWhiteSpace($Html)) { return '' }
+    $value = [regex]::Replace($Html, '(?is)<script\b.*?</script>|<style\b.*?</style>', ' ')
+    $value = [regex]::Replace($value, '(?i)<br\s*/?>|</div>|</p>|</li>', ' ')
+    $value = [regex]::Replace($value, '<[^>]+>', ' ')
+    $value = [System.Net.WebUtility]::HtmlDecode($value)
+    $value = [regex]::Replace($value, '\s+', ' ').Trim()
+    return $value
+}
+
+# --- Phase 6.4: managed background operations ---
+function Write-AMRDriverWorkerProgress {
+    param([string]$Path,[string]$Stage,[int]$Percent=-1,[long]$BytesReceived=0,[long]$BytesTotal=0)
+    if([string]::IsNullOrWhiteSpace($Path)){return}
+    try {
+        $payload=[pscustomobject]@{Stage=$Stage;Percent=$Percent;BytesReceived=$BytesReceived;BytesTotal=$BytesTotal;UpdatedAt=(Get-Date).ToString('o')}
+        $temporary=$Path+'.tmp'
+        $payload | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $temporary -Encoding UTF8 -ErrorAction Stop
+        Move-Item -LiteralPath $temporary -Destination $Path -Force -ErrorAction Stop | Out-Null
+    } catch {}
+}
+
+function Get-AMRDriverWorkerFunctionBundle {
+    param([string[]]$FunctionNames)
+    $definitions = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($functionName in $FunctionNames) {
+        $command = Get-Command -Name $functionName -CommandType Function -ErrorAction Stop
+        $definitions.Add(('function {0} {{' -f $functionName) + "`r`n" + [string]$command.Definition + "`r`n}")
+    }
+    return ($definitions -join "`r`n`r`n")
+}
+
+function Start-AMRDriverManagedWorker {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][ValidateSet('CatalogDiscovery','CatalogAcquisition','CatalogStaging','RollbackCheck','RestorePoint','VendorDiscovery','VendorPackageAcquisition')][string]$Operation,
+        [Parameter(Mandatory=$true)][object]$Device,
+        [object]$Candidate = $null,
+        [switch]$AllowDuringBatch
+    )
+    if ($script:DriverManagedJob -or $script:DriverActionJob -or $script:DriverScanJob -or $script:DriverOperationState.State -eq 'Running' -or ($script:DriverBatchActive -and -not $AllowDuringBatch) -or $script:DriverSmartQueueActive) {
+        throw 'Another driver scan, download, installation, or managed discovery operation is already active. Wait for it to finish.'
+    }
+    $functionNames = if ($Operation -eq 'CatalogDiscovery') {
+        @('ConvertFrom-AMRDriverCatalogCellText','Get-AMRDriverCatalogDiscovery')
+    } elseif ($Operation -eq 'CatalogAcquisition') {
+        @('ConvertFrom-AMRDriverCatalogCellText','Test-AMRDriverInfDeviceApplicability','Get-AMRCatalogUpdateDetails','Get-AMRCatalogDownloadInfo','Invoke-AMRCatalogPackageAcquisition')
+    } elseif ($Operation -eq 'CatalogStaging') {
+        @('Test-AMRDriverInfDeviceApplicability')
+    } elseif ($Operation -eq 'RestorePoint') {
+        @('Get-AMRComputerRestorePoints','New-AMRDriverSafetyRestorePoint','Get-AMRRecordedDriverRestorePoint')
+    } elseif ($Operation -eq 'VendorDiscovery') {
+        @('Get-AMRDriverVendorRegistry','Resolve-AMRDriverVendorName','Get-AMRLocalVendorAdapterRegistry','Get-AMRLocalVendorAdapterCapabilities','ConvertTo-AMRLocalVendorCandidate','Get-AMRLocalManifestValue','Get-AMRLocalVendorManifestPath','Test-AMRLocalVendorProviderDefinition','Get-AMRLocalVendorProviderManifest','Save-AMRLocalVendorProviderManifest','Register-AMRLocalVendorProvider','Set-AMRLocalVendorProviderEnabled','Get-AMRGenericVendorManifestCandidates','Get-AMROfficialGraphicsVendorPortalCandidates','Invoke-AMRLocalVendorApi','Get-AMRDirectVendorPackageCandidates')
+    } elseif ($Operation -eq 'VendorPackageAcquisition') {
+        @('Invoke-AMRVendorPackageAcquisition','Invoke-AMRLocalVendorApi')
+    } else { @() }
+    $bundle = Get-AMRDriverWorkerFunctionBundle -FunctionNames $functionNames
+    $generation = [int]$script:DriverOperationState.Generation + 1
+    $workerScript = {
+        param($functionBundle,$operationName,$deviceData,$candidateData,$downloadRoot,$windowsContext,$sessionId,$restorePointStatePath,$progressPath)
+        $ErrorActionPreference = 'Stop'
+        Invoke-Expression $functionBundle
+        function Write-AMRLog { param($Message,$Level,$Category) }
+        $script:DownloadDir = [string]$downloadRoot
+        $script:DriverWindowsContext = [string]$windowsContext
+        $script:AMRSessionId = [string]$sessionId
+        $script:DriverRestorePointStateFile = [string]$restorePointStatePath
+        $script:DriverWorkerProgressPath = [string]$progressPath
+        function Write-AMRDriverWorkerProgress { param([string]$Path,[string]$Stage,[int]$Percent=-1,[long]$BytesReceived=0,[long]$BytesTotal=0); if([string]::IsNullOrWhiteSpace($Path)){return}; try{$payload=[pscustomobject]@{Stage=$Stage;Percent=$Percent;BytesReceived=$BytesReceived;BytesTotal=$BytesTotal;UpdatedAt=(Get-Date).ToString('o')};$temporary=$Path+'.tmp';$payload | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $temporary -Encoding UTF8 -ErrorAction Stop;Move-Item -LiteralPath $temporary -Destination $Path -Force -ErrorAction Stop | Out-Null}catch{} }
+        if ($operationName -eq 'CatalogDiscovery') {
+            Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Preparing Microsoft Update Catalog searches'
+            $discovery=Get-AMRDriverCatalogDiscovery -Device $deviceData
+            Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Catalog discovery completed' -Percent 100
+            $discovery
+        } elseif ($operationName -eq 'CatalogAcquisition') {
+            try {
+                Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Preparing package acquisition'
+                $acquisition=Invoke-AMRCatalogPackageAcquisition -Device $deviceData -Candidate $candidateData -DeferWindowsStaging
+                Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Package verification completed; waiting for Windows staging confirmation' -Percent 100
+                $acquisition
+            } catch {
+                $safeDevice=([string]$deviceData.DeviceId -replace '[^A-Za-z0-9._-]','_'); if($safeDevice.Length -gt 70){$safeDevice=$safeDevice.Substring(0,70)}
+                $failedFolder=Join-Path (Join-Path (Join-Path $downloadRoot 'Drivers') ('{0}_{1}_r0' -f $safeDevice,([string]$candidateData.CatalogUpdateId -replace '[^A-Fa-f0-9-]','')))
+                if(Test-Path -LiteralPath $failedFolder -PathType Container){Remove-Item -LiteralPath $failedFolder -Recurse -Force -ErrorAction SilentlyContinue}
+                throw
+            }
+        } elseif ($operationName -eq 'VendorDiscovery') {
+            Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Querying registered official vendor providers'
+            $vendorDiscovery=Invoke-AMRLocalVendorApi -Action Discover -Device $deviceData -OEMProfile $candidateData
+            Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Official vendor catalog discovery completed' -Percent 100
+            $vendorDiscovery
+        } elseif ($operationName -eq 'VendorPackageAcquisition') {
+            try {
+                Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Downloading and verifying official OEM driver bundle'
+                $vendorAcquisition=Invoke-AMRLocalVendorApi -Action Acquire -ProviderId ([string]$candidateData.ProviderId) -Device $deviceData -Candidate $candidateData
+                Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Official OEM package downloaded and verified' -Percent 100
+                $vendorAcquisition
+            } catch {
+                if($candidateData.PackageFolder -and (Test-Path -LiteralPath ([string]$candidateData.PackageFolder) -PathType Container)){Remove-Item -LiteralPath ([string]$candidateData.PackageFolder) -Recurse -Force -ErrorAction SilentlyContinue}
+                throw
+            }
+        } elseif ($operationName -eq 'CatalogStaging') {
+            Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Rechecking package identity and file hashes before Windows staging'
+            $driversRoot=[IO.Path]::GetFullPath((Join-Path $downloadRoot 'Drivers'))
+            $driversPrefix=$driversRoot.TrimEnd([char[]]@([char]92,[char]47))+[IO.Path]::DirectorySeparatorChar
+            $packageFolder=[IO.Path]::GetFullPath([string]$candidateData.PackageFolder)
+            $packagePrefix=$packageFolder.TrimEnd([char[]]@([char]92,[char]47))+[IO.Path]::DirectorySeparatorChar
+            $manifestPath=[IO.Path]::GetFullPath([string]$candidateData.ManifestPath)
+            if(-not $packageFolder.StartsWith($driversPrefix,[StringComparison]::OrdinalIgnoreCase) -or -not $manifestPath.StartsWith($packagePrefix,[StringComparison]::OrdinalIgnoreCase)){throw 'The selected Catalog package or manifest path is outside its AMR Driver Downloads package folder.'}
+            if(-not(Test-Path -LiteralPath $packageFolder -PathType Container) -or -not(Test-Path -LiteralPath $manifestPath -PathType Leaf)){throw 'The verified Catalog package folder or manifest is missing.'}
+            $manifest=Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            if([string]$manifest.SourceAdapter -ne 'MicrosoftUpdateCatalog' -or [string]$manifest.CatalogUpdateId -ne [string]$candidateData.CatalogUpdateId){throw 'Catalog package identity does not match the selected candidate.'}
+            if($manifest.PackageFolder -and [IO.Path]::GetFullPath([string]$manifest.PackageFolder) -ne $packageFolder){throw 'The package folder recorded in the manifest does not match the selected package path.'}
+            if([string]$manifest.DeviceInstanceId -ne [string]$deviceData.DeviceId){throw 'The package was acquired for a different device instance. Run discovery and verification again.'}
+            $expandedRoot=[IO.Path]::GetFullPath((Join-Path $packageFolder '_AMR_Expanded'))
+            if(-not(Test-Path -LiteralPath $expandedRoot -PathType Container)){throw 'The extracted package folder is missing.'}
+            $expandedPrefix=$expandedRoot.TrimEnd([char[]]@([char]92,[char]47))+[IO.Path]::DirectorySeparatorChar
+            if(@($manifest.Files).Count -eq 0 -or @($manifest.ExpandedFiles).Count -eq 0 -or @($manifest.InstallableInfFiles).Count -eq 0){throw 'The package manifest is incomplete; reacquire and verify this Catalog package.'}
+            foreach($rawRecord in @($manifest.Files)){
+                $rawPath=[IO.Path]::GetFullPath((Join-Path $packageFolder ([string]$rawRecord.FileName)))
+                if(-not $rawPath.StartsWith($packagePrefix,[StringComparison]::OrdinalIgnoreCase) -or -not(Test-Path -LiteralPath $rawPath -PathType Leaf)){throw ('A downloaded package file is missing or outside the package folder: '+[string]$rawRecord.FileName)}
+                $rawHash=(Get-FileHash -LiteralPath $rawPath -Algorithm SHA256 -ErrorAction Stop).Hash
+                if($rawHash -ine [string]$rawRecord.SHA256){throw ('A downloaded package file hash changed after verification: '+[string]$rawRecord.FileName)}
+            }
+            foreach($fileRecord in @($manifest.ExpandedFiles)){
+                $filePath=[IO.Path]::GetFullPath((Join-Path $expandedRoot ([string]$fileRecord.RelativePath)))
+                if(-not $filePath.StartsWith($expandedPrefix,[StringComparison]::OrdinalIgnoreCase) -or -not(Test-Path -LiteralPath $filePath -PathType Leaf)){throw ('A verified package file is missing or outside the extraction folder: '+[string]$fileRecord.RelativePath)}
+                $actual=(Get-FileHash -LiteralPath $filePath -Algorithm SHA256 -ErrorAction Stop).Hash
+                if($actual -ine [string]$fileRecord.SHA256){throw ('Package file hash changed after verification: '+[string]$fileRecord.RelativePath)}
+            }
+            $deviceIds=@(@($deviceData.HardwareIds)+@($deviceData.CompatibleIds) | ForEach-Object {[string]$_} | Where-Object {$_} | Select-Object -Unique)
+            $pnputil=Join-Path $env:WINDIR 'System32\pnputil.exe'
+            if(-not(Test-Path -LiteralPath $pnputil -PathType Leaf)){throw 'PnPUtil is unavailable; Windows cannot stage this package.'}
+            $stageOutputs=@(); $stagedInfs=@()
+            foreach($relativeInf in @($manifest.InstallableInfFiles)){
+                Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage ('Revalidating INF and catalog signature: '+[string]$relativeInf)
+                $infPath=[IO.Path]::GetFullPath((Join-Path $expandedRoot ([string]$relativeInf)))
+                if(-not $infPath.StartsWith($expandedPrefix,[StringComparison]::OrdinalIgnoreCase) -or -not(Test-Path -LiteralPath $infPath -PathType Leaf)){throw ('A matching INF file is missing or outside the extraction folder: '+[string]$relativeInf)}
+                $applicability=Test-AMRDriverInfDeviceApplicability -InfPath $infPath -DeviceIds $deviceIds
+                if(-not $applicability.Applicable){throw ('The INF no longer matches this device and Windows platform: '+[string]$relativeInf)}
+                $audit=@($manifest.CatalogAudits | Where-Object {[string]$_.Inf -eq [string]$relativeInf} | Select-Object -First 1)
+                if($audit.Count -eq 0){throw ('The INF has no matching catalog-signature audit in the manifest: '+[string]$relativeInf)}
+                $catPath=[IO.Path]::GetFullPath((Join-Path $expandedRoot ([string]$audit[0].Catalog)))
+                if(-not $catPath.StartsWith($expandedPrefix,[StringComparison]::OrdinalIgnoreCase) -or -not(Test-Path -LiteralPath $catPath -PathType Leaf)){throw ('The referenced catalog file is missing: '+[string]$audit[0].Catalog)}
+                $signature=Get-AuthenticodeSignature -FilePath $catPath -ErrorAction Stop
+                if([string]$signature.Status -ne 'Valid' -or -not $signature.SignerCertificate -or [string]$signature.SignerCertificate.Thumbprint -ine [string]$audit[0].Thumbprint){throw ('The catalog signature no longer matches the verified signer for INF: '+[string]$relativeInf)}
+                $stageOutput=(& $pnputil '/add-driver' $infPath 2>&1 | Out-String); $stageExit=[int]$LASTEXITCODE
+                $stageOutputs += $stageOutput
+                if($stageExit -ne 0){throw ('Windows rejected the package during Driver Store staging. Exit={0}. {1}' -f $stageExit,$stageOutput.Trim())}
+                $stagedInfs += [string]$relativeInf
+            }
+            if($stagedInfs.Count -eq 0){throw 'No verified INF file was available for Windows Driver Store staging.'}
+            $manifest.Installable=$true; $manifest.StagedByWindows=$true; $manifest.VerificationState='Verified and staged by Windows; not installed'; $manifest.StagingOutput=($stageOutputs -join "`n"); $manifest.StagedAt=(Get-Date).ToString('o')
+            $manifest | ConvertTo-Json -Depth 9 | Set-Content -LiteralPath $manifestPath -Encoding UTF8 -ErrorAction Stop
+            Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Windows accepted the verified package into the Driver Store' -Percent 100
+            [pscustomobject]@{Success=$true;PackageFolder=$packageFolder;ManifestPath=$manifestPath;InstallableInfFiles=@($stagedInfs);Signer=[string]$manifest.CatalogSigner;VerificationState=[string]$manifest.VerificationState;StagingOutput=($stageOutputs -join "`n")}
+        } elseif ($operationName -eq 'RestorePoint') {
+            try {
+                Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Creating Windows System Restore point'
+                $reason=if([string]::IsNullOrWhiteSpace([string]$candidateData)){'Before AMR driver installation'}else{[string]$candidateData}
+                $created=New-AMRDriverSafetyRestorePoint -Reason $reason
+                Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Restore point created and verified' -Percent 100
+                [pscustomobject]@{Success=$true;Status=('Verified AMR restore point #{0} created' -f $created.SequenceNumber);Failure='';ExistingState=$null;RestoreState=$created}
+            } catch {
+                $failure=[string]$_.Exception.Message; $existing=$null
+                try { $existing=Get-AMRRecordedDriverRestorePoint } catch {}
+                [pscustomobject]@{Success=$false;Status='';Failure=$failure;ExistingState=$(if($existing){$existing.State}else{$null});RestoreState=$null}
+            }
+        } else {
+            Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Checking Windows Driver Store and AMR recovery manifests'
+            $deviceName=[string]$deviceData.DeviceName
+            $deviceId=[string]$deviceData.DeviceId
+            $currentInf=[string]$deviceData.DriverInf
+            $candidateInfs=@(); $probeMessage=''
+            $pnputil=Join-Path $env:WINDIR 'System32\pnputil.exe'
+            if(Test-Path -LiteralPath $pnputil -PathType Leaf){
+                try {
+                    $probeOutput=(& $pnputil /enum-devices /instanceid $deviceId /drivers 2>&1 | Out-String)
+                    $probeExitCode=$LASTEXITCODE
+                    if($probeExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($probeOutput)){$candidateInfs=@([regex]::Matches($probeOutput,'(?i)\boem\d+\.inf\b') | ForEach-Object {$_.Value.ToLowerInvariant()} | Select-Object -Unique)}
+                    else{$probeMessage='Windows did not return a readable matching-driver list.'}
+                } catch {$probeMessage='The matching-driver query was unavailable: '+[string]$_.Exception.Message}
+            } else {$probeMessage='PnPUtil was not found on this Windows installation.'}
+            $additional=@($candidateInfs | Where-Object {$_ -ne $currentInf.ToLowerInvariant()})
+            if($candidateInfs.Count -gt 1 -or $additional.Count -gt 0){$candidateText=('Windows reports {0} matching Driver Store package(s); {1} additional package(s) differ from the currently recorded INF ({2}).' -f $candidateInfs.Count,$additional.Count,$currentInf)}
+            elseif($candidateInfs.Count -eq 1){$candidateText='Only one matching Driver Store package was identified by this query; no alternative package was detected.'}
+            else{$candidateText='AMR could not confirm whether an alternative driver package is retained.'}
+            $snapshotText='No AMR-exported previous-driver snapshot was found for this exact device.'
+            $recoveryRoot=Join-Path $env:ProgramData 'AMR Windows Utility\DriverRecovery'
+            if(Test-Path -LiteralPath $recoveryRoot -PathType Container){
+                try {
+                    $matchingSnapshots=@(Get-ChildItem -LiteralPath $recoveryRoot -Filter 'AMR_PreviousDriver_Manifest.json' -File -Recurse -ErrorAction Stop | ForEach-Object {try{$manifest=Get-Content -LiteralPath $_.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop;if([string]$manifest.DeviceInstanceId -eq $deviceId){[pscustomobject]@{Manifest=$manifest;File=$_.FullName}}}catch{}} | Sort-Object {[datetime]$_.Manifest.CreatedAt} -Descending)
+                    if($matchingSnapshots.Count -gt 0){$latestSnapshot=$matchingSnapshots[0];$snapshotText=('AMR previous-driver package snapshot found: {0}, version {1}, exported at {2}. Folder: {3}' -f [string]$latestSnapshot.Manifest.PreviousInf,[string]$latestSnapshot.Manifest.PreviousVersion,[string]$latestSnapshot.Manifest.CreatedAt,[string]$latestSnapshot.Manifest.ExportFolder)}
+                } catch {$snapshotText='AMR could not inspect the recovery snapshot catalog: '+[string]$_.Exception.Message}
+            }
+            $status=$candidateText+' '+$snapshotText+' Windows Device Manager remains the preferred native rollback route: open device Properties > Driver and use Roll Back Driver only when Windows enables it. An AMR-exported package is a recovery copy, not proof that Windows has a rollback snapshot; advanced users can review its manifest and reinstall only after checking device compatibility.'
+            if($probeMessage){$status+=' '+$probeMessage}
+            Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Rollback and recovery check completed' -Percent 100
+            [pscustomobject]@{DeviceName=$deviceName;DeviceId=$deviceId;CurrentInf=$currentInf;Status=$status;CandidateText=$candidateText;ProbeMessage=$probeMessage}
+        }
+    }
+    $progressRoot=Join-Path ([IO.Path]::GetTempPath()) 'AMR_DriverCenter_Operations'
+    if(-not(Test-Path -LiteralPath $progressRoot -PathType Container)){New-Item -ItemType Directory -Path $progressRoot -Force -ErrorAction Stop | Out-Null}
+    $workerId=[guid]::NewGuid().ToString('N')
+    $progressPath=Join-Path $progressRoot ($workerId+'.json')
+    $null=Write-AMRDriverWorkerProgress -Path $progressPath -Stage 'Starting background operation'
+    $arguments = @($bundle,$Operation,$Device,$Candidate,[string]$script:DownloadDir,[string]$script:DriverWindowsContext,[string]$script:AMRSessionId,[string]$script:DriverRestorePointStateFile,$progressPath)
+    try { $job = Start-Job -Name ('AMR-Driver-' + $Operation) -ArgumentList $arguments -ScriptBlock $workerScript -ErrorAction Stop }
+    catch { try{Remove-Item -LiteralPath $progressPath -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath ($progressPath+'.tmp') -Force -ErrorAction SilentlyContinue}catch{}; throw }
+    $job | Add-Member -NotePropertyName AMRGeneration -NotePropertyValue $generation -Force
+    $job | Add-Member -NotePropertyName AMRWorkerId -NotePropertyValue $workerId -Force
+    $script:DriverManagedJob = $job
+    $script:DriverManagedProgressFile=$progressPath
+    $script:DriverManagedWorkerId=$workerId
+    $script:DriverOperationState = [pscustomobject]@{ Name=$Operation; State='Running'; StartedAt=(Get-Date); Generation=$generation; ScanGeneration=[int]$script:DriverScanGeneration; WorkerId=$workerId; CanCancel=($Operation -in @('CatalogDiscovery','RollbackCheck','VendorDiscovery')); Status=$(switch($Operation){'CatalogDiscovery'{'Searching Microsoft Update Catalog'} 'CatalogAcquisition'{'Downloading and verifying the selected driver package'} 'CatalogStaging'{'Revalidating and staging the verified driver package'} 'RollbackCheck'{'Checking rollback and recovery records'} 'RestorePoint'{'Creating and verifying a System Restore point'} 'VendorDiscovery'{'Searching registered official vendor providers'} 'VendorPackageAcquisition'{'Acquiring and verifying a package through the local vendor API'}}) }
+    try {
+        (C 'DriverActionStatus').Text = ([string]$script:DriverOperationState.Status + '…')
+        (C 'DriverOperationProgress').Visibility='Visible'; (C 'DriverOperationProgress').IsIndeterminate=$true
+        $cancelButton=C 'DriverCancelManagedOperationBtn'; if($cancelButton){$cancelButton.Visibility=if($script:DriverOperationState.CanCancel){'Visible'}else{'Collapsed'};$cancelButton.IsEnabled=[bool]$script:DriverOperationState.CanCancel}
+        $progressTimer=New-Object System.Windows.Threading.DispatcherTimer
+        $progressTimer.Interval=[TimeSpan]::FromMilliseconds(350)
+        $progressTimer.Add_Tick({
+            if(-not $script:DriverManagedJob){$progressTimer=$script:DriverManagedProgressTimer;if($progressTimer){$progressTimer.Stop()};$script:DriverManagedProgressTimer=$null;return}
+            $path=[string]$script:DriverManagedProgressFile
+            if($path -and (Test-Path -LiteralPath $path -PathType Leaf)){
+                try {
+                    $progress=Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                    if($progress.Stage){(C 'DriverActionStatus').Text=[string]$progress.Stage}
+                    $bar=C 'DriverOperationProgress'
+                    if($bar -and [int]$progress.Percent -ge 0){$bar.IsIndeterminate=$false;$bar.Value=[math]::Max(0,[math]::Min(100,[int]$progress.Percent))}elseif($bar){$bar.IsIndeterminate=$true}
+                } catch {}
+            }
+        }.GetNewClosure())
+        $script:DriverManagedProgressTimer=$progressTimer; $progressTimer.Start()
+    } catch {}
+    Update-AMRDriverActionButtons
+    return $job
+}
+
+function Stop-AMRDriverManagedWorker {
+    param([switch]$Force)
+    if (-not $script:DriverManagedJob) { return }
+    if (-not $Force -and -not $script:DriverOperationState.CanCancel) {
+        throw 'This package operation is in a verification stage that cannot yet be safely interrupted. Wait for completion.'
+    }
+    try { Stop-Job -Job $script:DriverManagedJob -ErrorAction SilentlyContinue } catch {}
+    try { Remove-Job -Job $script:DriverManagedJob -Force -ErrorAction SilentlyContinue } catch {}
+    $script:DriverManagedJob = $null
+    if($script:DriverManagedTimer){try{$script:DriverManagedTimer.Stop()}catch{};$script:DriverManagedTimer=$null}
+    if($script:DriverManagedProgressTimer){try{$script:DriverManagedProgressTimer.Stop()}catch{};$script:DriverManagedProgressTimer=$null}
+    if($script:DriverManagedProgressFile){try{Remove-Item -LiteralPath $script:DriverManagedProgressFile -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath ($script:DriverManagedProgressFile+'.tmp') -Force -ErrorAction SilentlyContinue}catch{}}
+    $script:DriverManagedProgressFile=$null; $script:DriverManagedWorkerId=$null
+    $script:DriverOperationState = [pscustomobject]@{ Name='Idle'; State='Idle'; StartedAt=$null; Generation=[int]$script:DriverOperationState.Generation; CanCancel=$false; Status='Ready' }
+    try { (C 'DriverOperationProgress').IsIndeterminate=$false; (C 'DriverOperationProgress').Visibility='Collapsed'; $cancelButton=C 'DriverCancelManagedOperationBtn';if($cancelButton){$cancelButton.Visibility='Collapsed';$cancelButton.IsEnabled=$false} } catch {}
+    Update-AMRDriverActionButtons
+}
+
+function Complete-AMRDriverManagedWorker {
+    if (-not $script:DriverManagedJob) { return $null }
+    $job = $script:DriverManagedJob
+    if ($job.State -notin @('Completed','Failed','Stopped')) { return $null }
+    if($job.PSObject.Properties['AMRGeneration'] -and [int]$job.AMRGeneration -ne [int]$script:DriverOperationState.Generation){
+        Stop-AMRDriverManagedWorker -Force
+        throw 'A stale background result was rejected because its operation generation no longer matches the active request.'
+    }
+    if($script:DriverOperationState.ScanGeneration -ne $null -and [int]$script:DriverOperationState.ScanGeneration -ne [int]$script:DriverScanGeneration){
+        Stop-AMRDriverManagedWorker -Force
+        throw 'A stale background result was rejected because the device scan changed while the operation was running.'
+    }
+    $result = $null
+    $receiveError = $null
+    try {
+        if ($job.State -eq 'Completed') { $received = @(Receive-Job -Job $job -ErrorAction Stop); if ($received.Count -gt 0) { $result = $received[-1] } }
+        else { $receiveError = (($job.ChildJobs | ForEach-Object { $_.JobStateInfo.Reason.Message }) -join '; '); if (-not $receiveError) { $receiveError = 'The background operation did not complete.' } }
+    } catch { $receiveError = [string]$_.Exception.Message }
+    try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
+    $script:DriverManagedJob = $null
+    $script:DriverManagedTimer=$null
+    if($script:DriverManagedProgressTimer){try{$script:DriverManagedProgressTimer.Stop()}catch{};$script:DriverManagedProgressTimer=$null}
+    if($script:DriverManagedProgressFile){try{Remove-Item -LiteralPath $script:DriverManagedProgressFile -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath ($script:DriverManagedProgressFile+'.tmp') -Force -ErrorAction SilentlyContinue}catch{}}
+    $script:DriverManagedProgressFile=$null; $script:DriverManagedWorkerId=$null
+    $script:DriverOperationState = [pscustomobject]@{ Name='Idle'; State='Idle'; StartedAt=$null; Generation=[int]$script:DriverOperationState.Generation; CanCancel=$false; Status='Ready' }
+    try { (C 'DriverOperationProgress').IsIndeterminate=$false; (C 'DriverOperationProgress').Visibility='Collapsed'; $cancelButton=C 'DriverCancelManagedOperationBtn';if($cancelButton){$cancelButton.Visibility='Collapsed';$cancelButton.IsEnabled=$false} } catch {}
+    Update-AMRDriverActionButtons
+    if ($receiveError) { throw $receiveError }
+    return $result
+}
+
+function Get-AMRDriverCatalogDiscovery {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][object]$Device)
+
+    $queries = @()
+    $seenQueries = @{}
+    # Search a bounded but materially broader set of identifiers. Specific Hardware IDs
+    # are always queried first; Compatible IDs are secondary and capped to control latency.
+    $hardwareQueryLimit = 5
+    $compatibleQueryLimit = 2
+    $hardwareIndex = 0
+    foreach ($id in @($Device.HardwareIds)) {
+        if ($hardwareIndex -ge $hardwareQueryLimit) { break }
+        $q = ([string]$id).Trim()
+        if (-not $q) { continue }
+        $key = $q.ToUpperInvariant()
+        if (-not $seenQueries.ContainsKey($key)) {
+            $hardwareIndex++
+            $seenQueries[$key] = $true
+            $queries += [pscustomobject]@{ Query=$q; MatchEvidence='Hardware ID search'; MatchStrength='Exact Hardware ID query – package applicability still requires INF verification'; MatchType='Exact Hardware ID'; MatchTypeRank=0; MatchIdIndex=($hardwareIndex-1); QueryPriority=$hardwareIndex }
+        }
+    }
+    $compatibleIndex = 0
+    foreach ($id in @($Device.CompatibleIds)) {
+        if ($compatibleIndex -ge $compatibleQueryLimit) { break }
+        $q = ([string]$id).Trim()
+        if (-not $q) { continue }
+        $key = $q.ToUpperInvariant()
+        if (-not $seenQueries.ContainsKey($key)) {
+            $compatibleIndex++
+            $seenQueries[$key] = $true
+            $queries += [pscustomobject]@{ Query=$q; MatchEvidence='Compatible ID search'; MatchStrength='Compatible ID query – broader match requiring INF verification'; MatchType='Compatible ID'; MatchTypeRank=1; MatchIdIndex=($compatibleIndex-1); QueryPriority=($hardwareIndex+$compatibleIndex) }
+        }
+    }
+    if ($queries.Count -eq 0) {
+        $fallback = (([string]$Device.Manufacturer + ' ' + [string]$Device.DeviceName + ' ' + [string]$script:DriverWindowsContext).Trim())
+        if ($fallback) { $queries += [pscustomobject]@{ Query=$fallback; MatchEvidence='Manufacturer/model search'; MatchStrength='Text search only – weak evidence'; MatchType='Text search'; MatchTypeRank=2; MatchIdIndex=0; QueryPriority=99 } }
+    }
+    if ($queries.Count -eq 0) { throw 'No Hardware IDs, Compatible IDs, or usable device model terms are available for Catalog discovery.' }
+
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    } catch {}
+    $results = @()
+    $queryErrors = @()
+    $queryIndex=0
+    foreach ($queryInfo in $queries) {
+        $queryIndex++
+        if(Get-Command Write-AMRDriverWorkerProgress -ErrorAction SilentlyContinue){Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage ('Searching Catalog query {0} of {1}' -f $queryIndex,$queries.Count)}
+        $uri = 'https://www.catalog.update.microsoft.com/Search.aspx?q=' + [uri]::EscapeDataString([string]$queryInfo.Query)
+        try {
+            $response = Invoke-WebRequest -Uri $uri -UseBasicParsing -TimeoutSec 20 -Headers @{ 'User-Agent'='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 AMRDriverCenter/6.1'; 'Accept-Language'='en-US,en;q=0.8' } -ErrorAction Stop
+            $html = [string]$response.Content
+            if ([string]::IsNullOrWhiteSpace($html)) { throw 'Catalog returned an empty response.' }
+            $rowMatches = [regex]::Matches($html, '(?is)<tr\b[^>]*>(.*?)</tr>')
+            $parsedRows = 0
+            foreach ($rowMatch in $rowMatches) {
+                $rowHtml = [string]$rowMatch.Groups[1].Value
+                $cells = [regex]::Matches($rowHtml, '(?is)<td\b[^>]*>(.*?)</td>')
+                if ($cells.Count -lt 6) { continue }
+                $cellValues = @()
+                foreach ($cell in $cells) { $cellValues += (ConvertFrom-AMRDriverCatalogCellText -Html ([string]$cell.Groups[1].Value)) }
+                $title = if ($cellValues.Count -gt 1) { [string]$cellValues[1] } else { '' }
+                if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                $updateGuid = ''
+                $guidMatch = [regex]::Match($rowHtml, '(?i)(?:id\s*=\s*["'']\s*\{?|updateID\s*=\s*["'']?\{?)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})')
+                if ($guidMatch.Success) { $updateGuid = $guidMatch.Groups[1].Value }
+                if (-not $updateGuid) {
+                    $guidMatch = [regex]::Match($rowHtml, '(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})')
+                    if ($guidMatch.Success) { $updateGuid = $guidMatch.Groups[1].Value }
+                }
+                if (-not $updateGuid) { continue }
+                $products = if ($cellValues.Count -gt 2) { [string]$cellValues[2] } else { '' }
+                $classification = if ($cellValues.Count -gt 3) { [string]$cellValues[3] } else { '' }
+                $lastUpdated = if ($cellValues.Count -gt 4) { [string]$cellValues[4] } else { '' }
+                $version = if ($cellValues.Count -gt 5) { [string]$cellValues[5] } else { '' }
+                $size = if ($cellValues.Count -gt 6) { [string]$cellValues[6] } else { '' }
+                $dedupeKey = $updateGuid.ToLowerInvariant()
+                if (@($results | Where-Object { ([string]$_.CatalogUpdateId).ToLowerInvariant() -eq $dedupeKey }).Count -gt 0) { continue }
+                $results += [pscustomobject]@{
+                    Rank = 0
+                    Title = $title
+                    Version = $version
+                    DriverDate = $lastUpdated
+                    Manufacturer = ''
+                    Model = $products
+                    DriverClass = $classification
+                    Source = 'Microsoft Update Catalog'
+                    SourceAdapter = 'MicrosoftUpdateCatalog'
+                    SourceUpdateId = $updateGuid
+                    CatalogUpdateId = $updateGuid
+                    UpdateId = ''
+                    UpdateRevision = 0
+                    HardwareId = [string]$queryInfo.Query
+                    MatchType = [string]$queryInfo.MatchType
+                    MatchConfidence = [string]$queryInfo.MatchStrength
+                    MatchTypeRank = [int]$queryInfo.MatchTypeRank
+                    MatchIdIndex = [int]$queryInfo.MatchIdIndex
+                    QueryPriority = [int]$queryInfo.QueryPriority
+                    EvidenceScore = $(if([int]$queryInfo.MatchTypeRank -eq 0){900-([int]$queryInfo.MatchIdIndex*10)}elseif([int]$queryInfo.MatchTypeRank -eq 1){650-([int]$queryInfo.MatchIdIndex*10)}else{100})
+                    MatchReason = ('Catalog result found by {0} (identifier priority #{1}). Catalog metadata alone does not prove device applicability.' -f $queryInfo.MatchEvidence,([int]$queryInfo.QueryPriority))
+                    MaxDownloadSize = $size
+                    IsDownloaded = $false
+                    IsInstallable = $false
+                    VerificationState = 'Catalog metadata only – not verified for installation'
+                    Products = $products
+                    Classification = $classification
+                    SearchQuery = [string]$queryInfo.Query
+                    CatalogUrl = $uri
+                    DiscoveryTime = [datetime]::Now
+                }
+                $parsedRows++
+            }
+            if ($parsedRows -eq 0) {
+                if ($html -match '(?i)(no updates were found|your search did not match|no results found)') {
+                    # Explicit no-results response: this query completed without a candidate.
+                } else {
+                    throw 'Catalog response did not expose parseable server-rendered result rows. The site may require its JavaScript/AJAX flow or may have changed; AMR will not treat this as zero matching drivers.'
+                }
+            }
+        } catch {
+            $queryErrors += ('{0}: {1}' -f $queryInfo.Query,$_.Exception.Message)
+        }
+    }
+    if ($results.Count -eq 0 -and $queryErrors.Count -gt 0) {
+        throw ('Microsoft Update Catalog discovery could not retrieve parseable results. ' + ($queryErrors -join ' | '))
+    }
+    $results = @($results | Sort-Object @{Expression={[int]$_.MatchTypeRank};Ascending=$true},@{Expression={[int]$_.MatchIdIndex};Ascending=$true},@{Expression={[string]$_.Title};Ascending=$true})
+    $catalogRank = 0
+    foreach ($item in $results) {
+        $catalogRank++
+        $item.Rank = $catalogRank
+        $item.MatchReason = ([string]$item.MatchReason + ' Evidence priority: ' + [string]$item.EvidenceScore + '/1000. Final applicability is determined only by package verification.')
+    }
+    $script:DriverProfessionalDiscoveryResults = @($results)
+    Write-AMRLog ('Professional Catalog discovery completed for device={0}; queries={1}; results={2}; errors={3}.' -f $Device.DeviceName,$queries.Count,$results.Count,$queryErrors.Count) INFO Overview
+    return [pscustomobject]@{ Results=@($results); Queries=@($queries); Errors=@($queryErrors); Source='Microsoft Update Catalog' }
+}
+
+
+function Get-AMRCatalogUpdateDetails {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][string]$CatalogUpdateId)
+    if($CatalogUpdateId -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'){throw 'Catalog update identity is invalid.'}
+    $uri='https://www.catalog.update.microsoft.com/ScopedViewInline.aspx?updateid='+[uri]::EscapeDataString($CatalogUpdateId)
+    $response=Invoke-WebRequest -Uri $uri -UseBasicParsing -TimeoutSec 45 -Headers @{ 'User-Agent'='Mozilla/5.0 AMR-Windows-Utility-DriverCenter/6.2'; 'Accept-Language'='en-US,en;q=0.8' } -ErrorAction Stop
+    $html=[string]$response.Content
+    if([string]::IsNullOrWhiteSpace($html)){throw 'Catalog detail page returned an empty response.'}
+    $plain=ConvertFrom-AMRDriverCatalogCellText -Html $html
+    if($plain.Length -gt 12000){$plain=$plain.Substring(0,12000)}
+    return [pscustomobject]@{UpdateId=$CatalogUpdateId;Url=$uri;RetrievedAt=(Get-Date).ToString('o');Text=$plain}
+}
+
+function Get-AMRCatalogDownloadInfo {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][string]$CatalogUpdateId)
+    if ($CatalogUpdateId -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') { throw 'The Catalog update identifier is not a valid GUID.' }
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
+    $payload = @{ size=0; updateID=$CatalogUpdateId; uidInfo=$CatalogUpdateId } | ConvertTo-Json -Compress
+    $body = @{ updateIDs=('[' + $payload + ']') }
+    $response = Invoke-WebRequest -Uri 'https://www.catalog.update.microsoft.com/DownloadDialog.aspx' -Method Post -Body $body -ContentType 'application/x-www-form-urlencoded' -UseBasicParsing -TimeoutSec 45 -Headers @{ 'User-Agent'='Mozilla/5.0 AMR-Windows-Utility-DriverCenter/6.2'; 'Accept-Language'='en-US,en;q=0.8' } -ErrorAction Stop
+    $html = [string]$response.Content
+    if ([string]::IsNullOrWhiteSpace($html)) { throw 'Microsoft Update Catalog returned an empty download dialog.' }
+    $normalized = $html.Replace('\/','/').Replace('\u0026','&').Replace('www.download.windowsupdate.com','download.windowsupdate.com')
+    $urlPattern = '(?i)https://(?:download\.windowsupdate\.com|catalog\.s\.download\.windowsupdate\.com|dl\.delivery\.mp\.microsoft\.com)/[^\s''"<>\\]+'
+    $urls = @([regex]::Matches($normalized,$urlPattern) | ForEach-Object { ([string]$_.Value).TrimEnd([char[]]@(')',']','}',',',';')) } | Select-Object -Unique)
+    if ($urls.Count -eq 0) { throw 'The Catalog download dialog did not expose a supported HTTPS package URL. AMR will not guess a download endpoint.' }
+    $sha1Match = [regex]::Match($normalized,'(?i)(?:sha1|fileHash|hash)\s*[:=]\s*["'']?([a-f0-9]{40})')
+    $sha256Match = [regex]::Match($normalized,'(?i)sha256\s*[:=]\s*["'']?([a-f0-9]{64})')
+    return [pscustomobject]@{ UpdateId=$CatalogUpdateId; Urls=$urls; ExpectedSHA1=$(if($sha1Match.Success){$sha1Match.Groups[1].Value}else{''}); ExpectedSHA256=$(if($sha256Match.Success){$sha256Match.Groups[1].Value}else{''}); RetrievedAt=(Get-Date).ToString('o') }
+}
+
+function Test-AMRDriverInfDeviceApplicability {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][string]$InfPath,[string[]]$DeviceIds)
+    if (-not (Test-Path -LiteralPath $InfPath -PathType Leaf)) { throw 'INF file was not found.' }
+    $ids = @($DeviceIds | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ } | Select-Object -Unique)
+    if ($ids.Count -eq 0) { return [pscustomobject]@{ Applicable=$false; Reason='No device Hardware IDs or Compatible IDs were available.'; MatchedIds=@(); ModelSections=@(); DriverVersion='' } }
+    $text = Get-Content -LiteralPath $InfPath -Raw -ErrorAction Stop
+    $sections = @{}
+    $current = ''
+    foreach ($rawLine in ($text -split '\r?\n')) {
+        $line = ([string]$rawLine -split ';',2)[0].Trim()
+        if (-not $line) { continue }
+        if ($line -match '^\[([^\]]+)\]$') { $current=$Matches[1].Trim(); if (-not $sections.ContainsKey($current)) { $sections[$current]=New-Object 'System.Collections.Generic.List[string]' }; continue }
+        if ($current) { $sections[$current].Add($line) }
+    }
+    if (-not $sections.ContainsKey('Manufacturer')) { return [pscustomobject]@{ Applicable=$false; Reason='INF has no [Manufacturer] section; AMR cannot establish a model-section match.'; MatchedIds=@(); ModelSections=@(); DriverVersion='' } }
+    $modelSectionNames = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($line in $sections['Manufacturer']) {
+        if ($line -notmatch '=') { continue }
+        $rhs = ($line -split '=',2)[1]
+        $parts = @($rhs.Split(',') | ForEach-Object { $_.Trim().Trim('"') } | Where-Object { $_ })
+        if ($parts.Count -eq 0) { continue }
+        $base = $parts[0]
+        if ($sections.ContainsKey($base) -and -not $modelSectionNames.Contains($base)) { $modelSectionNames.Add($base) }
+        for ($partIndex=1; $partIndex -lt $parts.Count; $partIndex++) {
+            $decorated = $base + '.' + $parts[$partIndex]
+            if ($sections.ContainsKey($decorated) -and -not $modelSectionNames.Contains($decorated)) { $modelSectionNames.Add($decorated) }
+        }
+        foreach ($sectionName in @($sections.Keys)) {
+            if ($sectionName.StartsWith($base + '.',[System.StringComparison]::OrdinalIgnoreCase) -and -not $modelSectionNames.Contains($sectionName)) { $modelSectionNames.Add($sectionName) }
+        }
+    }
+    if ($modelSectionNames.Count -eq 0) { return [pscustomobject]@{ Applicable=$false; Reason='No referenced INF model section could be resolved.'; MatchedIds=@(); ModelSections=@(); DriverVersion='' } }
+    $arch = if ([Environment]::Is64BitOperatingSystem) { if ($env:PROCESSOR_ARCHITECTURE -match '(?i)ARM64') { 'arm64' } else { 'amd64' } } else { 'x86' }
+    try { $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop; $osVersion=[version]$os.Version } catch { $osVersion=[version]'0.0' }
+    $usableSections = @()
+    foreach ($sectionName in $modelSectionNames) {
+        $lower = $sectionName.ToLowerInvariant()
+        if ($lower -match '\.ntamd64(?:\.|$)' -and $arch -ne 'amd64') { continue }
+        if ($lower -match '\.ntarm64(?:\.|$)' -and $arch -ne 'arm64') { continue }
+        if ($lower -match '\.ntx86(?:\.|$)' -and $arch -ne 'x86') { continue }
+        if ($lower -match '\.nt(?:amd64|arm64|x86)(?:\.(\d+)\.(\d+)\.(\d+))') {
+            $requiredBuild=[int]$Matches[3]
+            if ($osVersion.Build -gt 0 -and $osVersion.Build -lt $requiredBuild) { continue }
+        }
+        $usableSections += $sectionName
+    }
+    if ($usableSections.Count -eq 0) { return [pscustomobject]@{ Applicable=$false; Reason=('INF model sections do not target this operating-system architecture ({0}).' -f $arch); MatchedIds=@(); ModelSections=@($modelSectionNames); DriverVersion='' } }
+    $matched = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($sectionName in $usableSections) {
+        foreach ($line in $sections[$sectionName]) {
+            if ($line -notmatch '=') { continue }
+            $rhs = ($line -split '=',2)[1]
+            foreach ($tokenRaw in $rhs.Split(',')) {
+                $token=$tokenRaw.Trim().Trim('"')
+                foreach ($id in $ids) {
+                    if ($token.Equals($id,[System.StringComparison]::OrdinalIgnoreCase) -and -not $matched.Contains($id)) { $matched.Add($id) }
+                }
+            }
+        }
+    }
+    $driverVersion=''
+    $driverVerMatch=[regex]::Match($text,'(?im)^\s*DriverVer\s*=\s*[^,]+,\s*([^\r\n;]+)')
+    if ($driverVerMatch.Success) { $driverVersion=$driverVerMatch.Groups[1].Value.Trim() }
+    return [pscustomobject]@{ Applicable=($matched.Count -gt 0); Reason=$(if($matched.Count -gt 0){'Exact device identifier found in an architecture-applicable INF model section.'}else{'No exact Hardware ID or Compatible ID was found in the applicable INF model sections.'}); MatchedIds=@($matched.ToArray()); ModelSections=@($usableSections); DriverVersion=$driverVersion; Architecture=$arch; OSVersion=[string]$osVersion }
+}
+
+function Invoke-AMRCatalogPackageAcquisition {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][object]$Device,[Parameter(Mandatory=$true)][object]$Candidate,[switch]$DeferWindowsStaging)
+    if ([string]$Candidate.SourceAdapter -ne 'MicrosoftUpdateCatalog' -or [string]$Candidate.CatalogUpdateId -notmatch '^[0-9a-fA-F-]{36}$') { throw 'The selected row is not a valid Microsoft Update Catalog candidate.' }
+    $catalogId=[string]$Candidate.CatalogUpdateId
+    if(Get-Command Write-AMRDriverWorkerProgress -ErrorAction SilentlyContinue){Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Preparing Microsoft Catalog package details'}
+    $safeDevice=([string]$Device.DeviceId -replace '[^A-Za-z0-9._-]','_'); if($safeDevice.Length -gt 70){$safeDevice=$safeDevice.Substring(0,70)}
+    $folder=Join-Path (Join-Path $script:DownloadDir 'Drivers') ('{0}_{1}_r0' -f $safeDevice,($catalogId -replace '[^A-Fa-f0-9-]',''))
+    if (Test-Path -LiteralPath $folder) { Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction Stop }
+    New-Item -ItemType Directory -Path $folder -Force -ErrorAction Stop | Out-Null
+    $expanded=Join-Path $folder '_AMR_Expanded'; New-Item -ItemType Directory -Path $expanded -Force | Out-Null
+    $catalogDetails=$null; $catalogDetailsError=''
+    try { $catalogDetails=Get-AMRCatalogUpdateDetails -CatalogUpdateId $catalogId } catch { $catalogDetailsError=[string]$_.Exception.Message; Write-AMRLog ('Catalog detail page could not be retrieved for {0}: {1}' -f $catalogId,$catalogDetailsError) WARNING Overview }
+    if(Get-Command Write-AMRDriverWorkerProgress -ErrorAction SilentlyContinue){Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Retrieving official package download URLs'}
+    $downloadInfo=Get-AMRCatalogDownloadInfo -CatalogUpdateId $catalogId
+    $savedFiles=New-Object 'System.Collections.Generic.List[object]'
+    $expandedBytes=[int64]0; $index=0
+    foreach($url in @($downloadInfo.Urls)) {
+        $uri=$null
+        if(-not [Uri]::TryCreate([string]$url,[UriKind]::Absolute,[ref]$uri) -or $uri.Scheme -ne 'https') { throw 'Catalog returned a non-HTTPS or malformed package URL.' }
+        $hostAllowed=($uri.Host -eq 'download.windowsupdate.com' -or $uri.Host.EndsWith('.windowsupdate.com',[System.StringComparison]::OrdinalIgnoreCase) -or $uri.Host -eq 'dl.delivery.mp.microsoft.com' -or $uri.Host.EndsWith('.delivery.mp.microsoft.com',[System.StringComparison]::OrdinalIgnoreCase))
+        if(-not $hostAllowed) { throw ('Catalog package host is not approved: ' + $uri.Host) }
+        $index++; if(Get-Command Write-AMRDriverWorkerProgress -ErrorAction SilentlyContinue){Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage ('Downloading package file {0} of {1}' -f $index,@($downloadInfo.Urls).Count)}; $leaf=[IO.Path]::GetFileName($uri.AbsolutePath); if(-not $leaf){$leaf=('CatalogPackage_{0}.cab' -f $index)}
+        $leaf=[Uri]::UnescapeDataString($leaf) -replace '[^A-Za-z0-9._-]','_'; if($leaf.Length -gt 120){$leaf=$leaf.Substring($leaf.Length-120)}
+        $dest=Join-Path $folder ('{0:D2}_{1}' -f $index,$leaf)
+        $downloaded=$false; $lastDownloadError=''
+        for($attempt=1;$attempt -le 3;$attempt++) {
+            $request=[System.Net.HttpWebRequest]::Create($uri)
+            $request.Method='GET'; $request.UserAgent='AMR-Windows-Utility-DriverCenter/6.2'; $request.Timeout=120000; $request.ReadWriteTimeout=120000
+            $request.AllowAutoRedirect=$true; $request.MaximumAutomaticRedirections=5; $request.UseDefaultCredentials=$false
+            $request.Proxy=[System.Net.WebRequest]::DefaultWebProxy; if($request.Proxy){$request.Proxy.Credentials=[System.Net.CredentialCache]::DefaultCredentials}
+            $response=$null; $inputStream=$null; $outputStream=$null
+            try {
+                $response=$request.GetResponse()
+                $finalUri=$response.ResponseUri
+                $finalHostAllowed=($finalUri.Host -eq 'download.windowsupdate.com' -or $finalUri.Host.EndsWith('.windowsupdate.com',[System.StringComparison]::OrdinalIgnoreCase) -or $finalUri.Host -eq 'dl.delivery.mp.microsoft.com' -or $finalUri.Host.EndsWith('.delivery.mp.microsoft.com',[System.StringComparison]::OrdinalIgnoreCase))
+                if($finalUri.Scheme -ne 'https' -or -not $finalHostAllowed){throw 'Catalog package download redirected to an unapproved or non-HTTPS host.'}
+                if([string]$response.ContentType -match '(?i)text/html|application/json'){throw 'Catalog package endpoint returned a web page or JSON instead of package content.'}
+                if([int64]$response.ContentLength -gt 4GB){throw 'Catalog package response exceeds the 4 GB safety limit.'}
+                $inputStream=$response.GetResponseStream(); $outputStream=[IO.File]::Open($dest,[IO.FileMode]::Create,[IO.FileAccess]::Write,[IO.FileShare]::None)
+                $buffer=New-Object byte[] 65536; $received=[int64]0; $lastProgressBytes=[int64]0
+                while(($read=$inputStream.Read($buffer,0,$buffer.Length)) -gt 0){$outputStream.Write($buffer,0,$read);$received+=$read;if($received -gt 4GB){throw 'Catalog package exceeded the 4 GB safety limit while downloading.'};if($response.ContentLength -gt 0 -and ($received-$lastProgressBytes -ge 1MB -or $received -eq [int64]$response.ContentLength) -and (Get-Command Write-AMRDriverWorkerProgress -ErrorAction SilentlyContinue)){$pct=[int][math]::Floor(($received/[double]$response.ContentLength)*100);Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage ('Downloading {0}: {1:N0} / {2:N0} bytes' -f $leaf,$received,$response.ContentLength) -Percent $pct -BytesReceived $received -BytesTotal ([long]$response.ContentLength);$lastProgressBytes=$received}}
+                $outputStream.Flush()
+                if($received -le 0 -or ([int64]$response.ContentLength -gt 0 -and $received -ne [int64]$response.ContentLength)){throw 'Catalog package download was empty or its content length did not match the server response.'}
+                $downloaded=$true
+                break
+            } catch {
+                $lastDownloadError=[string]$_.Exception.Message
+                if(Test-Path -LiteralPath $dest){Remove-Item -LiteralPath $dest -Force -ErrorAction SilentlyContinue}
+                if($attempt -lt 3){Start-Sleep -Seconds (2*$attempt)}
+            } finally {
+                if($outputStream){$outputStream.Dispose()}; if($inputStream){$inputStream.Dispose()}; if($response){$response.Dispose()}
+            }
+        }
+        if(-not $downloaded){throw ('Catalog package download failed after 3 attempts: '+$lastDownloadError)}
+        if(-not (Test-Path -LiteralPath $dest -PathType Leaf)){throw 'Catalog package download did not create a file.'}
+        $item=Get-Item -LiteralPath $dest -ErrorAction Stop
+        if($item.Length -le 0 -or $item.Length -gt 4GB){throw 'Downloaded Catalog package is empty or exceeds the 4 GB safety limit.'}
+        $expandedBytes += [int64]$item.Length; if($expandedBytes -gt 4GB){throw 'Catalog download set exceeds the 4 GB safety limit.'}
+        $hash=(Get-FileHash -LiteralPath $dest -Algorithm SHA256 -ErrorAction Stop).Hash
+        $savedFiles.Add([pscustomobject]@{FileName=[IO.Path]::GetFileName($dest);SizeBytes=[int64]$item.Length;SHA256=$hash;SourceHost=$uri.Host;SourceUrl=$uri.AbsoluteUri})
+        $ext=[IO.Path]::GetExtension($dest).ToLowerInvariant()
+        if($ext -eq '.cab') {
+            $expandExe=Join-Path $env:WINDIR 'System32\expand.exe'; if(-not(Test-Path $expandExe)){throw 'Windows expand.exe is unavailable.'}
+            $out=(& $expandExe '-F:*' $dest $expanded 2>&1 | Out-String); if([int]$LASTEXITCODE -ne 0){throw ('CAB extraction failed: ' + $out.Trim())}
+        } elseif($ext -eq '.zip') {
+            Expand-Archive -LiteralPath $dest -DestinationPath (Join-Path $expanded ('ZIP_' + $index)) -Force -ErrorAction Stop
+        } elseif($ext -eq '.msu') {
+            $msuFolder=Join-Path $expanded ('MSU_' + $index); New-Item -ItemType Directory -Path $msuFolder -Force | Out-Null
+            $out=(& (Join-Path $env:WINDIR 'System32\expand.exe') '-F:*' $dest $msuFolder 2>&1 | Out-String); if([int]$LASTEXITCODE -ne 0){throw ('MSU extraction failed: ' + $out.Trim())}
+            foreach($cab in @(Get-ChildItem -LiteralPath $msuFolder -Filter '*.cab' -File -Recurse)) { $cabOut=Join-Path $expanded ('CAB_' + [guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $cabOut -Force | Out-Null; $cabResult=(& (Join-Path $env:WINDIR 'System32\expand.exe') '-F:*' $cab.FullName $cabOut 2>&1 | Out-String); if([int]$LASTEXITCODE -ne 0){throw ('Nested CAB extraction failed: ' + $cabResult.Trim())} }
+        } else { throw ('Unsupported Catalog package format: ' + $ext) }
+    }
+    if(@($savedFiles).Count -eq 1 -and $downloadInfo.ExpectedSHA1) {
+        $onlyFile=Join-Path $folder ([string]$savedFiles[0].FileName)
+        $actualSha1=(Get-FileHash -LiteralPath $onlyFile -Algorithm SHA1 -ErrorAction Stop).Hash
+        if($actualSha1 -ine [string]$downloadInfo.ExpectedSHA1){throw 'The downloaded Catalog payload SHA-1 does not match the hash exposed by the Catalog dialog.'}
+    }
+    if(@($savedFiles).Count -eq 1 -and $downloadInfo.ExpectedSHA256) {
+        if([string]$savedFiles[0].SHA256 -ine [string]$downloadInfo.ExpectedSHA256){throw 'The downloaded Catalog payload SHA-256 does not match the hash exposed by the Catalog dialog.'}
+    }
+    if(Get-Command Write-AMRDriverWorkerProgress -ErrorAction SilentlyContinue){Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Checking INF hardware matches and catalog signatures'}
+    $deviceIds=@(@($Device.HardwareIds)+@($Device.CompatibleIds) | ForEach-Object {[string]$_} | Where-Object {$_} | Select-Object -Unique)
+    $verifiedInfPaths=New-Object 'System.Collections.Generic.List[string]'
+    $infAudit=New-Object 'System.Collections.Generic.List[object]'
+    foreach($inf in @(Get-ChildItem -LiteralPath $expanded -Filter '*.inf' -File -Recurse -ErrorAction Stop)) {
+        $applicability=Test-AMRDriverInfDeviceApplicability -InfPath $inf.FullName -DeviceIds $deviceIds
+        if(-not $applicability.Applicable){continue}
+        $infText=Get-Content -LiteralPath $inf.FullName -Raw -ErrorAction Stop
+        $catNames=@([regex]::Matches($infText,'(?im)^\s*CatalogFile(?:\.[^=]+)?\s*=\s*([^;\r\n]+)') | ForEach-Object {$_.Groups[1].Value.Trim().Trim('"')} | Where-Object {$_} | Select-Object -Unique)
+        $catPath=$null
+        foreach($catName in $catNames){$catPath=Get-ChildItem -LiteralPath $expanded -Filter ([IO.Path]::GetFileName($catName)) -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1; if($catPath){break}}
+        if(-not $catPath){continue}
+        $signature=Get-AuthenticodeSignature -FilePath $catPath.FullName -ErrorAction Stop
+        if([string]$signature.Status -ne 'Valid' -or -not $signature.SignerCertificate){continue}
+        $relative=$inf.FullName.Substring($expanded.Length).TrimStart([char[]]@([char]92,[char]47))
+        $catRelative=$catPath.FullName.Substring($expanded.Length).TrimStart([char[]]@([char]92,[char]47))
+        $verifiedInfPaths.Add($relative)
+        $infAudit.Add([pscustomobject]@{Inf=$relative;Catalog=$catRelative;Signer=[string]$signature.SignerCertificate.Subject;Thumbprint=[string]$signature.SignerCertificate.Thumbprint;DriverVersion=[string]$applicability.DriverVersion;MatchedIds=@($applicability.MatchedIds);ModelSections=@($applicability.ModelSections);Architecture=[string]$applicability.Architecture;OSVersion=[string]$applicability.OSVersion})
+    }
+    if($verifiedInfPaths.Count -eq 0){throw 'No downloaded INF passed all checks: exact device-ID match in an applicable model section, current architecture/OS section, referenced catalog file present, and valid Authenticode signature on the catalog.'}
+    if(Get-Command Write-AMRDriverWorkerProgress -ErrorAction SilentlyContinue){Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Hashing extracted package files'}
+    $expandedFiles=@(Get-ChildItem -LiteralPath $expanded -File -Recurse -ErrorAction Stop | ForEach-Object { [pscustomobject]@{RelativePath=$_.FullName.Substring($expanded.Length).TrimStart([char[]]@([char]92,[char]47));SizeBytes=[int64]$_.Length;SHA256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256 -ErrorAction Stop).Hash} })
+    $manifest=[pscustomobject]@{Product='AMR Microsoft Update Catalog Driver Package';CreatedAt=(Get-Date).ToString('o');SourceAdapter='MicrosoftUpdateCatalog';CatalogUpdateId=$catalogId;UpdateId=$catalogId;Revision=0;DeviceInstanceId=[string]$Device.DeviceId;DeviceName=[string]$Device.DeviceName;HardwareIds=@($Device.HardwareIds);CompatibleIds=@($Device.CompatibleIds);Installable=$false;StagedByWindows=$false;VerificationState='Downloaded, extracted, INF matched, catalog signature valid; Windows staging validation pending';InstallableInfFiles=@($verifiedInfPaths.ToArray());CatalogAudits=@($infAudit.ToArray());CatalogFile=[string]$infAudit[0].Catalog;CatalogSigner=[string]$infAudit[0].Signer;CatalogSignerThumbprint=[string]$infAudit[0].Thumbprint;Files=@($savedFiles.ToArray());ExpandedFiles=$expandedFiles;ExpectedSHA1=[string]$downloadInfo.ExpectedSHA1;ExpectedSHA256=[string]$downloadInfo.ExpectedSHA256;DownloadUrls=@($downloadInfo.Urls);CatalogDetailsUrl=$(if($catalogDetails){[string]$catalogDetails.Url}else{''});CatalogDetailsRetrieved=[bool]$catalogDetails;CatalogDetailsText=$(if($catalogDetails){[string]$catalogDetails.Text}else{''});CatalogDetailsError=$catalogDetailsError;PackageFolder=$folder}
+    if(Get-Command Write-AMRDriverWorkerProgress -ErrorAction SilentlyContinue){Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Writing verified package manifest'}
+    $manifestPath=Join-Path $folder 'AMR_DriverPackage_Manifest.json'
+    $manifest | ConvertTo-Json -Depth 9 | Set-Content -LiteralPath $manifestPath -Encoding UTF8 -ErrorAction Stop
+    $admin=([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    $isStaged=$false; $stageMessage='Package verified offline. Windows staging validation has not been run.'
+    if($admin -and -not $DeferWindowsStaging) {
+        $stagePrompt="AMR downloaded and verified this Catalog package for:`n$($Device.DeviceName)`n`nMatching INF files: $($verifiedInfPaths.Count)`nCatalog signer: $($manifest.CatalogSigner)`n`nThe next step adds the verified driver package to the Windows Driver Store using PnPUtil WITHOUT /install. This stages the package but does not activate it on the device. Continue?"
+        if((Show-AMRMessage $stagePrompt 'Stage Verified Driver Package' YesNo Warning) -eq 'Yes') {
+            $pnputil=Join-Path $env:WINDIR 'System32\pnputil.exe'; if(-not(Test-Path $pnputil)){throw 'PnPUtil is unavailable; Windows cannot validate/stage this package.'}
+            $stageOutputs=@()
+            foreach($relativeInf in $verifiedInfPaths) {
+                $infFull=Join-Path $expanded $relativeInf
+                $stageOutput=(& $pnputil '/add-driver' $infFull 2>&1 | Out-String); $stageExit=[int]$LASTEXITCODE
+                $stageOutputs += $stageOutput
+                if($stageExit -ne 0){throw ('Windows rejected the package during Driver Store staging. Exit={0}. {1}' -f $stageExit,$stageOutput.Trim())}
+            }
+            $isStaged=$true; $stageMessage='Windows accepted the package into the Driver Store. It is staged, not installed or activated.'
+            $manifest.Installable=$true; $manifest.StagedByWindows=$true; $manifest.VerificationState='Verified and staged by Windows; not installed'; $manifest.StagingOutput=($stageOutputs -join "`n")
+            $manifest | ConvertTo-Json -Depth 9 | Set-Content -LiteralPath $manifestPath -Encoding UTF8 -ErrorAction Stop
+        }
+    } elseif($admin -and $DeferWindowsStaging) { $stageMessage='Package downloaded and verified. Windows Driver Store staging is awaiting explicit confirmation in the AMR interface.' } else { $stageMessage='Package downloaded and cryptographically checked, but staging requires Administrator rights. Reopen AMR as Administrator to complete Windows Driver Store validation.' }
+    $Candidate | Add-Member -NotePropertyName PackageFolder -NotePropertyValue $folder -Force
+    $Candidate | Add-Member -NotePropertyName InstallableInfFiles -NotePropertyValue @($verifiedInfPaths.ToArray()) -Force
+    $Candidate | Add-Member -NotePropertyName IsInstallable -NotePropertyValue ([bool]$isStaged) -Force
+    $Candidate | Add-Member -NotePropertyName IsDownloaded -NotePropertyValue $true -Force
+    $Candidate | Add-Member -NotePropertyName VerificationState -NotePropertyValue ([string]$manifest.VerificationState) -Force
+    $Candidate | Add-Member -NotePropertyName CatalogSigner -NotePropertyValue ([string]$manifest.CatalogSigner) -Force
+    $Candidate | Add-Member -NotePropertyName MatchReason -NotePropertyValue ('Exact INF model-section match: {0}; signed catalog: {1}; Windows staging: {2}' -f (($infAudit | ForEach-Object { $_.MatchedIds -join ',' }) -join '; '),$manifest.CatalogSigner,$isStaged) -Force
+    $Candidate | Add-Member -NotePropertyName MaxDownloadSize -NotePropertyValue ([int64](($savedFiles | Measure-Object -Property SizeBytes -Sum).Sum)) -Force
+    if($infAudit.Count -gt 0 -and [string]$infAudit[0].DriverVersion){$Candidate.Version=[string]$infAudit[0].DriverVersion}
+    $Candidate | Add-Member -NotePropertyName PackageManifestPath -NotePropertyValue $manifestPath -Force
+    Write-AMRLog ('Catalog package acquisition for {0}: files={1}; matching INF={2}; staged={3}; signer={4}.' -f $Device.DeviceName,$savedFiles.Count,$verifiedInfPaths.Count,$isStaged,$manifest.CatalogSigner) $(if($isStaged){'SUCCESS'}else{'WARNING'}) Overview
+    return [pscustomobject]@{Success=$true;PackageFolder=$folder;MatchingInfCount=$verifiedInfPaths.Count;Staged=$isStaged;Message=$stageMessage;Signer=[string]$manifest.CatalogSigner;Installable=[bool]$isStaged;ManifestPath=$manifestPath;InstallableInfFiles=@($verifiedInfPaths.ToArray());CandidateSnapshot=$Candidate}
+}
+
+function Show-AMRProfessionalDiscoveryResults {
+    param([Parameter(Mandatory = $true)][object]$Device,[Parameter(Mandatory = $true)][object]$Discovery)
+    $dialog = New-Object System.Windows.Window
+    $dialog.Title = 'Multi-Source Discovery – Microsoft Update Catalog – ' + [string]$Device.DeviceName
+    $dialog.Width = 1180; $dialog.Height = 620; $dialog.MinWidth = 900; $dialog.MinHeight = 440
+    $dialog.WindowStartupLocation = 'CenterOwner'; $dialog.ResizeMode = 'CanResize'
+    $dialog.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#182638')
+    $dialog.Foreground = [System.Windows.Media.Brushes]::White
+    if ($script:Window -and $script:Window.IsVisible) { $dialog.Owner = $script:Window }
+    $root = New-Object System.Windows.Controls.DockPanel; $root.Margin = [System.Windows.Thickness]::new(16)
+    $top = New-Object System.Windows.Controls.StackPanel; [System.Windows.Controls.DockPanel]::SetDock($top,'Top')
+    $heading = New-Object System.Windows.Controls.TextBlock; $heading.Text = ('Catalog discovery returned {0} result(s)' -f @($Discovery.Results).Count); $heading.FontSize = 17; $heading.FontWeight = 'SemiBold'; $heading.Foreground = [System.Windows.Media.Brushes]::White
+    [void]$top.Children.Add($heading)
+    $note = New-Object System.Windows.Controls.TextBlock
+    $note.Text = 'These are Catalog research candidates. Use Verify & Acquire Package to retrieve the official payload, inspect INF model sections and OS architecture, validate the referenced catalog signature, and ask Windows to stage the package without installing it. Only a package accepted by Windows staging becomes selectable for installation.'; if (@($Discovery.Errors).Count -gt 0) { $note.Text += (' Partial source/query warnings: ' + (@($Discovery.Errors) -join ' | ')) }
+    $note.TextWrapping = 'Wrap'; $note.Margin = [System.Windows.Thickness]::new(0,6,0,10); $note.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FBBF24'); $note.FontSize = 11
+    [void]$top.Children.Add($note); [void]$root.Children.Add($top)
+    $grid = New-Object System.Windows.Controls.ListView; $grid.SelectionMode = 'Single'; $grid.ItemsSource = @($Discovery.Results)
+    $grid.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#111B29'); $grid.Foreground = [System.Windows.Media.Brushes]::White
+    $view = New-Object System.Windows.Controls.GridView
+    foreach ($def in @(@('Title',330,'Title'),@('Version',100,'Version'),@('Products',210,'Products'),@('Class',120,'Classification'),@('Updated',95,'DriverDate'),@('Size',90,'MaxDownloadSize'),@('Catalog ID',210,'CatalogUpdateId'))) {
+        $col = New-Object System.Windows.Controls.GridViewColumn; $col.Header=$def[0]; $col.Width=[double]$def[1]; $col.DisplayMemberBinding=[System.Windows.Data.Binding]::new([string]$def[2]); [void]$view.Columns.Add($col)
+    }
+    $grid.View = $view; [void]$root.Children.Add($grid)
+    $bottom = New-Object System.Windows.Controls.StackPanel; $bottom.Orientation='Horizontal'; $bottom.HorizontalAlignment='Right'; $bottom.Margin=[System.Windows.Thickness]::new(0,10,0,0)
+    [System.Windows.Controls.DockPanel]::SetDock($bottom,'Bottom')
+    $open = New-Object System.Windows.Controls.Button; $open.Content='Open Selected Catalog Details'; $open.Width=205; $open.Height=34; $open.Margin=[System.Windows.Thickness]::new(0,0,8,0); $open.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#245B46'); $open.Foreground=[System.Windows.Media.Brushes]::White
+    $open.Add_Click(({ if ($grid.SelectedItem -and $grid.SelectedItem.CatalogUpdateId) { $details='https://www.catalog.update.microsoft.com/ScopedViewInline.aspx?updateid=' + [uri]::EscapeDataString([string]$grid.SelectedItem.CatalogUpdateId); Start-Process -FilePath $details } }).GetNewClosure())
+    [void]$bottom.Children.Add($open)
+    $acquire = New-Object System.Windows.Controls.Button; $acquire.Content='Verify & Acquire Package'; $acquire.Width=205; $acquire.Height=34; $acquire.Margin=[System.Windows.Thickness]::new(0,0,8,0); $acquire.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB'); $acquire.Foreground=[System.Windows.Media.Brushes]::White
+    $acquire.Add_Click(({
+        if(-not $grid.SelectedItem -or $script:DriverManagedJob -or $script:DriverActionJob -or $script:DriverScanJob){return}
+        $selectedCandidate=$grid.SelectedItem
+        try {
+            $null=Start-AMRDriverManagedWorker -Operation CatalogAcquisition -Device $Device -Candidate $selectedCandidate
+            $acquire.IsEnabled=$false
+            (C 'DriverActionStatus').Text='Package download and verification are running in the background. The interface remains responsive; Windows staging will require your confirmation afterward.'
+            $poll = New-Object System.Windows.Threading.DispatcherTimer
+            $poll.Interval=[TimeSpan]::FromMilliseconds(500)
+            $poll.Add_Tick(({
+                if(-not $script:DriverManagedJob){$poll.Stop();$acquire.IsEnabled=$true;return}
+                if($script:DriverManagedJob.State -in @('Completed','Failed','Stopped')){
+                    $poll.Stop()
+                    try {
+                        $acquired=Complete-AMRDriverManagedWorker
+                        if(-not $acquired -or -not $acquired.Success){throw 'Package acquisition returned no verified result.'}
+                        $snapshot=$acquired.CandidateSnapshot
+                        foreach($property in @('PackageFolder','InstallableInfFiles','IsInstallable','IsDownloaded','VerificationState','CatalogSigner','MatchReason','MaxDownloadSize','PackageManifestPath','Version')) {
+                            if($snapshot -and $snapshot.PSObject.Properties[$property]) { $selectedCandidate | Add-Member -NotePropertyName $property -NotePropertyValue $snapshot.$property -Force }
+                        }
+                        $staged=$false
+                        $stageMessage=[string]$acquired.Message
+                        if([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent().IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){
+                            $prompt="AMR verified the downloaded Catalog package for:`n$($Device.DeviceName)`n`nMatching INF files: $($acquired.MatchingInfCount)`nCatalog signer: $($acquired.Signer)`n`nRecheck the package hashes, device identity and catalog signature, then add it to the Windows Driver Store using PnPUtil WITHOUT /install? This stages it only; it does not activate the driver."
+                            if((Show-AMRMessage $prompt 'Stage Verified Driver Package' YesNo Warning) -eq 'Yes'){
+                                $stageCandidate=[pscustomobject]@{CatalogUpdateId=[string]$selectedCandidate.CatalogUpdateId;PackageFolder=[string]$acquired.PackageFolder;ManifestPath=[string]$acquired.ManifestPath;InstallableInfFiles=@($acquired.InstallableInfFiles)}
+                                $null=Start-AMRDriverManagedWorker -Operation CatalogStaging -Device $Device -Candidate $stageCandidate
+                                $acquire.IsEnabled=$false
+                                (C 'DriverActionStatus').Text='Rechecking package integrity and staging it in the background. No driver will be installed by this step.'
+                                $stagePoll=New-Object System.Windows.Threading.DispatcherTimer
+                                $stagePoll.Interval=[TimeSpan]::FromMilliseconds(450)
+                                $stagePoll.Add_Tick(({
+                                    if(-not $script:DriverManagedJob){$stagePoll.Stop();$acquire.IsEnabled=$true;return}
+                                    if($script:DriverManagedJob.State -in @('Completed','Failed','Stopped')){
+                                        $stagePoll.Stop()
+                                        try {
+                                            $stageResult=Complete-AMRDriverManagedWorker
+                                            if(-not $stageResult -or -not $stageResult.Success){throw 'Windows Driver Store staging did not return a successful result.'}
+                                            $selectedCandidate.PackageFolder=[string]$stageResult.PackageFolder
+                                            $selectedCandidate.PackageManifestPath=[string]$stageResult.ManifestPath
+                                            $selectedCandidate.InstallableInfFiles=@($stageResult.InstallableInfFiles)
+                                            $selectedCandidate.IsDownloaded=$true
+                                            $selectedCandidate.IsInstallable=$true
+                                            $selectedCandidate.VerificationState=[string]$stageResult.VerificationState
+                                            $selectedCandidate.CatalogSigner=[string]$stageResult.Signer
+                                            $selectedCandidate.MatchReason=([string]$selectedCandidate.MatchReason+'; package hashes and catalog signer rechecked; Windows staging accepted')
+                                            $stageMessage='Windows accepted the reverified package into the Driver Store. It is staged, not installed.'
+                                            Update-AMRDriverActionButtons
+                                            (C 'DriverActionStatus').Text=$stageMessage
+                                            Show-AMRMessage ($stageMessage+"`n`nPackage folder: "+$stageResult.PackageFolder+"`nMatching INF files: "+@($stageResult.InstallableInfFiles).Count+"`nCatalog signer: "+$stageResult.Signer+"`nWindows staged: True") 'Catalog Package Verification' OK Information | Out-Null
+                                            $dialog.Close()
+                                        } catch {
+                                            (C 'DriverActionStatus').Text='Windows Driver Store staging failed: '+[string]$_.Exception.Message
+                                            Show-AMRMessage ([string]$_.Exception.Message) 'Catalog Package Staging' OK Error | Out-Null
+                                            Write-AMRLog ('Catalog package staging failed: '+[string]$_.Exception.Message) ERROR Overview
+                                        } finally {$acquire.IsEnabled=$true}
+                                    }
+                                }).GetNewClosure())
+                                $script:DriverManagedTimer=$stagePoll; $stagePoll.Start()
+                                return
+                            } else { $stageMessage='Package verified and downloaded. You declined Windows staging; it remains non-installable.' }
+                        } else { $stageMessage='Package verified and downloaded, but Windows Driver Store staging requires Administrator rights.' }
+                        Update-AMRDriverActionButtons
+                        (C 'DriverActionStatus').Text=$stageMessage
+                        Show-AMRMessage ($stageMessage + "`n`nPackage folder: " + $acquired.PackageFolder + "`nMatching INF files: " + $acquired.MatchingInfCount + "`nCatalog signer: " + $acquired.Signer + "`nWindows staged: " + $staged) 'Catalog Package Verification' OK Warning | Out-Null
+                    } catch {
+                        (C 'DriverActionStatus').Text='Catalog package verification/acquisition failed: '+[string]$_.Exception.Message
+                        Show-AMRMessage ([string]$_.Exception.Message) 'Catalog Package Verification' OK Error | Out-Null
+                        Write-AMRLog ('Catalog package verification/acquisition failed: '+[string]$_.Exception.Message) ERROR Overview
+                    } finally {if(-not $script:DriverManagedJob){$acquire.IsEnabled=$true}}
+                }
+            }).GetNewClosure())
+            $script:DriverManagedTimer=$poll; $poll.Start()
+        } catch {
+            $acquire.IsEnabled=$true
+            (C 'DriverActionStatus').Text='Could not start package acquisition: '+[string]$_.Exception.Message
+            Show-AMRMessage ([string]$_.Exception.Message) 'Catalog Package Verification' OK Error | Out-Null
+        }
+    }).GetNewClosure())
+    [void]$bottom.Children.Add($acquire)
+    $close = New-Object System.Windows.Controls.Button; $close.Content='Close'; $close.Width=90; $close.Height=34; $close.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#303846'); $close.Foreground=[System.Windows.Media.Brushes]::White
+    $close.Add_Click(({ $dialog.Close() }).GetNewClosure()); [void]$bottom.Children.Add($close); [void]$root.Children.Add($bottom)
+    $dialog.Content=$root; [void]$dialog.ShowDialog()
+}
+
+function Get-AMRProfessionalCandidateComparison {
+    param([Parameter(Mandatory=$true)][object[]]$Candidates)
+    $normalized = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($candidate in @($Candidates)) {
+        if (-not $candidate) { continue }
+        # Route every source record through the same local API normalization contract first.
+        # Provider-specific fields are retained; absent optional fields receive safe defaults.
+        $item = ConvertTo-AMRLocalVendorCandidate -Candidate $candidate -ProviderId ([string]$candidate.SourceAdapter)
+        # Normalize optional fields across WU, Catalog and vendor-lead records. This keeps
+        # Professional details/selection safe under the app's Set-StrictMode -Version 2.
+        $defaults = @{
+            CatalogSigner=''; CatalogUpdateId=''; PackageFolder=''; PackageUrl=''; ExpectedHash=''; HashAlgorithm=''; SearchTerms=''; Url=''; ProviderId=''; Capabilities=@(); ProviderMetadata=$null
+            UpdateId=''; UpdateRevision=0; Rank=0; MatchIdIndex=9999; MatchTypeRank=2
+            MatchType='Unknown'; MatchConfidence='Not assessed'; MatchReason='No match explanation supplied.'
+            MaxDownloadSize=[int64]0; IsDownloaded=$false; IsInstallable=$false
+            VerificationState='Not verified'; DriverDate='Not supplied'; Version='Not supplied'
+            Manufacturer=''; Model=''; Source=''; SourceUpdateId=''; Title=''; Role=''
+        }
+        foreach ($propertyName in $defaults.Keys) {
+            if (-not $item.PSObject.Properties[$propertyName]) {
+                $item | Add-Member -NotePropertyName $propertyName -NotePropertyValue $defaults[$propertyName] -Force
+            }
+        }
+        $adapter = [string]$item.SourceAdapter
+        $score = 0
+        $reason = ''
+        if ($adapter -eq 'WindowsUpdateAgent') {
+            if ([string]$item.MatchType -match '(?i)exact hardware') {
+                $score = 1000 - ([int]$item.MatchIdIndex * 10)
+                if ([bool]$item.IsDownloaded) { $score += 5 }
+                $reason = 'Windows Update applicability with exact Hardware ID evidence; package readiness is a secondary tie-breaker.'
+            } elseif ([string]$item.MatchType -match '(?i)compatible') {
+                $score = 800 - ([int]$item.MatchIdIndex * 10)
+                $reason = 'Windows Update applicability through a broader Compatible ID; verify package details before installation.'
+            } else {
+                $score = 300
+                $reason = 'Windows Update candidate without a recognized exact/compatible match label; retain for manual review.'
+            }
+        } elseif ($adapter -eq 'MicrosoftUpdateCatalog') {
+            $matchRank = 2
+            try { $matchRank = [int]$item.MatchTypeRank } catch {}
+            $idIndex = 0
+            try { $idIndex = [int]$item.MatchIdIndex } catch {}
+            if ($matchRank -eq 0) {
+                $score = if ([bool]$item.IsInstallable) { 950 } else { 700 }
+                $score -= ($idIndex * 10)
+                $reason = if ([bool]$item.IsInstallable) { 'Catalog package has exact Hardware ID query evidence and passed AMR package verification plus Windows staging.' } else { 'Catalog result came from an exact Hardware ID query but is still metadata-only and not installable.' }
+            } elseif ($matchRank -eq 1) {
+                $score = if ([bool]$item.IsInstallable) { 750 } else { 520 }
+                $score -= ($idIndex * 10)
+                $reason = if ([bool]$item.IsInstallable) { 'Catalog package has Compatible ID evidence and passed package verification plus Windows staging.' } else { 'Catalog result came from a broader Compatible ID query and is not yet verified for installation.' }
+            } else {
+                $score = if ([bool]$item.IsInstallable) { 400 } else { 180 }
+                $reason = 'Catalog result came from text search only; exact device applicability has not been established.'
+            }
+        } elseif ($adapter -in @('DellDriverPackCatalog','HPDriverPackCatalog','LenovoCDRTDriverPackCatalog')) {
+            $score = if ([bool]$item.IsDownloaded) { 260 } else { 220 }
+            if ([string]$item.MatchConfidence -like 'Exact*') { $score += 80 }
+            $reason = if ([bool]$item.IsDownloaded) { 'Exact OEM model/OS driver-pack catalog match; package hash/signature checked. Bundle contents are not yet extracted and INF-validated, so it is not installable.' } else { 'Exact OEM model/OS driver-pack catalog match; direct package URL is available but acquisition and signature/hash verification are pending.' }
+        } elseif ($adapter -eq 'OfficialVendorPortal') {
+            $priority = 5
+            try { $priority = [int]$item.Rank } catch {}
+            $score = 100 - ($priority * 5)
+            $reason = 'Official vendor source lead only; no driver package or version has been retrieved or verified.'
+        } else {
+            $score = 50
+            $reason = 'Unclassified source candidate; manual review required.'
+        }
+        $item | Add-Member -NotePropertyName ComparisonScore -NotePropertyValue ([int]$score) -Force
+        $item | Add-Member -NotePropertyName ComparisonReason -NotePropertyValue $reason -Force
+        $normalized.Add($item)
+    }
+    $ordered = @($normalized.ToArray() | Sort-Object @{Expression={[int]$_.ComparisonScore};Descending=$true},@{Expression={[string]$_.Source};Ascending=$true},@{Expression={[string]$_.Title};Ascending=$true})
+    $rank = 0
+    foreach ($item in $ordered) { $rank++; $item | Add-Member -NotePropertyName ComparisonRank -NotePropertyValue $rank -Force }
+    return @($ordered)
+}
+
+function Show-AMRProfessionalCandidateManager {
+    param([Parameter(Mandatory = $true)][object]$Device)
+
+    $wuCandidates = @($Device.CandidateOptions)
+    $catalogCandidates = @($Device.ProfessionalDiscoveredCandidates)
+    $directVendorCandidates = @($Device.VendorPackageCandidates)
+    $vendorLeads = @($Device.VendorSourceCandidates | ForEach-Object {
+        [pscustomobject]@{Rank=[int]$_.Rank;Title=([string]$_.Name+' – official source lead');Version='Not published';DriverDate='—';MatchType='Source lead';MatchTypeRank=9;MatchIdIndex=9999;MatchConfidence='Source relevance – not a device match';Manufacturer=[string]$_.Name;Model='Model lookup required';IsDownloaded=$false;IsInstallable=$false;PackageFolder='';Source=[string]$_.Mode;SourceAdapter='OfficialVendorPortal';SourceUpdateId=[string]$_.Url;Url=[string]$_.Url;MatchReason=[string]$_.MatchReason;MaxDownloadSize=0;CatalogSigner='';VerificationState=[string]$_.VerificationState;SearchTerms=[string]$_.SearchTerms;Role=[string]$_.Role}
+    })
+    $multiSourceSummary=Get-AMRDriverMultiSourceSummary -Device $Device
+    $candidates = Get-AMRProfessionalCandidateComparison -Candidates (@($wuCandidates) + @($catalogCandidates) + @($directVendorCandidates) + @($vendorLeads))
+    if ($candidates.Count -eq 0) {
+        Show-AMRMessage 'The current scan did not retain alternative candidates for this device. Run Scan Device again or use Driver Source Manager to investigate official sources.' 'Candidate Manager' OK Information | Out-Null
+        return
+    }
+
+    $dialog = New-Object System.Windows.Window
+    $dialog.Title = 'Professional Candidate Manager – ' + [string]$Device.DeviceName
+    $dialog.Width = 1120; $dialog.Height = 590; $dialog.MinWidth = 850; $dialog.MinHeight = 420
+    $dialog.WindowStartupLocation = 'CenterOwner'; $dialog.ResizeMode = 'CanResize'
+    $dialog.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#182638')
+    $dialog.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#E2E8F0')
+    if ($script:Window -and $script:Window.IsVisible) { $dialog.Owner = $script:Window }
+
+    $root = New-Object System.Windows.Controls.DockPanel
+    $root.Margin = [System.Windows.Thickness]::new(16)
+    $top = New-Object System.Windows.Controls.StackPanel
+    [System.Windows.Controls.DockPanel]::SetDock($top,'Top')
+    $heading = New-Object System.Windows.Controls.TextBlock
+    $stagedCatalogCount=@($catalogCandidates | Where-Object { [bool]$_.IsInstallable }).Count
+    $heading.Text = ('Multi-source comparison – {0} Windows Update + {1} Microsoft Catalog + {2} direct OEM package(s) + {3} official source lead(s); {4} Microsoft Catalog package(s) staged' -f $multiSourceSummary.WindowsUpdateCandidates,$multiSourceSummary.CatalogCandidates,$multiSourceSummary.DirectVendorPackageCandidates,$multiSourceSummary.OfficialVendorSourceLeads,$stagedCatalogCount)
+    $heading.FontSize = 16; $heading.FontWeight = 'SemiBold'; $heading.Foreground = [System.Windows.Media.Brushes]::White
+    [void]$top.Children.Add($heading)
+    $note = New-Object System.Windows.Controls.TextBlock
+    $note.Text = 'Overall rank is an evidence/readiness comparison aid, not an automatic installation decision. AMR routes each device independently to its chip/controller vendor, system OEM, motherboard maker and any detected board/peripheral vendor, then merges those leads with Windows Update and Microsoft Catalog. The 72-company source registry covers major OEMs, motherboard makers, component/controller vendors, storage brands, peripherals, ODM/barebone makers and system integrators. Portal leads are not packages. Dell/HP/Lenovo bundles still require extraction and INF/CAT validation. Newer version/date alone never proves a better driver.'
+    $note.TextWrapping = 'Wrap'; $note.Margin = [System.Windows.Thickness]::new(0,6,0,12); $note.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#AFC0D3'); $note.FontSize = 11
+    [void]$top.Children.Add($note)
+    [void]$root.Children.Add($top)
+
+    $grid = New-Object System.Windows.Controls.ListView
+    $grid.SelectionMode = 'Single'; $grid.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#111B29')
+    $grid.Foreground = [System.Windows.Media.Brushes]::White; $grid.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#40546C')
+    $view = New-Object System.Windows.Controls.GridView
+    foreach ($column in @(
+        @('Overall rank',72,'ComparisonRank'),@('Score',62,'ComparisonScore'),@('Version',92,'Version'),@('Date',88,'DriverDate'),@('Match',165,'MatchConfidence'),@('Provider',145,'Manufacturer'),@('Model',190,'Model'),@('Downloaded',85,'IsDownloaded'),@('Staged / Installable',115,'IsInstallable'),@('Source',190,'Source')
+    )) {
+        $col = New-Object System.Windows.Controls.GridViewColumn
+        $col.Header = $column[0]; $col.Width = [double]$column[1]
+        if ($column[3] -eq 'IsDownloaded') { $col.DisplayMemberBinding = [System.Windows.Data.Binding]::new('IsDownloaded') }
+        else { $col.DisplayMemberBinding = [System.Windows.Data.Binding]::new([string]$column[2]) }
+        [void]$view.Columns.Add($col)
+    }
+    $grid.View = $view; $grid.ItemsSource = $candidates; $grid.SelectedIndex = 0
+
+    $bottom = New-Object System.Windows.Controls.StackPanel
+    $bottom.Orientation = 'Vertical'; $bottom.Margin = [System.Windows.Thickness]::new(0,12,0,0)
+    [System.Windows.Controls.DockPanel]::SetDock($bottom,'Bottom')
+    $detail = New-Object System.Windows.Controls.TextBlock
+    $detail.TextWrapping = 'Wrap'; $detail.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#93C5FD'); $detail.FontSize = 10; $detail.Margin = [System.Windows.Thickness]::new(0,0,0,10)
+    [void]$bottom.Children.Add($detail)
+    $buttons = New-Object System.Windows.Controls.StackPanel; $buttons.Orientation = 'Horizontal'; $buttons.HorizontalAlignment = 'Right'
+    $openLead = New-Object System.Windows.Controls.Button; $openLead.Content = 'Open Official Source'; $openLead.Width = 150; $openLead.Height = 34; $openLead.Margin = [System.Windows.Thickness]::new(0,0,8,0); $openLead.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#245B46'); $openLead.Foreground = [System.Windows.Media.Brushes]::White
+    $openLead.Add_Click(({
+        if($grid.SelectedItem -and ([string]$grid.SelectedItem.SourceAdapter -eq 'OfficialVendorPortal' -or [string]$grid.SelectedItem.SourceAdapter -in @('DellDriverPackCatalog','HPDriverPackCatalog','LenovoCDRTDriverPackCatalog')) -and -not [string]::IsNullOrWhiteSpace([string]$(if($grid.SelectedItem.PackageUrl){$grid.SelectedItem.PackageUrl}else{$grid.SelectedItem.Url}))){
+            try{$targetUrl=if($grid.SelectedItem.PackageUrl){[string]$grid.SelectedItem.PackageUrl}else{[string]$grid.SelectedItem.Url};Start-Process -FilePath $targetUrl -ErrorAction Stop;Write-AMRLog ('Opened official vendor source {0} for device {1}.' -f $grid.SelectedItem.Source,$Device.DeviceName) INFO Overview}catch{Show-AMRMessage ('Could not open official source: '+[string]$_.Exception.Message) 'Vendor Source' OK Error | Out-Null}
+        }
+    }).GetNewClosure())
+    [void]$buttons.Children.Add($openLead)
+    $apply = New-Object System.Windows.Controls.Button; $apply.Content = 'Use Selected Candidate'; $apply.Width = 175; $apply.Height = 34; $apply.Margin = [System.Windows.Thickness]::new(0,0,8,0); $apply.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#245B46'); $apply.Foreground = [System.Windows.Media.Brushes]::White
+    $apply.Add_Click(({
+        if (-not $grid.SelectedItem) { return }
+        if ([string]$grid.SelectedItem.SourceAdapter -ne 'WindowsUpdateAgent' -and -not ([string]$grid.SelectedItem.SourceAdapter -eq 'MicrosoftUpdateCatalog' -and [bool]$grid.SelectedItem.IsInstallable -and -not [string]::IsNullOrWhiteSpace([string]$grid.SelectedItem.PackageFolder))) { Show-AMRMessage 'This result is a source lead or an unverified package, not an installable candidate. Official vendor portals must provide a real package that AMR can independently verify before it can be selected.' 'Candidate Not Installable' OK Warning | Out-Null; return }
+        $dialog.Tag = $grid.SelectedItem
+        $dialog.DialogResult = $true
+    }).GetNewClosure())
+    [void]$buttons.Children.Add($apply)
+    $close = New-Object System.Windows.Controls.Button; $close.Content = 'Close'; $close.Width = 90; $close.Height = 34; $close.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#303846'); $close.Foreground = [System.Windows.Media.Brushes]::White
+    $close.Add_Click(({ $dialog.DialogResult = $false }).GetNewClosure()); [void]$buttons.Children.Add($close)
+    [void]$bottom.Children.Add($buttons); [void]$root.Children.Add($bottom)
+    [void]$root.Children.Add($grid)
+
+    $updateDetail = {
+        if ($grid.SelectedItem) {
+            $item = $grid.SelectedItem
+            $detail.Text = ('Overall rank: {0} / comparison score: {1} / why ranked here: {2}  |  Source: {3}  |  Source ID/URL: {4}  |  Match reason: {5}  |  Downloaded: {6}  |  Staged/installable: {7}  |  Size: {8}  |  Signer: {9}  |  Verification: {10}  |  Search context: {11}' -f $item.ComparisonRank,$item.ComparisonScore,$item.ComparisonReason,$item.Source,$item.SourceUpdateId,$item.MatchReason,$item.IsDownloaded,$item.IsInstallable,$item.MaxDownloadSize,$item.CatalogSigner,$item.VerificationState,$item.SearchTerms)
+            $apply.IsEnabled = (([string]$item.SourceAdapter -eq 'WindowsUpdateAgent') -or ([string]$item.SourceAdapter -eq 'MicrosoftUpdateCatalog' -and [bool]$item.IsInstallable -and -not [string]::IsNullOrWhiteSpace([string]$item.PackageFolder)))
+            $openLead.IsEnabled = (([string]$item.SourceAdapter -eq 'OfficialVendorPortal' -and -not [string]::IsNullOrWhiteSpace([string]$item.Url)) -or ([string]$item.SourceAdapter -in @('DellDriverPackCatalog','HPDriverPackCatalog','LenovoCDRTDriverPackCatalog') -and -not [string]::IsNullOrWhiteSpace([string]$item.PackageUrl)))
+        }
+    }.GetNewClosure()
+    $grid.Add_SelectionChanged($updateDetail)
+    $dialog.Content = $root
+    & $updateDetail
+    if ($dialog.ShowDialog() -eq $true -and $dialog.Tag) {
+        $choice = $dialog.Tag
+        $confirm = "Apply this candidate to the selected device?`n`n$($choice.Title)`nVersion: $($choice.Version)`nMatch: $($choice.MatchConfidence)`nSource: $($choice.Source)`n`nThis changes the candidate used by the download/install actions. It does not start either action."
+        if ((Show-AMRMessage $confirm 'Confirm Candidate Selection' YesNo Warning) -ne 'Yes') { return }
+        $isCatalogChoice = ([string]$choice.SourceAdapter -eq 'MicrosoftUpdateCatalog')
+        $sameAsRecommendation = (-not $isCatalogChoice -and [string]$choice.UpdateId -eq [string]$Device.RecommendedUpdateId -and [int]$choice.UpdateRevision -eq [int]$Device.RecommendedUpdateRevision)
+        $previousReadyState = [bool]$Device.UpdateReady
+        $previousLocalPackageReady = [bool]$Device.LocalPackageReady
+        $Device.UpdateId = if($isCatalogChoice){[string]$choice.CatalogUpdateId}else{[string]$choice.UpdateId}
+        $Device.UpdateRevision = if($isCatalogChoice){0}else{[int]$choice.UpdateRevision}
+        $Device.AvailableUpdate = [string]$choice.Title
+        $Device.AvailableVersion = if ([string]::IsNullOrWhiteSpace([string]$choice.Version)) { 'Version not supplied' } else { [string]$choice.Version }
+        $Device.UpdateStatus = ('Professional choice: candidate #{0} from {1}' -f $choice.Rank,$choice.Source)
+        $Device.MatchConfidence = [string]$choice.MatchConfidence
+        $Device.MatchReason = [string]$choice.MatchReason
+        $Device.UpdateDownloadSize = [int64]$choice.MaxDownloadSize
+        $Device.SourceAdapter = [string]$choice.SourceAdapter
+        if($isCatalogChoice){
+            $Device.UpdateReady=[bool]$choice.IsInstallable
+            $Device.LocalPackageReady=[bool]$choice.IsInstallable
+            $Device.LocalPackageFolder=[string]$choice.PackageFolder
+            if($choice.IsInstallable){$Device.UpdateStatus='Catalog package verified and staged – ready for controlled installation'}
+        } else {
+            $Device.UpdateReady = ($sameAsRecommendation -and $previousReadyState)
+            if ($sameAsRecommendation) { $Device.LocalPackageReady = $previousLocalPackageReady }
+            else { $Device.UpdateReady = $false; $Device.LocalPackageReady = $false; $Device.LocalPackageFolder = $null }
+        }
+        $Device.ProfessionalSelectedCandidate = $choice
+        $script:DriverSmartSelectionReady = $false
+        $script:DriverSmartSelectedKeys = @()
+        try { (C 'DriverDeviceList').SelectedItems.Clear(); [void](C 'DriverDeviceList').SelectedItems.Add($Device) } catch {}
+        (C 'DriverActionStatus').Text = if($isCatalogChoice){('Professional Catalog candidate selected: {0}. The verified package is already downloaded and staged; choose Install when ready.' -f $choice.Title)}else{('Professional candidate selected: {0} ({1}). Download and validate this package before installation.' -f $choice.Title,$choice.MatchConfidence)}
+        $selectionHistoryStatus=if($isCatalogChoice -and [bool]$choice.IsInstallable){'Selected – downloaded, verified and staged; not installed'}else{'Selected – not downloaded or installed'}
+        Add-AMRDriverHistoryEntry -Action 'Professional Candidate Selection' -Device ([string]$Device.DeviceName) -Update ([string]$choice.Title) -Version ([string]$choice.Version) -Status $selectionHistoryStatus -Details ('Source={0}; Match={1}; UpdateId={2}; Revision={3}; CatalogUpdateId={4}; Staged={5}' -f $choice.Source,$choice.MatchConfidence,$choice.UpdateId,$choice.UpdateRevision,$choice.CatalogUpdateId,$choice.IsInstallable)
+        Update-AMRDriverActionButtons
+    }
+}
+
+function Show-AMRProfessionalSourceManager {
+    param([Parameter(Mandatory = $true)][object]$Device)
+    $leads=@($Device.VendorSourceCandidates)
+    $hardware=@($Device.HardwareIds | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    $compatible=@($Device.CompatibleIds | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    $primaryQuery=if($hardware.Count -gt 0){[string]$hardware[0]}elseif($compatible.Count -gt 0){[string]$compatible[0]}else{[string]$Device.DeviceName}
+    $catalogUrl='https://www.catalog.update.microsoft.com/Search.aspx?q='+[uri]::EscapeDataString($primaryQuery)
+    $sources=@(
+        [pscustomobject]@{Name='Microsoft Windows Update';Type='Live candidate source';Url='';Role='Live Windows Update Agent candidates retained by the scan. AMR ranks exact Hardware ID matches and retains alternatives.';SearchTerms=$primaryQuery;MatchReason='Installed Windows Update Agent inventory';Priority=0},
+        [pscustomobject]@{Name='Microsoft Update Catalog';Type='Live discovery adapter';Url=$catalogUrl;Role='AMR can search Catalog, acquire official payloads, verify INF applicability, OS/architecture, signature and hashes, then stage through Windows before installation.';SearchTerms=$primaryQuery;MatchReason='Hardware ID / Compatible ID query';Priority=0}
+    ) + @($leads | ForEach-Object {[pscustomobject]@{Name=$_.Name;Type=$_.Mode;Url=$_.Url;Role=$_.Role;SearchTerms=$_.SearchTerms;MatchReason=$_.MatchReason;Priority=$_.Priority}})
+    $dialog=New-Object System.Windows.Window;$dialog.Title='Professional Multi-Source Manager – '+[string]$Device.DeviceName;$dialog.Width=1040;$dialog.Height=610;$dialog.MinWidth=820;$dialog.MinHeight=440;$dialog.WindowStartupLocation='CenterOwner';$dialog.ResizeMode='CanResize';$dialog.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#182638');$dialog.Foreground=[System.Windows.Media.Brushes]::White
+    if($script:Window -and $script:Window.IsVisible){$dialog.Owner=$script:Window}
+    $root=New-Object System.Windows.Controls.DockPanel;$root.Margin=[System.Windows.Thickness]::new(16)
+    $top=New-Object System.Windows.Controls.StackPanel;[System.Windows.Controls.DockPanel]::SetDock($top,'Top')
+    $heading=New-Object System.Windows.Controls.TextBlock;$heading.Text=('Multi-source discovery for {0} • component: {1} • vendor: {2} • coverage: {3}' -f $Device.DeviceName,$Device.ComponentCategory,$Device.HardwareVendorName,$Device.HardwareCoverageStatus);$heading.FontSize=15;$heading.FontWeight='SemiBold';$heading.TextWrapping='Wrap';$heading.Margin=[System.Windows.Thickness]::new(0,0,0,7);[void]$top.Children.Add($heading)
+    $identity=New-Object System.Windows.Controls.TextBlock;$identity.Text=('System identity: {0} / {1} ({2}) • motherboard: {3} {4} • IDs: {5}' -f $script:DriverOEMModelProfile.IdentityClass,$script:DriverOEMModelProfile.OEMVendor,$script:DriverOEMModelProfile.Confidence,$script:DriverOEMModelProfile.BoardVendor,$script:DriverOEMModelProfile.BoardProduct,$Device.HardwareIdSummary);$identity.TextWrapping='Wrap';$identity.FontSize=10;$identity.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#AFC0D3');$identity.Margin=[System.Windows.Thickness]::new(0,0,0,10);[void]$top.Children.Add($identity)
+    $evidence=New-Object System.Windows.Controls.TextBlock;$evidence.Text=('Hardware evidence: {0} ({1}) • subsystem partner: {2} • ID families: {3} • unresolved/other IDs: {4}' -f $Device.HardwareVendorEvidence,$Device.HardwareVendorEvidenceLevel,$(if($Device.SubsystemVendorName){$Device.SubsystemVendorName}else{'not identified'}),(@($Device.HardwareIdFamilies) -join ', '),@($Device.UnresolvedHardwareIds).Count);$evidence.TextWrapping='Wrap';$evidence.FontSize=10;$evidence.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#AFC0D3');$evidence.Margin=[System.Windows.Thickness]::new(0,0,0,10);[void]$top.Children.Add($evidence)
+    $warning=New-Object System.Windows.Controls.TextBlock;$warning.Text='Vendor identity confidence: PCI/USB/HD Audio IDs are strongest; ACPI IDs and subsystem partners are supporting evidence; generic PnP manufacturer strings are weaker. AMR now routes across 72 registered OEM, motherboard, silicon/controller, storage, peripheral, ODM and system-integrator brands. Mixed-brand systems are handled as separate hardware-vendor, system-OEM and motherboard sources and merged into one candidate manager. Unknown IDs remain available for exact lookup. Official portal leads are not packages; only supported catalog results enter package acquisition. Dell, HP and Lenovo bundles still require extraction and INF/CAT validation. Windows Update and Microsoft Catalog retain their existing installation pipeline.';$warning.TextWrapping='Wrap';$warning.FontSize=10;$warning.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#FCD9A6');$warning.Margin=[System.Windows.Thickness]::new(0,0,0,10);[void]$top.Children.Add($warning)
+    [void]$root.Children.Add($top)
+    $grid=New-Object System.Windows.Controls.ListView;$grid.SelectionMode='Single';$grid.ItemsSource=$sources;$grid.SelectedIndex=1;$grid.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#111B29');$grid.Foreground=[System.Windows.Media.Brushes]::White;$grid.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#40546C')
+    $view=New-Object System.Windows.Controls.GridView
+    foreach($def in @(@('Source',175,'Name'),@('Adapter / role',185,'Type'),@('Match reason',230,'MatchReason'),@('Purpose / coverage',350,'Role'))){$col=New-Object System.Windows.Controls.GridViewColumn;$col.Header=$def[0];$col.Width=[double]$def[1];$col.DisplayMemberBinding=[System.Windows.Data.Binding]::new([string]$def[2]);[void]$view.Columns.Add($col)}
+    $grid.View=$view
+    $bottom=New-Object System.Windows.Controls.StackPanel;$bottom.Orientation='Vertical';$bottom.Margin=[System.Windows.Thickness]::new(0,10,0,0);[System.Windows.Controls.DockPanel]::SetDock($bottom,'Bottom')
+    $terms=New-Object System.Windows.Controls.TextBox;$terms.IsReadOnly=$true;$terms.TextWrapping='Wrap';$terms.AcceptsReturn=$true;$terms.VerticalScrollBarVisibility='Auto';$terms.Height=56;$terms.Margin=[System.Windows.Thickness]::new(0,0,0,8);$terms.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#111B29');$terms.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#93C5FD');$terms.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#40546C');[void]$bottom.Children.Add($terms)
+    $buttons=New-Object System.Windows.Controls.StackPanel;$buttons.Orientation='Horizontal';$buttons.HorizontalAlignment='Right'
+    $discover=New-Object System.Windows.Controls.Button;$discover.Content='Discover Catalog Candidates';$discover.Width=205;$discover.Height=34;$discover.Margin=[System.Windows.Thickness]::new(0,0,8,0);$discover.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB');$discover.Foreground=[System.Windows.Media.Brushes]::White
+    $discover.Add_Click(({
+        if($script:DriverManagedJob -or $script:DriverActionJob -or $script:DriverScanJob){return}
+        try{$null=Start-AMRDriverManagedWorker -Operation CatalogDiscovery -Device $Device;$discover.IsEnabled=$false;(C 'DriverActionStatus').Text='Multi-source Catalog discovery is running in the background.';$poll=New-Object System.Windows.Threading.DispatcherTimer;$poll.Interval=[TimeSpan]::FromMilliseconds(450);$poll.Add_Tick(({
+            if(-not $script:DriverManagedJob){$poll.Stop();$discover.IsEnabled=$true;return}
+            if($script:DriverManagedJob.State -in @('Completed','Failed','Stopped')){$poll.Stop();try{$found=Complete-AMRDriverManagedWorker;if(-not $found){throw 'Catalog discovery returned no result.'};$Device|Add-Member -NotePropertyName ProfessionalDiscoveredCandidates -NotePropertyValue @($found.Results) -Force;(C 'DriverActionStatus').Text=('Catalog discovery completed: {0} Catalog result(s).' -f @($found.Results).Count);if(@($found.Errors).Count -gt 0){Write-AMRLog ('Catalog discovery warnings: '+($found.Errors -join ' | ')) WARNING Overview};$discover.IsEnabled=$true;Show-AMRProfessionalDiscoveryResults -Device $Device -Discovery $found;if(@($found.Results).Count -gt 0){Show-AMRProfessionalCandidateManager -Device $Device}}catch{(C 'DriverActionStatus').Text='Catalog discovery failed: '+[string]$_.Exception.Message;Show-AMRMessage ([string]$_.Exception.Message) 'Catalog Discovery' OK Warning | Out-Null;$discover.IsEnabled=$true}}
+        }).GetNewClosure());$script:DriverManagedTimer=$poll;$poll.Start()}catch{$discover.IsEnabled=$true;Show-AMRMessage ('Could not start Catalog discovery: '+[string]$_.Exception.Message) 'Catalog Discovery' OK Warning | Out-Null}
+    }).GetNewClosure());[void]$buttons.Children.Add($discover)
+    $vendorDiscover=New-Object System.Windows.Controls.Button;$vendorDiscover.Content='Discover All Vendor Sources';$vendorDiscover.Width=220;$vendorDiscover.Height=34;$vendorDiscover.Margin=[System.Windows.Thickness]::new(0,0,8,0);$vendorDiscover.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#6D4AA5');$vendorDiscover.Foreground=[System.Windows.Media.Brushes]::White
+    $vendorDiscover.Add_Click(({
+        if($script:DriverManagedJob -or $script:DriverActionJob -or $script:DriverScanJob){return}
+        try{$null=Start-AMRDriverManagedWorker -Operation VendorDiscovery -Device $Device -Candidate $script:DriverOEMModelProfile;$vendorDiscover.IsEnabled=$false;(C 'DriverActionStatus').Text='Searching registered official vendor providers in the background.';$poll=New-Object System.Windows.Threading.DispatcherTimer;$poll.Interval=[TimeSpan]::FromMilliseconds(450);$poll.Add_Tick(({
+            if(-not $script:DriverManagedJob){$poll.Stop();$vendorDiscover.IsEnabled=$true;return}
+            if($script:DriverManagedJob.State -in @('Completed','Failed','Stopped')){$poll.Stop();try{$found=Complete-AMRDriverManagedWorker;if(-not $found){throw 'Vendor discovery returned no result.'};$Device|Add-Member -NotePropertyName VendorPackageCandidates -NotePropertyValue @($found.Results) -Force;$Device|Add-Member -NotePropertyName VendorPackageDiscoveryErrors -NotePropertyValue @($found.Errors) -Force;(C 'DriverActionStatus').Text=('Vendor discovery completed: {0} package candidate(s) and/or official support lead(s).' -f @($found.Results).Count);if(@($found.Errors).Count -gt 0){Write-AMRLog ('Vendor adapter warnings: '+($found.Errors -join ' | ')) WARNING Overview};$vendorDiscover.IsEnabled=$true;if(@($found.Results).Count -gt 0){Show-AMRVendorPackageResults -Device $Device -Candidates @($found.Results);Show-AMRProfessionalCandidateManager -Device $Device}else{$msg='No downloadable OEM driver pack was found. Check the matched official vendor support-portal leads and the Windows Update / Microsoft Catalog candidates.';if(@($found.Errors).Count -gt 0){$msg+='`n`n'+($found.Errors -join "`n")};Show-AMRMessage $msg 'Direct Vendor Discovery' OK Information | Out-Null}}catch{$vendorDiscover.IsEnabled=$true;(C 'DriverActionStatus').Text='Direct vendor discovery failed: '+[string]$_.Exception.Message;Show-AMRMessage ([string]$_.Exception.Message) 'Direct Vendor Discovery' OK Warning | Out-Null}}
+        }).GetNewClosure());$script:DriverManagedTimer=$poll;$poll.Start()}catch{$vendorDiscover.IsEnabled=$true;Show-AMRMessage ('Could not start direct vendor discovery: '+[string]$_.Exception.Message) 'Direct Vendor Discovery' OK Warning | Out-Null}
+    }).GetNewClosure());[void]$buttons.Children.Add($vendorDiscover)
+    $open=New-Object System.Windows.Controls.Button;$open.Content='Open Selected Official Source';$open.Width=185;$open.Height=34;$open.Margin=[System.Windows.Thickness]::new(0,0,8,0);$open.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#245B46');$open.Foreground=[System.Windows.Media.Brushes]::White
+    $open.Add_Click(({
+        if(-not $grid.SelectedItem){return};$item=$grid.SelectedItem
+        if([string]::IsNullOrWhiteSpace([string]$item.Url)){Show-AMRMessage ([string]$item.Role) 'Source Information' OK Information | Out-Null;return}
+        try{Start-Process -FilePath ([string]$item.Url) -ErrorAction Stop;Write-AMRLog ('Opened source {0} for device {1}.' -f $item.Name,$Device.DeviceName) INFO Overview}catch{Show-AMRMessage ('Could not open source: '+[string]$_.Exception.Message) 'Source Manager' OK Error | Out-Null}
+    }).GetNewClosure());[void]$buttons.Children.Add($open)
+    $copy=New-Object System.Windows.Controls.Button;$copy.Content='Copy Search Context';$copy.Width=145;$copy.Height=34;$copy.Margin=[System.Windows.Thickness]::new(0,0,8,0);$copy.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#344B69');$copy.Foreground=[System.Windows.Media.Brushes]::White
+    $copy.Add_Click(({if($grid.SelectedItem -and $grid.SelectedItem.SearchTerms){try{[System.Windows.Clipboard]::SetText([string]$grid.SelectedItem.SearchTerms);Show-AMRMessage 'Exact model, OS and hardware search context copied.' 'Search Context' OK Information | Out-Null}catch{Show-AMRMessage ('Could not copy search context: '+[string]$_.Exception.Message) 'Search Context' OK Warning | Out-Null}}}).GetNewClosure());[void]$buttons.Children.Add($copy)
+    $close=New-Object System.Windows.Controls.Button;$close.Content='Close';$close.Width=90;$close.Height=34;$close.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#303846');$close.Foreground=[System.Windows.Media.Brushes]::White;$close.Add_Click(({ $dialog.Close() }).GetNewClosure());[void]$buttons.Children.Add($close)
+    [void]$bottom.Children.Add($buttons);[void]$root.Children.Add($bottom);[void]$root.Children.Add($grid)
+    $refreshTerms={if($grid.SelectedItem){$item=$grid.SelectedItem;$terms.Text=('Search context: '+[string]$item.SearchTerms+[Environment]::NewLine+'URL: '+[string]$item.Url+[Environment]::NewLine+'Adapter: '+[string]$item.Type);$open.IsEnabled=(-not [string]::IsNullOrWhiteSpace([string]$item.Url));$copy.IsEnabled=(-not [string]::IsNullOrWhiteSpace([string]$item.SearchTerms))}}.GetNewClosure()
+    $grid.Add_SelectionChanged($refreshTerms);$dialog.Content=$root;&$refreshTerms;[void]$dialog.ShowDialog()
+}
+
+function Show-AMRDriverCatalogSearchPicker {
+    param([Parameter(Mandatory = $true)][object]$Device)
+
+    $options = @()
+    $seenIds = @{}
+    $osContext = [string]$script:DriverCatalogWindowsContext
+
+    foreach ($hardwareId in @($Device.HardwareIds)) {
+        $idText = ([string]$hardwareId).Trim()
+        if ([string]::IsNullOrWhiteSpace($idText)) { continue }
+        $key = $idText.ToUpperInvariant()
+        if ($seenIds.ContainsKey($key)) { continue }
+        $seenIds[$key] = $true
+        $query = $idText
+        if (-not [string]::IsNullOrWhiteSpace($osContext)) { $query += ' ' + $osContext }
+        $options += [pscustomobject]@{
+            Label = ('Hardware ID  •  ' + $idText)
+            Query = $query
+            MatchType = 'Hardware ID'
+        }
+    }
+
+    foreach ($compatibleId in @($Device.CompatibleIds)) {
+        $idText = ([string]$compatibleId).Trim()
+        if ([string]::IsNullOrWhiteSpace($idText)) { continue }
+        $key = $idText.ToUpperInvariant()
+        if ($seenIds.ContainsKey($key)) { continue }
+        $seenIds[$key] = $true
+        $query = $idText
+        if (-not [string]::IsNullOrWhiteSpace($osContext)) { $query += ' ' + $osContext }
+        $options += [pscustomobject]@{
+            Label = ('Compatible ID  •  ' + $idText)
+            Query = $query
+            MatchType = 'Compatible ID'
+        }
+    }
+
+    $modelTerms = @([string]$Device.Manufacturer, [string]$Device.DeviceName, $osContext) |
+        ForEach-Object { ([string]$_).Trim() } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    $modelQuery = ($modelTerms -join ' ').Trim()
+    if (-not [string]::IsNullOrWhiteSpace($modelQuery)) {
+        $options += [pscustomobject]@{
+            Label = ('Device manufacturer + model  •  ' + $modelQuery)
+            Query = $modelQuery
+            MatchType = 'Device model fallback'
+        }
+    }
+
+    if ($options.Count -eq 0) { return $null }
+
+    # Keep the chooser compact while retaining the most specific IDs first.
+    if ($options.Count -gt 18) { $options = @($options | Select-Object -First 18) }
+
+    $dialog = New-Object System.Windows.Window
+    $dialog.Title = 'Choose a Microsoft Catalog search'
+    $dialog.Width = 760
+    $dialog.Height = 330
+    $dialog.MinWidth = 620
+    $dialog.MinHeight = 280
+    $dialog.ResizeMode = 'CanResize'
+    $dialog.WindowStartupLocation = 'CenterOwner'
+    $dialog.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#182638')
+    $dialog.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#E2E8F0')
+    if ($script:Window -and $script:Window.IsVisible) { $dialog.Owner = $script:Window }
+
+    $root = New-Object System.Windows.Controls.StackPanel
+    $root.Margin = [System.Windows.Thickness]::new(18)
+
+    $heading = New-Object System.Windows.Controls.TextBlock
+    $heading.Text = 'Select which identifier to search'
+    $heading.FontSize = 17
+    $heading.FontWeight = 'SemiBold'
+    $heading.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F8FAFC')
+    $heading.Margin = [System.Windows.Thickness]::new(0,0,0,8)
+    [void]$root.Children.Add($heading)
+
+    $description = New-Object System.Windows.Controls.TextBlock
+    $description.Text = 'Exact Hardware IDs are listed first, followed by Compatible IDs and a device-model fallback. Windows version and architecture are included when available.'
+    $description.TextWrapping = 'Wrap'
+    $description.FontSize = 11
+    $description.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#A8B7C9')
+    $description.Margin = [System.Windows.Thickness]::new(0,0,0,12)
+    [void]$root.Children.Add($description)
+
+    $combo = New-Object System.Windows.Controls.ComboBox
+    $combo.Height = 38
+    $combo.FontSize = 11
+    $combo.Padding = [System.Windows.Thickness]::new(8,5,8,5)
+    $combo.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#243449')
+    $combo.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F1F5F9')
+    $combo.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#52677F')
+    $combo.DisplayMemberPath = 'Label'
+    $combo.ItemsSource = @($options)
+    $combo.SelectedIndex = 0
+    [void]$root.Children.Add($combo)
+
+    $preview = New-Object System.Windows.Controls.TextBlock
+    $preview.TextWrapping = 'Wrap'
+    $preview.FontSize = 10
+    $preview.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#93C5FD')
+    $preview.Margin = [System.Windows.Thickness]::new(2,9,2,14)
+    $preview.Text = 'Search: ' + [string]$combo.SelectedItem.Query
+    [void]$root.Children.Add($preview)
+    $combo.Add_SelectionChanged(({
+        if ($combo.SelectedItem) { $preview.Text = 'Search: ' + [string]$combo.SelectedItem.Query }
+    }).GetNewClosure())
+
+    $buttonPanel = New-Object System.Windows.Controls.StackPanel
+    $buttonPanel.Orientation = 'Horizontal'
+    $buttonPanel.HorizontalAlignment = 'Right'
+
+    $searchButton = New-Object System.Windows.Controls.Button
+    $searchButton.Content = 'Search Catalog'
+    $searchButton.Width = 125
+    $searchButton.Height = 34
+    $searchButton.Margin = [System.Windows.Thickness]::new(0,0,8,0)
+    $searchButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB')
+    $searchButton.Foreground = [System.Windows.Media.Brushes]::White
+    $searchButton.Add_Click(({
+        if ($combo.SelectedItem) { $dialog.Tag = $combo.SelectedItem; $dialog.DialogResult = $true }
+    }).GetNewClosure())
+    [void]$buttonPanel.Children.Add($searchButton)
+
+    $cancelButton = New-Object System.Windows.Controls.Button
+    $cancelButton.Content = 'Cancel'
+    $cancelButton.Width = 90
+    $cancelButton.Height = 34
+    $cancelButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#303846')
+    $cancelButton.Foreground = [System.Windows.Media.Brushes]::White
+    $cancelButton.Add_Click(({ $dialog.DialogResult = $false }).GetNewClosure())
+    [void]$buttonPanel.Children.Add($cancelButton)
+    [void]$root.Children.Add($buttonPanel)
+
+    $dialog.Content = $root
+    $dialog.Add_Loaded(({ $combo.Focus() }).GetNewClosure())
+    $result = $dialog.ShowDialog()
+    if ($result -eq $true) { return $dialog.Tag }
+    return $null
+}
+
+(C 'DriverCandidateManagerBtn').Add_Click({
+    $selected = (C 'DriverDeviceList').SelectedItem
+    if ($selected) { Show-AMRProfessionalCandidateManager -Device $selected }
+})
+(C 'DriverSourceManagerBtn').Add_Click({
+    $selected = (C 'DriverDeviceList').SelectedItem
+    if ($selected) { Show-AMRProfessionalSourceManager -Device $selected }
+})
+
+(C 'DriverCatalogSearchBtn').Add_Click({
+    $selected = (C 'DriverDeviceList').SelectedItem
+    if (-not $selected) { return }
+    try {
+        $searchChoice = Show-AMRDriverCatalogSearchPicker -Device $selected
+        if (-not $searchChoice -or [string]::IsNullOrWhiteSpace([string]$searchChoice.Query)) { return }
+        $catalogUrl = 'https://www.catalog.update.microsoft.com/Search.aspx?q=' + [uri]::EscapeDataString([string]$searchChoice.Query)
+        Start-Process -FilePath $catalogUrl
+        (C 'DriverActionStatus').Text = ('Opened Microsoft Update Catalog using {0}. Verify product, OS, architecture and driver version before downloading.' -f $searchChoice.MatchType)
+        Write-AMRLog ("Opened Microsoft Update Catalog for device='{0}', match='{1}', query='{2}'." -f $selected.DeviceName, $searchChoice.MatchType, $searchChoice.Query) INFO Overview
+    } catch {
+        Show-AMRMessage ('Could not open Microsoft Update Catalog: ' + $_.Exception.Message) 'Driver Center' OK Error | Out-Null
+        Write-AMRLog ('Microsoft Update Catalog search failed: ' + $_.Exception.Message) ERROR Overview
+    }
+})
+
+(C 'ScanDriversBtn').Add_Click({ Start-AMRDriverScan })
+(C 'OpenOfficialSupportBtn').Add_Click({
+    $selected = (C 'DriverDeviceList').SelectedItem
+    $supportToOpen = $null
+    if ($selected -and -not [string]::IsNullOrWhiteSpace([string]$script:DriverSupportUrl)) {
+        $supportToOpen = Get-AMRDriverDeviceSupportSource -DeviceManufacturer ([string]$selected.Manufacturer) -DeviceName ([string]$selected.DeviceName) -ComputerModel ([string]$script:DriverComputerModel) -BoardModel ([string]$script:DriverBoardModel) -WindowsContext ([string]$script:DriverWindowsContext) -FallbackName ([string]$script:DriverSupportName) -FallbackUrl ([string]$script:DriverSupportUrl)
+    } elseif (-not [string]::IsNullOrWhiteSpace([string]$script:DriverSupportUrl)) {
+        $supportToOpen = [pscustomobject]@{ Name = $script:DriverSupportName; Url = $script:DriverSupportUrl }
+    }
+    if ($supportToOpen -and -not [string]::IsNullOrWhiteSpace([string]$supportToOpen.Url)) {
+        try {
+            Start-Process -FilePath $supportToOpen.Url
+            $searchTerms = [string]$supportToOpen.SearchTerms
+            if ([string]::IsNullOrWhiteSpace($searchTerms)) { $searchTerms = [string]$script:DriverComputerModel }
+            (C 'DriverActionStatus').Text = ('Opened {0}. Search using: {1}. Verify exact model, Windows version, architecture and driver details before installing.' -f $supportToOpen.Name, $searchTerms)
+            Write-AMRLog ('Opened official driver support source: {0}; model search terms: {1}' -f $supportToOpen.Name,$searchTerms) INFO Overview
+        } catch {
+            Write-AMRLog ('Could not open official support page: ' + $_.Exception.Message) ERROR Overview
+            Show-AMRMessage ('Could not open official support page: ' + $_.Exception.Message) 'Driver Center' OK Error | Out-Null
+        }
+    }
+})
+
 # ==========================================================
 # 7. HIGH-PERFORMANCE MULTI-TIER ENGINE (SAFE POWERSHELL 5.1 RUNSPACE)
 # ==========================================================
 
 $script:AppsView = [System.Windows.Data.CollectionViewSource]::GetDefaultView($script:SoftwareCatalog)
 
-# Build the vertical category navigation from the existing catalog data.
-# The catalog itself and all installation metadata remain unchanged.
+# Build category navigation entries with live catalog counts.
+# Counts switch to installed-only totals whenever Show Installed is active.
 $script:SelectedSoftwareCategory = 'All Applications'
-$script:SoftwareCategories = @('All Applications') + @(
+$script:ShowInstalledOnly = $false
+$script:SoftwareCategoryNames = @(
     $script:SoftwareCatalog |
         ForEach-Object { [string]$_.Category } |
         Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
         Sort-Object -Unique
 )
+$script:SoftwareCategories = @(
+    [pscustomobject]@{ Name = 'All Applications'; DisplayText = 'All Applications (0)' }
+) + @(
+    foreach ($categoryName in $script:SoftwareCategoryNames) {
+        [pscustomobject]@{ Name = [string]$categoryName; DisplayText = [string]$categoryName }
+    }
+)
+$categoryTextFactory = New-Object System.Windows.FrameworkElementFactory([System.Windows.Controls.TextBlock])
+$categoryTextFactory.SetBinding([System.Windows.Controls.TextBlock]::TextProperty, [System.Windows.Data.Binding]::new('DisplayText'))
+$categoryTextFactory.SetValue([System.Windows.Controls.TextBlock]::TextWrappingProperty, [System.Windows.TextWrapping]::Wrap)
+$categoryTextFactory.SetValue([System.Windows.Controls.TextBlock]::TextTrimmingProperty, [System.Windows.TextTrimming]::None)
+$categoryTextFactory.SetValue([System.Windows.Controls.TextBlock]::FontSizeProperty, 11.5)
+$categoryTextFactory.SetValue([System.Windows.Controls.TextBlock]::MaxWidthProperty, 175.0)
+$categoryTemplate = [System.Windows.DataTemplate]::new()
+$categoryTemplate.VisualTree = $categoryTextFactory
+(C 'SoftwareCategoryList').ItemTemplate = $categoryTemplate
 (C 'SoftwareCategoryList').ItemsSource = $script:SoftwareCategories
 (C 'SoftwareCategoryList').SelectedIndex = 0
 
-$script:ShowInstalledOnly = $false
+function Update-AMRSoftwareCategoryCounts {
+    $catalogItems = @($script:SoftwareCatalog)
+    $visibleItems = if ($script:ShowInstalledOnly) {
+        @($catalogItems | Where-Object { $_.IsInstalled -eq $true })
+    } else {
+        $catalogItems
+    }
+
+    foreach ($categoryEntry in $script:SoftwareCategories) {
+        if ($categoryEntry.Name -eq 'All Applications') {
+            $count = $visibleItems.Count
+        } else {
+            $count = @($visibleItems | Where-Object { [string]$_.Category -eq [string]$categoryEntry.Name }).Count
+        }
+        $categoryEntry.DisplayText = '{0} ({1})' -f $categoryEntry.Name, $count
+    }
+
+    # Refresh the ListBox display without changing the selected category.
+    $list = C 'SoftwareCategoryList'
+    $selectedName = $script:SelectedSoftwareCategory
+    $list.Items.Refresh()
+    for ($i = 0; $i -lt $script:SoftwareCategories.Count; $i++) {
+        if ($script:SoftwareCategories[$i].Name -eq $selectedName) {
+            $list.SelectedIndex = $i
+            break
+        }
+    }
+}
+
+Update-AMRSoftwareCategoryCounts
 try { (C 'UninstallSelectedBtn').Visibility = 'Collapsed' } catch {}
 
 function Update-AMRInstalledCatalogState {
@@ -4176,6 +9714,7 @@ function Set-AMRInstalledViewVisible {
     (C 'ShowInstalledBtn').ToolTip = 'Return to the full software catalog.'
     (C 'ShowInstalledBtn').IsEnabled = $true
     (C 'UninstallSelectedBtn').Visibility = 'Visible'
+    Update-AMRSoftwareCategoryCounts
     $script:AppsView.Refresh()
     Write-AMRLog "Installed-app filter enabled: $InstalledCount catalog application(s) detected." INFO Software
 }
@@ -4388,7 +9927,7 @@ $script:AppsView.Filter = [System.Predicate[object]]{
 (C 'SoftwareCategoryList').Add_SelectionChanged({
     $selected = (C 'SoftwareCategoryList').SelectedItem
     if ($null -ne $selected) {
-        $script:SelectedSoftwareCategory = [string]$selected
+        $script:SelectedSoftwareCategory = [string]$selected.Name
         $script:AppsView.Refresh()
     }
 })
@@ -4410,11 +9949,38 @@ $script:AppsView.Filter = [System.Predicate[object]]{
         (C 'ShowInstalledBtn').ToolTip = 'Show only applications detected as installed on this PC.'
         (C 'ShowInstalledBtn').IsEnabled = $true
         (C 'UninstallSelectedBtn').Visibility = 'Collapsed'
+        Update-AMRSoftwareCategoryCounts
         $script:AppsView.Refresh()
         Write-AMRLog 'Installed-app filter disabled; showing the full software catalog.' INFO Software
     }
 })
 (C 'SoftwareGrid').ItemsSource = $script:AppsView
+
+# Keep the software catalog responsive: 3 cards in the normal window and 4 when maximized.
+function Find-AMRVisualChildByType {
+    param(
+        [System.Windows.DependencyObject]$Parent,
+        [type]$ChildType
+    )
+    if ($null -eq $Parent) { return $null }
+    $count = [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($Parent)
+    for ($i = 0; $i -lt $count; $i++) {
+        $child = [System.Windows.Media.VisualTreeHelper]::GetChild($Parent, $i)
+        if ($ChildType.IsAssignableFrom($child.GetType())) { return $child }
+        $found = Find-AMRVisualChildByType -Parent $child -ChildType $ChildType
+        if ($null -ne $found) { return $found }
+    }
+    return $null
+}
+
+$script:UpdateSoftwareGridColumns = {
+    $uniformGrid = Find-AMRVisualChildByType -Parent (C 'SoftwareGrid') -ChildType ([System.Windows.Controls.Primitives.UniformGrid])
+    if ($null -ne $uniformGrid) {
+        $uniformGrid.Columns = if ($script:Window.WindowState -eq [System.Windows.WindowState]::Maximized) { 4 } else { 3 }
+    }
+}
+$script:Window.Add_Loaded({ & $script:UpdateSoftwareGridColumns })
+$script:Window.Add_StateChanged({ & $script:UpdateSoftwareGridColumns })
 
 (C 'DeselectAllBtn').Add_Click({
     if ($script:InstallRunning) {
@@ -8461,7 +14027,244 @@ Update-AMRUtilitiesView
 Write-AMRLog ('Amr | windows_utility initialized. ' + $script:AMRReliabilityPhase) INFO System
 Refresh-AMROverview
 Write-AMRLog 'Utility Ready.' SUCCESS System
+# --- ISOLATED PROGRESSIVE SOFTWARE-ICON REFRESH ---
+# This worker starts only after WPF has rendered the first frame. Network, ZIP
+# extraction and file copying run in a dedicated MTA runspace, never on the UI thread.
+$script:IconRefreshStarted = $false
+$script:IconRefreshRunspace = $null
+$script:IconRefreshPowerShell = $null
+$script:IconRefreshAsync = $null
+$script:IconRefreshTimer = $null
+
+function Start-AMRBackgroundIconRefresh {
+    if ($script:IconRefreshStarted) { return }
+    $script:IconRefreshStarted = $true
+
+    try {
+        $workerCode = {
+            param(
+                [object[]]$Apps,
+                [string]$IconDir,
+                [string]$DownloadDir,
+                [string]$ArchiveUrl,
+                [string]$ApiUrl,
+                [string]$ArchivePath,
+                [string]$ArchiveMarkerPath,
+                [string]$IconFixBaseUrl,
+                [string]$IconFixVersion,
+                [string]$IconFixMarkerPath,
+                [object[]]$IconFixFiles,
+                [string]$InitFunctionText,
+                [string]$PngFunctionText,
+                [string]$FixFunctionText,
+                [string]$LogFile
+            )
+
+            # Recreate only the small set of paths/settings needed by the existing
+            # cache routines. This runspace has no WPF objects or UI callbacks.
+            $script:IconDir = $IconDir
+            $script:DownloadDir = $DownloadDir
+            $script:IconArchiveUrl = $ArchiveUrl
+            $script:IconArchiveApiUrl = $ApiUrl
+            $script:IconArchivePath = $ArchivePath
+            $script:IconArchiveMarkerPath = $ArchiveMarkerPath
+            $script:IconFixBaseUrl = $IconFixBaseUrl
+            $script:IconFixVersion = $IconFixVersion
+            $script:IconFixMarkerPath = $IconFixMarkerPath
+            $script:IconFixFiles = $IconFixFiles
+            $script:LogFile = $LogFile
+
+            function Write-AMRLog {
+                param([string]$Message,[string]$Level='INFO',[string]$Area='Software')
+                try {
+                    $line = '[{0}] [{1}] [{2}] {3}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'),$Level,$Area,$Message
+                    Add-Content -LiteralPath $script:LogFile -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue
+                } catch {}
+            }
+
+            try {
+                Set-Item -Path Function:\Initialize-AMRSoftwareIcons -Value ([scriptblock]::Create($InitFunctionText)) -Force
+                Set-Item -Path Function:\Test-AMRPNGFile -Value ([scriptblock]::Create($PngFunctionText)) -Force
+                Set-Item -Path Function:\Update-AMRFixedSoftwareIcons -Value ([scriptblock]::Create($FixFunctionText)) -Force
+                Initialize-AMRSoftwareIcons -Apps $Apps
+                Update-AMRFixedSoftwareIcons
+                return 'Completed'
+            }
+            catch {
+                Write-AMRLog ("Background icon refresh failed safely: {0}" -f $_.Exception.Message) 'WARNING' 'Software'
+                return 'Failed'
+            }
+        }
+
+        $script:IconRefreshRunspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+        $script:IconRefreshRunspace.ApartmentState = [System.Threading.ApartmentState]::MTA
+        $script:IconRefreshRunspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
+        $script:IconRefreshRunspace.Open()
+
+        $script:IconRefreshPowerShell = [PowerShell]::Create()
+        $script:IconRefreshPowerShell.Runspace = $script:IconRefreshRunspace
+        $null = $script:IconRefreshPowerShell.AddScript($workerCode.ToString())
+        $null = $script:IconRefreshPowerShell.AddArgument(@($RawApps))
+        $null = $script:IconRefreshPowerShell.AddArgument($script:IconDir)
+        $null = $script:IconRefreshPowerShell.AddArgument($script:DownloadDir)
+        $null = $script:IconRefreshPowerShell.AddArgument($script:IconArchiveUrl)
+        $null = $script:IconRefreshPowerShell.AddArgument($script:IconArchiveApiUrl)
+        $null = $script:IconRefreshPowerShell.AddArgument($script:IconArchivePath)
+        $null = $script:IconRefreshPowerShell.AddArgument($script:IconArchiveMarkerPath)
+        $null = $script:IconRefreshPowerShell.AddArgument($script:IconFixBaseUrl)
+        $null = $script:IconRefreshPowerShell.AddArgument($script:IconFixVersion)
+        $null = $script:IconRefreshPowerShell.AddArgument($script:IconFixMarkerPath)
+        $null = $script:IconRefreshPowerShell.AddArgument(@($script:IconFixFiles))
+        $null = $script:IconRefreshPowerShell.AddArgument(${function:Initialize-AMRSoftwareIcons}.ToString())
+        $null = $script:IconRefreshPowerShell.AddArgument(${function:Test-AMRPNGFile}.ToString())
+        $null = $script:IconRefreshPowerShell.AddArgument(${function:Update-AMRFixedSoftwareIcons}.ToString())
+        $null = $script:IconRefreshPowerShell.AddArgument($script:LogFile)
+        $script:IconRefreshStartedUtc = [DateTime]::UtcNow
+        $script:IconRefreshAsync = $script:IconRefreshPowerShell.BeginInvoke()
+        $script:IconRefreshLoadedIndexes = New-Object 'System.Collections.Generic.HashSet[int]'
+        $script:IconRefreshScanIndex = 0
+
+        $script:IconRefreshTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:IconRefreshTimer.Interval = [TimeSpan]::FromMilliseconds(350)
+        $script:IconRefreshTimer.Add_Tick({
+            try {
+                # Progressive UI update: newly downloaded icons are picked up in small
+                # batches while the isolated worker continues preparing the rest.
+                $progressiveUpdated = $false
+                $progressLimit = [Math]::Min($RawApps.Count, $script:IconRefreshScanIndex + 40)
+                for ($progressIndex = $script:IconRefreshScanIndex; $progressIndex -lt $progressLimit -and $progressIndex -lt $script:SoftwareCatalog.Count; $progressIndex++) {
+                    if ($null -ne $script:SoftwareCatalog[$progressIndex].Icon) { continue }
+                    if ($script:IconRefreshLoadedIndexes.Contains([int]$progressIndex)) { continue }
+                    $progressRawApp = $RawApps[$progressIndex]
+                    $progressIds = @([string]$progressRawApp.Id)
+                    if ($progressRawApp.PSObject.Properties['IconAliases'] -and $progressRawApp.IconAliases) {
+                        $progressIds += @($progressRawApp.IconAliases | ForEach-Object { [string]$_ })
+                    }
+                    $progressSource = $null
+                    foreach ($progressId in $progressIds) {
+                        foreach ($progressExt in @('.png','.jpg','.jpeg')) {
+                            $progressPath = Join-Path $script:IconDir ($progressId + $progressExt)
+                            if (Test-Path -LiteralPath $progressPath -PathType Leaf) {
+                                $progressSource = Get-AMRIconImageSource -Path $progressPath
+                                if ($null -ne $progressSource) { break }
+                            }
+                        }
+                        if ($null -ne $progressSource) { break }
+                    }
+                    if ($null -ne $progressSource) {
+                        $script:SoftwareCatalog[$progressIndex].Icon = $progressSource
+                        [void]$script:IconRefreshLoadedIndexes.Add([int]$progressIndex)
+                        $progressiveUpdated = $true
+                    }
+                }
+                $script:IconRefreshScanIndex = $progressLimit
+                if ($progressiveUpdated) { try { (C 'SoftwareGrid').Items.Refresh() } catch {} }
+
+                if (-not $script:IconRefreshAsync -or -not $script:IconRefreshAsync.IsCompleted) { return }
+                $workerResult = @($script:IconRefreshPowerShell.EndInvoke($script:IconRefreshAsync))
+                if ($script:IconRefreshPowerShell.Streams.Error.Count -gt 0) {
+                    foreach ($workerError in $script:IconRefreshPowerShell.Streams.Error) {
+                        Write-AMRLog ("Background icon worker: {0}" -f $workerError.ToString()) WARNING Software
+                    }
+                }
+                Write-AMRLog 'Background icon cache check/update finished. Refreshing visible software icons from local files.' INFO Software
+
+                # Re-read the local cache on the UI thread; BitmapImage objects are
+                # frozen before assignment so WPF can safely render them.
+                $finalUpdated = $false
+                for ($i = 0; $i -lt $script:SoftwareCatalog.Count -and $i -lt $RawApps.Count; $i++) {
+                    if ($script:IconRefreshLoadedIndexes.Contains([int]$i)) { continue }
+                    $rawApp = $RawApps[$i]
+                    $ids = @([string]$rawApp.Id)
+                    if ($rawApp.PSObject.Properties['IconAliases'] -and $rawApp.IconAliases) {
+                        $ids += @($rawApp.IconAliases | ForEach-Object { [string]$_ })
+                    }
+                    $newSource = $null
+                    foreach ($candidateId in $ids) {
+                        foreach ($extension in @('.png','.jpg','.jpeg')) {
+                            $localIcon = Join-Path $script:IconDir ($candidateId + $extension)
+                            if (Test-Path -LiteralPath $localIcon -PathType Leaf) {
+                                $iconInfo = Get-Item -LiteralPath $localIcon -ErrorAction SilentlyContinue
+                                if ($null -ne $iconInfo -and ($null -eq $script:SoftwareCatalog[$i].Icon -or $iconInfo.LastWriteTimeUtc -ge $script:IconRefreshStartedUtc)) {
+                                    $newSource = Get-AMRIconImageSource -Path $localIcon
+                                }
+                                if ($null -ne $newSource) { break }
+                            }
+                        }
+                        if ($null -ne $newSource) { break }
+                    }
+                    if ($null -ne $newSource) {
+                        $script:SoftwareCatalog[$i].Icon = $newSource
+                        $finalUpdated = $true
+                    }
+                }
+                if ($finalUpdated) { try { (C 'SoftwareGrid').Items.Refresh() } catch {} }
+            }
+            catch {
+                Write-AMRLog ("Could not refresh software icons after background work: {0}" -f $_.Exception.Message) WARNING Software
+            }
+            finally {
+                try { $script:IconRefreshTimer.Stop() } catch {}
+                try { if ($script:IconRefreshPowerShell) { $script:IconRefreshPowerShell.Dispose() } } catch {}
+                try { if ($script:IconRefreshRunspace) { $script:IconRefreshRunspace.Close(); $script:IconRefreshRunspace.Dispose() } } catch {}
+                $script:IconRefreshPowerShell = $null
+                $script:IconRefreshRunspace = $null
+                $script:IconRefreshAsync = $null
+            }
+        })
+        $script:IconRefreshTimer.Start()
+        Write-AMRLog 'Software icon refresh started in an isolated background runspace; the main window remains independent.' INFO Software
+    }
+    catch {
+        Write-AMRLog ("Could not start the background icon worker; existing local icons remain available: {0}" -f $_.Exception.Message) WARNING Software
+        try { if ($script:IconRefreshPowerShell) { $script:IconRefreshPowerShell.Dispose() } } catch {}
+        try { if ($script:IconRefreshRunspace) { $script:IconRefreshRunspace.Close(); $script:IconRefreshRunspace.Dispose() } } catch {}
+        $script:IconRefreshPowerShell = $null
+        $script:IconRefreshRunspace = $null
+    }
+}
+
+# ContentRendered guarantees the user sees the application before any icon work starts.
+$script:Window.Add_ContentRendered({ Start-AMRBackgroundIconRefresh })
+
 # Warm the installed-app inventory before the user opens Show Installed.
 # This scan is asynchronous and never blocks the WPF startup thread.
 Start-AMRInstalledCatalogScan
 [void]$script:Window.ShowDialog()
+
+
+# --- Phase 6.10.4 | Expanded chipset-vendor routing and evidence-aware portal adapters ---
+# Added stable Local Vendor API providers for Realtek, Broadcom, Qualcomm, MediaTek,
+# Marvell, Silicon Labs, FTDI, WCH and ASIX. Added explicit PCI/USB vendor-ID fallback
+# mapping where the PnP manufacturer string is often absent or generic.
+# These are source-discovery adapters, not direct package catalogs. Qualcomm/MediaTek and
+# many Realtek/Broadcom devices remain OEM-first. No package is made downloadable or
+# installable by this phase. Previous MSI/GIGABYTE/ASRock and OEM/catalog pipelines remain intact.
+
+
+# --- Phase 6.10.5 | Prolific, C-Media, Infineon, Synaptics, Goodix, ELAN, Genesys Logic and ASMedia ---
+# Adds eight dedicated built-in Local Vendor API portal providers and explicit USB/PCI/ACPI
+# vendor-ID routing. Vendor IDs are identity evidence only; no package is inferred as compatible.
+# Prolific official product pages publish Windows driver resources by PL2303 family. Other
+# providers remain OEM-first or user-assisted where no stable public driver catalog is established.
+# All portal candidates remain non-downloadable and non-installable pending package resolution,
+# hardware/OS matching, archive inspection, INF/CAT validation, hash and signer verification.
+
+
+# --- Phase 6.10.6 | Expanded gaming and capture peripheral vendor adapters ---
+# Adds dedicated Local Vendor API portal providers for Logitech, SteelSeries, CORSAIR,
+# Elgato, AVerMedia and Razer, plus explicit USB/PCI vendor-ID identity routing.
+# Official product pages distinguish companion software, firmware, inbox UVC support and
+# actual driver packages. These adapters are discovery routes only: no application/utility
+# is mislabeled as a driver, and no portal result is made downloadable/installable without
+# exact product matching, package acquisition, INF/CAT inspection, hash and signer checks.
+# Existing OEM and direct catalog providers remain unchanged.
+
+
+# --- Phase 6.10.7 | Expanded OEM support adapters: Acer, Fujitsu, Panasonic, Dynabook, HUAWEI and Surface ---
+# Adds six explicit Local Vendor API OEM portal providers, stable provider IDs, and reserved-ID protection.
+# These OEM sources require exact model/SNID/serial/region/OS selection. Surface MSI bundles are metadata
+# routes only and are not marked installable until package acquisition, extraction, INF/CAT, hash and signer
+# validation are completed. Companion utilities (DeskUpdate/PC Manager) are not mislabeled as drivers.
+# Existing Dell/HP/Lenovo catalogs, MSI/GIGABYTE/ASRock metadata adapters and all component/peripheral
+# vendor adapters are preserved unchanged.
