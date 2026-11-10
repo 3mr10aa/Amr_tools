@@ -1,5 +1,5 @@
 <#
-Amr | AMR Driver Center - Phase 6.10.22 Compact Overview Tiles + Update Tab
+Amr | AMR Driver Center - Phase 6.10.23 Compact Overview Tiles + Update Tab
 Windows 10/11 | Windows PowerShell 5.1 | WPF | Administrator
 Developer: عمرو أحمد عبد الفتاح | Phone: 01014716301 | Email: 3mr10aa@gmail.com
 #>
@@ -2476,7 +2476,7 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
    </Setter>
   </Style>
 
-  <!-- Phase 6.10.22: Compact Overview tiles and reserve space for the Update tab. -->
+  <!-- Phase 6.10.23: Compact Overview tiles and reserve space for the Update tab. -->
   <Style x:Key="OverviewSubTabControlStyle" TargetType="TabControl">
    <Setter Property="Background" Value="#18181B"/>
    <Setter Property="BorderThickness" Value="0"/>
@@ -2748,8 +2748,62 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
       <TabItem.Header>
        <TextBlock Text="DRIVER CENTER" Foreground="#EAF2FF" FontWeight="Bold" FontSize="10" TextAlignment="Center" VerticalAlignment="Center" HorizontalAlignment="Center"/>
       </TabItem.Header>
-      <ScrollViewer Name="DriverCenterScrollViewer" VerticalScrollBarVisibility="Auto" Padding="10,8,10,16">
-       <StackPanel Name="DriverCenterMainPanel">
+      <ScrollViewer Name="DriverCenterScrollViewer"
+                    FlowDirection="RightToLeft"
+                    VerticalScrollBarVisibility="Auto"
+                    HorizontalScrollBarVisibility="Disabled"
+                    Padding="10,8,10,16">
+       <ScrollViewer.Resources>
+        <!-- Reuse the Software catalog's minimal circular scrollbar in Driver Center. -->
+        <Style TargetType="ScrollBar">
+         <Setter Property="Width" Value="14"/>
+         <Setter Property="Background" Value="Transparent"/>
+         <Setter Property="Foreground" Value="#8FB8E8"/>
+         <Setter Property="Template">
+          <Setter.Value>
+           <ControlTemplate TargetType="ScrollBar">
+            <Grid Background="Transparent" SnapsToDevicePixels="True">
+             <Track Name="PART_Track" IsDirectionReversed="True">
+              <Track.DecreaseRepeatButton>
+               <RepeatButton Command="ScrollBar.LineUpCommand" Opacity="0" Focusable="False" IsHitTestVisible="False"/>
+              </Track.DecreaseRepeatButton>
+              <Track.Thumb>
+               <Thumb Width="10" MinHeight="10" MaxHeight="10" Background="#8FB8E8" HorizontalAlignment="Center">
+                <Thumb.Template>
+                 <ControlTemplate TargetType="Thumb">
+                  <Grid Width="10" Height="10" HorizontalAlignment="Center" VerticalAlignment="Center">
+                   <Ellipse x:Name="ThumbCircle" Width="10" Height="10" Fill="{TemplateBinding Background}"/>
+                  </Grid>
+                  <ControlTemplate.Triggers>
+                   <Trigger Property="IsMouseOver" Value="True">
+                    <Setter TargetName="ThumbCircle" Property="Fill" Value="#A9CCF2"/>
+                   </Trigger>
+                   <Trigger Property="IsDragging" Value="True">
+                    <Setter TargetName="ThumbCircle" Property="Fill" Value="#C3DDF8"/>
+                   </Trigger>
+                  </ControlTemplate.Triggers>
+                 </ControlTemplate>
+                </Thumb.Template>
+               </Thumb>
+              </Track.Thumb>
+              <Track.IncreaseRepeatButton>
+               <RepeatButton Command="ScrollBar.LineDownCommand" Opacity="0" Focusable="False" IsHitTestVisible="False"/>
+              </Track.IncreaseRepeatButton>
+             </Track>
+            </Grid>
+            <ControlTemplate.Triggers>
+             <Trigger Property="Orientation" Value="Horizontal">
+              <Setter Property="Height" Value="8"/>
+              <Setter Property="Width" Value="Auto"/>
+             </Trigger>
+            </ControlTemplate.Triggers>
+           </ControlTemplate>
+          </Setter.Value>
+         </Setter>
+        </Style>
+       </ScrollViewer.Resources>
+       <!-- Keep the content's normal left-to-right layout while RTL places the scrollbar on the left. -->
+       <StackPanel Name="DriverCenterMainPanel" FlowDirection="LeftToRight">
         <Grid Name="DriverCenterHeader" Margin="0,4,0,12">
          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
          <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,12,0">
