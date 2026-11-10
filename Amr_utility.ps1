@@ -2433,7 +2433,7 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
   <Style TargetType="TabItem">
    <Setter Property="Padding" Value="8,10"/>
    <Setter Property="Margin" Value="3,2"/>
-   <Setter Property="MinHeight" Value="42"/>
+   <Setter Property="MinHeight" Value="50"/>
    <Setter Property="Foreground" Value="#B8B8C2"/>
    <Setter Property="Background" Value="#242832"/>
    <Setter Property="BorderThickness" Value="1"/>
@@ -2483,11 +2483,11 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
     <Setter.Value>
      <ControlTemplate TargetType="TabControl">
       <Grid>
-       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="190"/></Grid.ColumnDefinitions>
-       <Border Grid.Column="0" Background="{TemplateBinding Background}" Padding="0,0,10,0">
+       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="206"/></Grid.ColumnDefinitions>
+       <Border Grid.Column="0" Background="{TemplateBinding Background}" Padding="0,0,12,0">
         <ContentPresenter ContentSource="SelectedContent"/>
        </Border>
-       <Border Grid.Column="1" Background="#202B3B" BorderBrush="#30445F" BorderThickness="1" CornerRadius="10" Padding="8,8,8,14" Margin="8,8,4,12" ClipToBounds="False">
+       <Border Grid.Column="1" Background="#1B2636" BorderBrush="#344B68" BorderThickness="1" CornerRadius="14" Padding="10" Margin="6,8,8,12" ClipToBounds="False">
         <TabPanel IsItemsHost="True" KeyboardNavigation.TabIndex="1" ClipToBounds="False"/>
        </Border>
       </Grid>
@@ -2497,12 +2497,12 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
   </Style>
   <!-- Match the Overview tiles to the Software Categories tiles: equal width, spacing and corner radius. -->
   <Style x:Key="OverviewSubTabItemStyle" TargetType="TabItem" BasedOn="{StaticResource {x:Type TabItem}}">
-   <Setter Property="Width" Value="160"/>
+   <Setter Property="Width" Value="178"/>
    <Setter Property="MinHeight" Value="42"/>
    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
    <Setter Property="VerticalContentAlignment" Value="Center"/>
-   <Setter Property="Padding" Value="10,8"/>
-   <Setter Property="Margin" Value="0,0,0,8"/>
+   <Setter Property="Padding" Value="13,10"/>
+   <Setter Property="Margin" Value="0,0,0,10"/>
    <Setter Property="Foreground" Value="#C9D8EA"/>
    <Setter Property="Background" Value="#26364B"/>
    <Setter Property="BorderThickness" Value="0"/>
@@ -2510,7 +2510,7 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
     <Setter.Value>
      <ControlTemplate TargetType="TabItem">
       <Border Name="OverviewSubTabTile" Background="{TemplateBinding Background}"
-              BorderBrush="#344B68" BorderThickness="1" CornerRadius="9"
+              BorderBrush="#3B526F" BorderThickness="1" CornerRadius="12"
               Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
        <ContentPresenter HorizontalAlignment="Stretch" VerticalAlignment="Center"
                          ContentSource="Header" RecognizesAccessKey="True"/>
@@ -2717,29 +2717,35 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
      </StackPanel>
     </ScrollViewer>
      </TabItem>
-     <TabItem Header="Driver Center">
+     <TabItem>
+      <TabItem.Header>
+       <StackPanel Width="154">
+        <TextBlock Text="Driver Center" FontWeight="SemiBold" Margin="0,0,0,7"/>
+        <Button Name="DriverSidebarSmartModeBtn" Content="✦ Smart View" HorizontalContentAlignment="Left" Background="#176B50" Foreground="#FFFFFF" BorderBrush="#34D399" BorderThickness="1" Padding="8,6" FontSize="10" Margin="0,0,0,5" Cursor="Hand"/>
+        <Button Name="DriverSidebarAdvancedModeBtn" Content="Professional" HorizontalContentAlignment="Left" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" BorderThickness="1" Padding="8,6" FontSize="10" Cursor="Hand"/>
+       </StackPanel>
+      </TabItem.Header>
       <ScrollViewer Name="DriverCenterScrollViewer" VerticalScrollBarVisibility="Auto" Padding="10,8,10,16">
        <StackPanel Name="DriverCenterMainPanel">
-        <Grid Name="DriverCenterHeader" Margin="0,4,0,16">
-         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-         <StackPanel Grid.Column="0">
+        <Grid Name="DriverCenterHeader" Margin="0,4,0,12">
+         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+         <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,12,0">
           <TextBlock Text="DRIVER CENTER" FontSize="24" FontWeight="Bold" Foreground="#F8FAFC"/>
-          <TextBlock Text="Detect your PC, motherboard, Windows version and connected hardware. Find the correct official driver source." Foreground="#94A3B8" FontSize="12" TextWrapping="Wrap" Margin="0,5,12,0"/>
+          <TextBlock Text="Detect your PC, motherboard, Windows version and connected hardware. Find the correct official driver source." Foreground="#94A3B8" FontSize="12" TextWrapping="Wrap" Margin="0,5,8,0"/>
          </StackPanel>
-         <Button Name="ScanDriversBtn" Grid.Column="1" Content="⌕  Scan Device" Background="#2563EB" Foreground="#FFFFFF" BorderBrush="#60A5FA" BorderThickness="1" Padding="17,10" FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center"/>
+         <Border Grid.Column="1" Background="#151E2B" BorderBrush="#344B68" BorderThickness="1" CornerRadius="12" Padding="4" Margin="0,0,12,0" VerticalAlignment="Center">
+          <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+           <Button Name="DriverSmartModeBtn" Content="✦ Smart View" Background="#176B50" Foreground="#FFFFFF" BorderBrush="#34D399" BorderThickness="1" Padding="14,9" FontSize="11" FontWeight="Bold" Margin="0,0,5,0" Cursor="Hand"/>
+           <Button Name="DriverAdvancedModeBtn" Content="Professional" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" BorderThickness="1" Padding="14,9" FontSize="11" Cursor="Hand"/>
+          </StackPanel>
+         </Border>
+         <Button Name="ScanDriversBtn" Grid.Column="2" Content="⌕  Scan Device" Background="#2563EB" Foreground="#FFFFFF" BorderBrush="#60A5FA" BorderThickness="1" Padding="17,11" FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center" Cursor="Hand"/>
         </Grid>
-        <Border Background="#151E2B" BorderBrush="#334155" BorderThickness="1" CornerRadius="10" Padding="11" Margin="0,0,0,12">
-         <Grid>
-          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-          <StackPanel Grid.Column="0" Margin="0,0,10,0" VerticalAlignment="Center">
-           <TextBlock Text="DRIVER EXPERIENCE" Foreground="#7DD3FC" FontSize="10" FontWeight="Bold"/>
-           <TextBlock Name="DriverModeDescription" Text="Smart View: review AMR recommendations first with Smart Select, then prepare and install only the choices you approve." Foreground="#CBD5E1" FontSize="11" TextWrapping="Wrap" Margin="0,4,0,0"/>
-          </StackPanel>
-          <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-           <Button Name="DriverSmartModeBtn" Content="✦ Smart View" Background="#176B50" Foreground="#FFFFFF" BorderBrush="#34D399" Padding="13,8" FontSize="11" FontWeight="Bold" Margin="0,0,6,0"/>
-           <Button Name="DriverAdvancedModeBtn" Content="Professional" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" Padding="13,8" FontSize="11"/>
-          </StackPanel>
-         </Grid>
+        <Border Background="#151E2B" BorderBrush="#2D4058" BorderThickness="1" CornerRadius="10" Padding="10,9" Margin="0,0,0,12">
+         <StackPanel>
+          <TextBlock Text="DRIVER EXPERIENCE" Foreground="#7DD3FC" FontSize="10" FontWeight="Bold"/>
+          <TextBlock Name="DriverModeDescription" Text="Smart View: review AMR recommendations first with Smart Select, then prepare and install only the choices you approve." Foreground="#CBD5E1" FontSize="11" TextWrapping="Wrap" Margin="0,4,0,0"/>
+         </StackPanel>
         </Border>
         <Button Name="DriverIdentityToggleBtn" Content="Show system identity &amp; platform details" Visibility="Collapsed" HorizontalAlignment="Left" Background="#243449" Foreground="#CBD5E1" BorderBrush="#52677F" Padding="10,6" FontSize="10" Margin="0,0,0,8"/>
         <Border Name="DriverComputerSummaryCard" Background="#1B2432" BorderBrush="#334155" BorderThickness="1" CornerRadius="12" Padding="15" Margin="0,0,0,12">
@@ -6626,6 +6632,8 @@ function Set-AMRDriverExperienceMode {
     $script:DriverExperienceMode = $Mode
     $smartButton = C 'DriverSmartModeBtn'
     $advancedButton = C 'DriverAdvancedModeBtn'
+    $sidebarSmartButton = C 'DriverSidebarSmartModeBtn'
+    $sidebarAdvancedButton = C 'DriverSidebarAdvancedModeBtn'
     $description = C 'DriverModeDescription'
     $deviceList = C 'DriverDeviceList'
     $scrollViewer = C 'DriverCenterScrollViewer'
@@ -6640,6 +6648,8 @@ function Set-AMRDriverExperienceMode {
     if ($Mode -eq 'Smart') {
         if ($smartButton) { $smartButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#176B50'); $smartButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#34D399'); $smartButton.FontWeight = 'Bold' }
         if ($advancedButton) { $advancedButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#303846'); $advancedButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#526176'); $advancedButton.FontWeight = 'Normal' }
+        if ($sidebarSmartButton) { $sidebarSmartButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#176B50'); $sidebarSmartButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#34D399'); $sidebarSmartButton.FontWeight = 'Bold' }
+        if ($sidebarAdvancedButton) { $sidebarAdvancedButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#303846'); $sidebarAdvancedButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#526176'); $sidebarAdvancedButton.FontWeight = 'Normal' }
         if ($description) { $description.Text = 'Smart View: Smart Select recommends which confirmed driver candidates deserve attention. Smart Install separately prepares and installs only the choices you approve.' }
         if ($scrollViewer) { $scrollViewer.Padding = [System.Windows.Thickness]::new(10,8,10,16) }
 
@@ -6686,6 +6696,8 @@ function Set-AMRDriverExperienceMode {
     else {
         if ($smartButton) { $smartButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#303846'); $smartButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#526176'); $smartButton.FontWeight = 'Normal' }
         if ($advancedButton) { $advancedButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#244A70'); $advancedButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4B83B8'); $advancedButton.FontWeight = 'Bold' }
+        if ($sidebarSmartButton) { $sidebarSmartButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#303846'); $sidebarSmartButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#526176'); $sidebarSmartButton.FontWeight = 'Normal' }
+        if ($sidebarAdvancedButton) { $sidebarAdvancedButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#244A70'); $sidebarAdvancedButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4B83B8'); $sidebarAdvancedButton.FontWeight = 'Bold' }
         if ($description) { $description.Text = 'Professional Driver Center: compare every retained Windows Update match, choose an alternative, investigate official OEM/vendor sources, inspect rollback options and export reports.' }
         if ($scrollViewer) { $scrollViewer.Padding = [System.Windows.Thickness]::new(4,4,4,8) }
 
@@ -7315,6 +7327,7 @@ function Start-AMRDriverUpdateAction {
                 $localInstallableInfFiles = @()
                 $wuaCacheReady = $false
                 $wuaDownloadError = ''
+                $wuaResultCode = 2
                 $directFailure = ''
                 try {
                     try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
@@ -7536,34 +7549,69 @@ function Start-AMRDriverUpdateAction {
                     $savedFolder = $null
                     $savedFiles = @()
                     try {
-                        $downloader = $session.CreateUpdateDownloader()
-                        $downloader.Updates = $collection
-                        $initialProgress = [pscustomobject]@{ Percent=0; BytesDownloaded=0; BytesTotal=[int64]$target.MaxDownloadSize; SpeedBytesPerSecond=0; Stage='WuaFallbackDownload'; Updated=(Get-Date).ToString('o') }
-                        $initialProgress | ConvertTo-Json -Compress | Set-Content -LiteralPath $ProgressFile -Encoding UTF8
-                        $downloadJob = $downloader.BeginDownload($null,$null,$null)
-                        $downloadStarted = Get-Date; $previousProgressBytes = [int64]0; $previousProgressAt = Get-Date
-                        while (-not [bool]$downloadJob.IsCompleted) {
-                            if (((Get-Date) - $downloadStarted).TotalMinutes -gt 180) { try { $downloadJob.RequestAbort() } catch {}; throw 'Windows Update fallback exceeded the 180-minute safety timeout.' }
-                            try {
-                                $downloadProgress = $downloadJob.GetProgress()
-                                $percent = [int][Math]::Max(0,[Math]::Min(100,[double]$downloadProgress.CurrentUpdatePercentComplete))
-                                $bytesDone = [int64]$downloadProgress.CurrentUpdateBytesDownloaded
-                                $bytesTotal = [int64]$downloadProgress.CurrentUpdateBytesToDownload
-                                if ($bytesTotal -le 0) { $bytesDone = [int64]$downloadProgress.TotalBytesDownloaded; $bytesTotal = [int64]$downloadProgress.TotalBytesToDownload }
-                                $progressNow = Get-Date; $elapsedSeconds = [Math]::Max(0.1,($progressNow - $previousProgressAt).TotalSeconds)
-                                $speedBytesPerSecond = [Math]::Max(0,($bytesDone - $previousProgressBytes) / $elapsedSeconds)
-                                $progressPayload = [pscustomobject]@{ Percent=$percent; BytesDownloaded=$bytesDone; BytesTotal=$bytesTotal; SpeedBytesPerSecond=$speedBytesPerSecond; Stage='WuaFallbackDownload'; Updated=$progressNow.ToString('o') }
-                                $previousProgressBytes = $bytesDone; $previousProgressAt = $progressNow
-                                $progressPayload | ConvertTo-Json -Compress | Set-Content -LiteralPath ($ProgressFile + '.tmp') -Encoding UTF8
-                                Move-Item -LiteralPath ($ProgressFile + '.tmp') -Destination $ProgressFile -Force
-                            } catch {}
-                            Start-Sleep -Milliseconds 500
+                        if ($null -eq $session) { throw 'Windows Update session is unavailable in the driver worker.' }
+                        if ($null -eq $target) { throw 'The selected Windows Update driver object is unavailable; run Scan Device again.' }
+                        if ($null -eq $collection -or [int]$collection.Count -lt 1) { throw 'The Windows Update collection is empty; the selected update cannot be downloaded.' }
+
+                        # A previously cached update does not need a second BeginDownload call.
+                        # This also avoids a null async-job/result path on already-downloaded items.
+                        if ([bool]$target.IsDownloaded) {
+                            $wuaCacheReady = $true
+                            $itemResult = $null
+                        } else {
+                            $downloader = $session.CreateUpdateDownloader()
+                            if ($null -eq $downloader) { throw 'Windows Update did not create a download service object.' }
+                            $downloader.Updates = $collection
+                            $initialBytesTotal = [int64]0
+                            try { $initialBytesTotal = [int64]$target.MaxDownloadSize } catch {}
+                            $initialProgress = [pscustomobject]@{ Percent=0; BytesDownloaded=0; BytesTotal=$initialBytesTotal; SpeedBytesPerSecond=0; Stage='WuaFallbackDownload'; Updated=(Get-Date).ToString('o') }
+                            $initialProgress | ConvertTo-Json -Compress | Set-Content -LiteralPath $ProgressFile -Encoding UTF8
+                            $downloadJob = $downloader.BeginDownload($null,$null,$null)
+                            if ($null -eq $downloadJob) { throw 'Windows Update did not return an asynchronous download job.' }
+                            $downloadStarted = Get-Date; $previousProgressBytes = [int64]0; $previousProgressAt = Get-Date
+                            while (-not [bool]$downloadJob.IsCompleted) {
+                                if (((Get-Date) - $downloadStarted).TotalMinutes -gt 180) { try { $downloadJob.RequestAbort() } catch {}; throw 'Windows Update fallback exceeded the 180-minute safety timeout.' }
+                                try {
+                                    $downloadProgress = $downloadJob.GetProgress()
+                                    if ($null -ne $downloadProgress) {
+                                        $percent = [int][Math]::Max(0,[Math]::Min(100,[double]$downloadProgress.CurrentUpdatePercentComplete))
+                                        $bytesDone = [int64]$downloadProgress.CurrentUpdateBytesDownloaded
+                                        $bytesTotal = [int64]$downloadProgress.CurrentUpdateBytesToDownload
+                                        if ($bytesTotal -le 0) { $bytesDone = [int64]$downloadProgress.TotalBytesDownloaded; $bytesTotal = [int64]$downloadProgress.TotalBytesToDownload }
+                                        $progressNow = Get-Date; $elapsedSeconds = [Math]::Max(0.1,($progressNow - $previousProgressAt).TotalSeconds)
+                                        $speedBytesPerSecond = [Math]::Max(0,($bytesDone - $previousProgressBytes) / $elapsedSeconds)
+                                        $progressPayload = [pscustomobject]@{ Percent=$percent; BytesDownloaded=$bytesDone; BytesTotal=$bytesTotal; SpeedBytesPerSecond=$speedBytesPerSecond; Stage='WuaFallbackDownload'; Updated=$progressNow.ToString('o') }
+                                        $previousProgressBytes = $bytesDone; $previousProgressAt = $progressNow
+                                        $progressPayload | ConvertTo-Json -Compress | Set-Content -LiteralPath ($ProgressFile + '.tmp') -Encoding UTF8
+                                        Move-Item -LiteralPath ($ProgressFile + '.tmp') -Destination $ProgressFile -Force
+                                    }
+                                } catch {}
+                                Start-Sleep -Milliseconds 500
+                            }
+                            $downloadResult = $downloader.EndDownload($downloadJob)
+                            if ($null -eq $downloadResult) { throw 'Windows Update completed its download job but returned no download result object.' }
+                            $itemResult = $downloadResult.GetUpdateResult(0)
+                            if ($null -eq $itemResult) { throw 'Windows Update returned no per-update download result for the selected driver.' }
+                            $wuaResultCode = [int]$itemResult.ResultCode
+                            if ($wuaResultCode -ne 2) { throw ('Windows Update fallback did not complete successfully. Result code: {0}; HRESULT: 0x{1:X8}.' -f $wuaResultCode,[int]$itemResult.HResult) }
+                            # Re-query the exact update after download; some WUA COM proxies retain
+                            # a stale IsDownloaded value on the original search object.
+                            if (-not [bool]$target.IsDownloaded) {
+                                try {
+                                    $verifySearcher = $session.CreateUpdateSearcher()
+                                    $verifyResult = $verifySearcher.Search("IsInstalled=0 and IsHidden=0 and Type='Driver'")
+                                    for ($verifyIndex = 0; $verifyIndex -lt $verifyResult.Updates.Count; $verifyIndex++) {
+                                        $verifyCandidate = $verifyResult.Updates.Item($verifyIndex)
+                                        if ([string]$verifyCandidate.Identity.UpdateID -eq [string]$TargetUpdateId -and [int]$verifyCandidate.Identity.RevisionNumber -eq [int]$TargetRevision) { $target = $verifyCandidate; break }
+                                    }
+                                } catch {}
+                            }
+                            if (-not [bool]$target.IsDownloaded) { throw 'Windows Update reported download success, but the exact selected update is not marked as downloaded in its cache.' }
+                            $wuaCacheReady = $true
                         }
-                        $downloadResult = $downloader.EndDownload($downloadJob)
-                        $itemResult = $downloadResult.GetUpdateResult(0)
-                        if (-not [bool]$target.IsDownloaded -or [int]$itemResult.ResultCode -ne 2) { throw ('Windows Update fallback did not complete successfully. Result code: {0}; HRESULT: 0x{1:X8}.' -f $itemResult.ResultCode,[int]$itemResult.HResult) }
-                        $wuaCacheReady = [bool]$target.IsDownloaded
-                    } catch { $wuaDownloadError = [string]$_.Exception.Message }
+                    } catch {
+                        $wuaDownloadError = [string]$_.Exception.ToString()
+                    }
                 }
                 if (-not $localInstallReady -and -not $wuaCacheReady) {
                     throw ('AMR internal engine failed: {0} Windows Update fallback failed: {1}' -f $savedCopyMessage,$wuaDownloadError)
@@ -7573,7 +7621,7 @@ function Start-AMRDriverUpdateAction {
                 } else {
                     $finalMessage = $savedCopyMessage + '. AMR could not safely prepare this package, so Windows Update fallback completed the download and prepared its trusted installation cache.'
                 }
-                [pscustomobject]@{ Success=$true; OutcomeStatus='Success'; WuaReady=[bool]$wuaCacheReady; InstallReady=([bool]($localInstallReady -or $wuaCacheReady)); LocalInstallReady=[bool]$localInstallReady; Action='Download'; Message=$finalMessage; RebootRequired=$false; ResultCode=$(if ($wuaCacheReady) { [int]$itemResult.ResultCode } else { 2 }); SavedCopy=$localInstallReady; SavedFolder=$savedFolder; SavedFiles=@($savedFiles); SavedCopyMessage=$savedCopyMessage; WuaDownloadError=$wuaDownloadError; DirectFailure=$directFailure }
+                [pscustomobject]@{ Success=$true; OutcomeStatus='Success'; WuaReady=[bool]$wuaCacheReady; InstallReady=([bool]($localInstallReady -or $wuaCacheReady)); LocalInstallReady=[bool]$localInstallReady; Action='Download'; Message=$finalMessage; RebootRequired=$false; ResultCode=$(if ($wuaCacheReady) { [int]$wuaResultCode } else { 2 }); SavedCopy=$localInstallReady; SavedFolder=$savedFolder; SavedFiles=@($savedFiles); SavedCopyMessage=$savedCopyMessage; WuaDownloadError=$wuaDownloadError; DirectFailure=$directFailure }
             } else {
                 # Prefer AMR's verified local package. Windows Update installation is retained
                 # only for updates whose package format required the fallback download path.
@@ -8106,6 +8154,8 @@ function Invoke-AMRDriverRollbackCheck {
 (C 'DriverOpenRecoveryBtn').Add_Click({ Open-AMRDriverRecoveryFolder })
 
 (C 'DriverSmartModeBtn').Add_Click({ Set-AMRDriverExperienceMode -Mode Smart })
+(C 'DriverSidebarSmartModeBtn').Add_Click({ Set-AMRDriverExperienceMode -Mode Smart })
+(C 'DriverSidebarAdvancedModeBtn').Add_Click({ Set-AMRDriverExperienceMode -Mode Advanced })
 (C 'DriverSmartSelectBtn').Add_Click({ Invoke-AMRSmartSelect })
 (C 'DriverStartSmartInstallBtn').Add_Click({ Start-AMRSmartInstall })
 (C 'DriverAdvancedModeBtn').Add_Click({ Set-AMRDriverExperienceMode -Mode Advanced })
