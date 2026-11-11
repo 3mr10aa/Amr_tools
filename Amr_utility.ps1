@@ -49,6 +49,13 @@ New-Item -ItemType Directory -Force -Path $script:BackupDir,$script:LogDir,$scri
 $script:LogFile = Join-Path $script:LogDir ("AMR_{0}.log" -f (Get-Date -Format 'yyyyMMdd'))
 $script:DiagnosticFile = Join-Path $script:LogDir ("AMR_Diagnostics_{0}.jsonl" -f (Get-Date -Format 'yyyyMMdd'))
 $script:DriverHistoryFile = Join-Path $script:LogDir 'DriverCenterHistory.csv'
+$script:DriverDiagnosticFile = Join-Path $script:LogDir ("AMR_DriverDiagnostics_{0}.jsonl" -f (Get-Date -Format 'yyyyMMdd'))
+$script:DriverDiagnosticMaxBytes = 5MB
+$script:DriverDiagnosticRetentionFiles = 5
+$script:DriverCurrentScanId = $null
+$script:DriverCurrentOperationId = $null
+$script:DriverDiagnosticLastRefresh = [datetime]::MinValue
+$script:DriverDiagnosticLastFilter = ''
 $script:DriverRestorePointStateFile = Join-Path $script:LogDir 'DriverCenterRestorePoint.json'
 $script:AMRSessionId = [guid]::NewGuid().ToString()
 
@@ -72,6 +79,8 @@ $script:DriverActionProgressFile = $null
 $script:DriverActionUpdateId = $null
 $script:DriverActionType = $null
 $script:DriverActionDeviceName = $null
+$script:DriverActionDeviceId = $null
+$script:DriverActionSource = $null
 $script:DriverActionUpdateTitle = $null
 $script:DriverActionVersion = $null
 $script:DriverBatchActive = $false
@@ -237,6 +246,15 @@ function Write-AMRLog {
     $logLine = "[$time] [$Level] [$Area] $Message"
     
     try { Add-Content -LiteralPath $script:LogFile -Value $logLine -Encoding UTF8 -ErrorAction Stop } catch { Write-AMRDiagnostic -Severity 'ERROR' -Area 'Logging' -Operation 'AppendMainLog' -Message 'Could not append to the main application log.' -ErrorRecord $_ -Target $script:LogFile }
+
+    # Bridge legacy Driver Center events that historically landed in Overview into
+    # the dedicated structured stream; preserve the original Main Log and UI routing.
+    if ($Area -eq 'Overview' -and $Message -match '(?i)driver|catalog|pnputil|rollback|restore point|device scan|oem bundle') {
+        try {
+            $driverSeverity = switch ($Level) { 'SUCCESS' {'SUCCESS'} 'WARNING' {'WARNING'} 'ERROR' {'ERROR'} 'DEBUG' {'DEBUG'} default {'INFO'} }
+            Write-AMRDriverDiagnostic -Severity $driverSeverity -Operation 'LegacyDriverEvent' -Stage 'LegacyLogBridge' -Message $Message -Source 'Write-AMRLog' -Result $Level
+        } catch {}
+    }
     
     if ($script:Window) {
         try {
@@ -259,6 +277,178 @@ function Write-AMRLog {
                 $script:Status.Text = "[$Area] $Message"
             })
         } catch { Write-AMRDiagnostic -Severity 'WARNING' -Area 'Logging' -Operation 'UpdateStatusBar' -Message 'Could not update the WPF status bar.' -ErrorRecord $_ }
+    }
+}
+
+# --- Driver Center: structured, persistent diagnostic event stream ---
+function ConvertTo-AMRDriverSafeDiagnosticText {
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return $null }
+    $text = [string]$Value
+    # Keep useful troubleshooting context while removing common credential/token patterns.
+    $text = [regex]::Replace($text, '(?i)(password|passwd|token|access[_-]?token|refresh[_-]?token|client[_-]?secret|api[_-]?key)(\s*[=:]\s*)[^\s;&,]+', '$1$2[REDACTED]')
+    $text = [regex]::Replace($text, '(?i)("(?:password|passwd|token|access[_-]?token|refresh[_-]?token|client[_-]?secret|api[_-]?key)"\s*:\s*")[^"]*(")', '$1[REDACTED]$2')
+    $text = [regex]::Replace($text, '(?i)(https?://[^\s/?#]+/[^\s?#]*\?)[^\s#]+', '$1[QUERY_REDACTED]')
+    if ($text.Length -gt 4000) { $text = $text.Substring(0,4000) + '…[TRUNCATED]' }
+    return $text
+}
+
+function Write-AMRDriverDiagnostic {
+    [CmdletBinding()]
+    param(
+        [ValidateSet('INFO','SUCCESS','WARNING','ERROR','DEBUG','TRACE')][string]$Severity = 'INFO',
+        [string]$Operation = 'DriverCenter',
+        [string]$Stage = 'General',
+        [string]$Message = '',
+        [string]$ScanId = '',
+        [string]$DeviceId = '',
+        [string]$OperationId = '',
+        [string]$Source = '',
+        [Nullable[long]]$DurationMs = $null,
+        [string]$Result = '',
+        [object]$ErrorRecord = $null,
+        [object]$Context = $null,
+        [string]$FunctionName = '',
+        [string]$File = '',
+        [Nullable[int]]$Line = $null,
+        [string]$StackTrace = ''
+    )
+    try {
+        if ([string]::IsNullOrWhiteSpace($ScanId)) { $ScanId = [string]$script:DriverCurrentScanId }
+        if ([string]::IsNullOrWhiteSpace($OperationId)) { $OperationId = [string]$script:DriverCurrentOperationId }
+        $exceptionType = $null; $exceptionMessage = $null; $errorStack = $null; $errorFile = $null; $errorLine = $null; $errorFunction = $null
+        if ($null -ne $ErrorRecord) {
+            if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) {
+                if ($ErrorRecord.Exception) { $exceptionType = $ErrorRecord.Exception.GetType().FullName; $exceptionMessage = $ErrorRecord.Exception.Message }
+                $errorStack = [string]$ErrorRecord.ScriptStackTrace
+                if ($ErrorRecord.InvocationInfo) {
+                    $errorFile = [string]$ErrorRecord.InvocationInfo.ScriptName
+                    $errorLine = [int]$ErrorRecord.InvocationInfo.ScriptLineNumber
+                    $errorFunction = [string]$ErrorRecord.InvocationInfo.MyCommand.Name
+                }
+            } elseif ($ErrorRecord -is [System.Exception]) {
+                $exceptionType = $ErrorRecord.GetType().FullName; $exceptionMessage = $ErrorRecord.Message; $errorStack = [string]$ErrorRecord.StackTrace
+            } else { $exceptionMessage = [string]$ErrorRecord }
+        }
+        if ([string]::IsNullOrWhiteSpace($FunctionName)) { $FunctionName = $errorFunction }
+        if ([string]::IsNullOrWhiteSpace($File)) { $File = $errorFile }
+        if ($null -eq $Line -and $null -ne $errorLine) { $Line = [Nullable[int]]$errorLine }
+        if ([string]::IsNullOrWhiteSpace($StackTrace)) { $StackTrace = $errorStack }
+        $safeContext = $null
+        if ($null -ne $Context) {
+            try {
+                $safeContextJson = ConvertTo-AMRDriverSafeDiagnosticText -Value (ConvertTo-Json -InputObject $Context -Depth 8 -Compress -ErrorAction Stop)
+                try { $safeContext = ConvertFrom-Json -InputObject $safeContextJson -ErrorAction Stop } catch { $safeContext = $safeContextJson }
+            } catch { $safeContext = ConvertTo-AMRDriverSafeDiagnosticText -Value $Context }
+        }
+        $record = [ordered]@{
+            Timestamp = (Get-Date).ToString('o')
+            Severity = $Severity
+            Operation = (ConvertTo-AMRDriverSafeDiagnosticText $Operation)
+            Stage = (ConvertTo-AMRDriverSafeDiagnosticText $Stage)
+            ScanId = $ScanId
+            DeviceId = (ConvertTo-AMRDriverSafeDiagnosticText $DeviceId)
+            OperationId = $OperationId
+            Source = (ConvertTo-AMRDriverSafeDiagnosticText $Source)
+            DurationMs = $DurationMs
+            Result = (ConvertTo-AMRDriverSafeDiagnosticText $Result)
+            Message = (ConvertTo-AMRDriverSafeDiagnosticText $Message)
+            Error = $(if ($exceptionMessage) { ConvertTo-AMRDriverSafeDiagnosticText $exceptionMessage } else { $null })
+            ExceptionType = $exceptionType
+            Context = $safeContext
+            Function = (ConvertTo-AMRDriverSafeDiagnosticText $FunctionName)
+            File = (ConvertTo-AMRDriverSafeDiagnosticText $File)
+            Line = $Line
+            StackTrace = (ConvertTo-AMRDriverSafeDiagnosticText $StackTrace)
+            SessionId = [string]$script:AMRSessionId
+        }
+        $lineText = ConvertTo-Json -InputObject $record -Depth 10 -Compress -ErrorAction Stop
+        $path = [string]$script:DriverDiagnosticFile
+        if ([string]::IsNullOrWhiteSpace($path)) { return }
+        $mutex = $null; $hasMutex = $false
+        try {
+            $mutex = [System.Threading.Mutex]::new($false, 'Local\AMR_DriverDiagnosticLog')
+            try { $hasMutex = $mutex.WaitOne(2500) } catch [System.Threading.AbandonedMutexException] { $hasMutex = $true }
+            if (-not $hasMutex) { throw 'Timed out waiting for the Driver Diagnostic Log writer lock.' }
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+                $currentLength = (Get-Item -LiteralPath $path -ErrorAction Stop).Length
+                if ($currentLength -ge [int64]$script:DriverDiagnosticMaxBytes) {
+                    for ($index = [int]$script:DriverDiagnosticRetentionFiles; $index -ge 1; $index--) {
+                        $sourcePath = if ($index -eq 1) { $path } else { '{0}.{1}' -f $path,($index - 1) }
+                        $destinationPath = '{0}.{1}' -f $path,$index
+                        if (Test-Path -LiteralPath $sourcePath -PathType Leaf) {
+                            if (Test-Path -LiteralPath $destinationPath -PathType Leaf) { Remove-Item -LiteralPath $destinationPath -Force -ErrorAction Stop }
+                            Move-Item -LiteralPath $sourcePath -Destination $destinationPath -ErrorAction Stop
+                        }
+                    }
+                }
+            }
+            [System.IO.File]::AppendAllText($path, $lineText + [Environment]::NewLine, ([System.Text.UTF8Encoding]::new($false)))
+        } finally {
+            if ($hasMutex -and $mutex) { try { $mutex.ReleaseMutex() } catch {} }
+            if ($mutex) { $mutex.Dispose() }
+        }
+    } catch {
+        # Diagnostics must never interrupt a driver operation. Use a separate last-resort file.
+        try {
+            $fallback = Join-Path $env:TEMP 'AMR_DriverDiagnostics_Fallback.log'
+            $fallbackLine = '[{0}] [{1}] Driver diagnostic write failed: {2}' -f (Get-Date -Format 'o'),$Severity,$_.Exception.Message
+            [System.IO.File]::AppendAllText($fallback, $fallbackLine + [Environment]::NewLine, ([System.Text.UTF8Encoding]::new($false)))
+        } catch {}
+    }
+}
+
+function Refresh-AMRDriverLogView {
+    param([string]$SearchText = '', [string]$Severity = 'All', [switch]$Force)
+    $control = $script:DriverLogConsole
+    if (-not $control) { return }
+    try {
+        $path = [string]$script:DriverDiagnosticFile
+        $logPaths = @()
+        for ($rotationIndex = [int]$script:DriverDiagnosticRetentionFiles; $rotationIndex -ge 1; $rotationIndex--) {
+            $rotatedPath = '{0}.{1}' -f $path,$rotationIndex
+            if (Test-Path -LiteralPath $rotatedPath -PathType Leaf) { $logPaths += $rotatedPath }
+        }
+        if (Test-Path -LiteralPath $path -PathType Leaf) { $logPaths += $path }
+        if ($logPaths.Count -eq 0) {
+            $control.Text = 'No Driver Center diagnostic events have been recorded yet.'
+            $script:DriverDiagnosticLastRefresh = [datetime]::MinValue
+            $script:DriverDiagnosticLastFilter = ($Severity + '|' + $SearchText)
+            return
+        }
+        $latestWrite = [datetime]::MinValue
+        foreach ($existingLogPath in $logPaths) { $writeTime = (Get-Item -LiteralPath $existingLogPath -ErrorAction Stop).LastWriteTimeUtc; if ($writeTime -gt $latestWrite) { $latestWrite = $writeTime } }
+        $filterKey = $Severity + '|' + $SearchText
+        if (-not $Force -and $latestWrite -eq $script:DriverDiagnosticLastRefresh -and $filterKey -eq $script:DriverDiagnosticLastFilter) { return }
+        $lineBuffer = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($logPath in $logPaths) {
+            if (Test-Path -LiteralPath $logPath -PathType Leaf) {
+                foreach ($logLine in @(Get-Content -LiteralPath $logPath -Tail 3000 -Encoding UTF8 -ErrorAction Stop)) { $lineBuffer.Add([string]$logLine) }
+            }
+        }
+        $lines = @($lineBuffer | Select-Object -Last 5000)
+        $display = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($rawLine in $lines) {
+            if ([string]::IsNullOrWhiteSpace($rawLine)) { continue }
+            try { $event = ConvertFrom-Json -InputObject $rawLine -ErrorAction Stop } catch { continue }
+            if ($Severity -and $Severity -ne 'All' -and [string]$event.Severity -ne $Severity) { continue }
+            if ($SearchText -and $rawLine.IndexOf($SearchText,[StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+            $durationText = if ($null -ne $event.DurationMs -and [string]$event.DurationMs -ne '') { ' | ' + [string]$event.DurationMs + ' ms' } else { '' }
+            $deviceText = if ($event.DeviceId) { ' | Device=' + [string]$event.DeviceId } else { '' }
+            $resultText = if ($event.Result) { ' | Result=' + [string]$event.Result } else { '' }
+            $display.Add(('[{0}] [{1}] [{2}/{3}] {4}{5}{6}{7}' -f $event.Timestamp,$event.Severity,$event.Operation,$event.Stage,$event.Message,$deviceText,$durationText,$resultText))
+            if ($event.ScanId -or $event.OperationId -or $event.Source) { $display.Add(('    Correlation: ScanId={0} | OperationId={1} | Source={2}' -f [string]$event.ScanId,[string]$event.OperationId,[string]$event.Source)) }
+            if ($event.Error) { $display.Add('    Error: ' + [string]$event.Error) }
+            if ($event.Context) { $display.Add('    Context: ' + (ConvertTo-Json -InputObject $event.Context -Depth 8 -Compress)) }
+            if ($event.Function -or $event.File -or $event.Line) { $display.Add(('    Location: Function={0} | File={1} | Line={2}' -f [string]$event.Function,[string]$event.File,[string]$event.Line)) }
+            if ($event.StackTrace) { $display.Add('    Stack: ' + [string]$event.StackTrace) }
+        }
+        $control.Text = if ($display.Count -gt 0) { $display -join "`r`n" } else { 'No events match the current filters.' }
+        $control.ScrollToEnd()
+        $script:DriverDiagnosticLastRefresh = $latestWrite
+        $script:DriverDiagnosticLastFilter = $filterKey
+    } catch {
+        try { $control.Text = 'Could not load Driver Center diagnostics: ' + $_.Exception.Message } catch {}
     }
 }
 
@@ -4164,6 +4354,21 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
        <TabItem Header="🧹 Cleanup Logs">
         <TextBox Name="LogConsoleCleanup" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#09090B" Foreground="#22D3EE" FontFamily="Consolas" FontSize="13" Padding="15" AcceptsReturn="True"/>
        </TabItem>
+       <TabItem Header="🧩 Drivers">
+        <Grid Background="#09090B" Margin="4">
+         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+         <DockPanel Grid.Row="0" Margin="8,8,8,10" LastChildFill="False">
+          <TextBox Name="DriverLogSearchBox" Width="260" Height="30" Margin="0,0,8,0" VerticalContentAlignment="Center" Background="#18181B" Foreground="#E4E4E7" BorderBrush="#52525B" ToolTip="Search driver events, device IDs, operation IDs, sources and errors"/>
+          <ComboBox Name="DriverLogSeverityFilter" Width="125" Height="30" Margin="0,0,8,0" SelectedIndex="0" Background="#18181B" Foreground="#E4E4E7">
+           <ComboBoxItem Content="All"/><ComboBoxItem Content="INFO"/><ComboBoxItem Content="SUCCESS"/><ComboBoxItem Content="WARNING"/><ComboBoxItem Content="ERROR"/><ComboBoxItem Content="DEBUG"/><ComboBoxItem Content="TRACE"/>
+          </ComboBox>
+          <Button Name="DriverLogRefreshBtn" Content="↻ Refresh" Padding="12,5" Margin="0,0,8,0"/>
+          <Button Name="DriverLogCopyBtn" Content="Copy Visible" Padding="12,5" Margin="0,0,8,0"/>
+          <Button Name="DriverLogExportBtn" Content="Export Drivers Log" Padding="12,5"/>
+         </DockPanel>
+         <TextBox Grid.Row="1" Name="DriverLogConsole" IsReadOnly="True" TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#09090B" Foreground="#A7F3D0" FontFamily="Consolas" FontSize="12" Padding="12" AcceptsReturn="True"/>
+        </Grid>
+       </TabItem>
       </TabControl>
      </Grid>
     </Border>
@@ -4250,6 +4455,7 @@ $script:LogControls['Software']  = C 'LogConsoleSoftware'
 $script:LogControls['Customize'] = C 'LogConsoleCustomize'
 $script:LogControls['Tweaks']    = C 'LogConsoleTweaks'
 $script:LogControls['Cleanup']   = C 'LogConsoleCleanup'
+$script:DriverLogConsole = C 'DriverLogConsole'
 
 # Logs Tab Actions
 (C 'ClearAllLogsBtn').Add_Click({
@@ -4259,17 +4465,72 @@ $script:LogControls['Cleanup']   = C 'LogConsoleCleanup'
     Write-AMRLog "All log consoles cleared." INFO System
 })
 
+$driverLogRefreshAction = {
+    $search = [string](C 'DriverLogSearchBox').Text
+    $severityItem = (C 'DriverLogSeverityFilter').SelectedItem
+    $severity = if ($severityItem) { [string]$severityItem.Content } else { 'All' }
+    Refresh-AMRDriverLogView -SearchText $search -Severity $severity -Force
+}
+(C 'DriverLogRefreshBtn').Add_Click($driverLogRefreshAction)
+(C 'DriverLogSearchBox').Add_TextChanged($driverLogRefreshAction)
+(C 'DriverLogSeverityFilter').Add_SelectionChanged($driverLogRefreshAction)
+(C 'DriverLogCopyBtn').Add_Click({
+    try { [System.Windows.Clipboard]::SetText([string](C 'DriverLogConsole').Text); Write-AMRLog 'Copied the visible Driver Center diagnostic events.' SUCCESS System }
+    catch { Show-AMRMessage ('Could not copy Driver Center diagnostics: ' + $_.Exception.Message) 'Copy Diagnostics' OK Warning | Out-Null }
+})
+(C 'DriverLogExportBtn').Add_Click({
+    try {
+        $exportStamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+        $destination = Join-Path $script:ExportDir ("AMR_DriverDiagnostics_{0}.jsonl" -f $exportStamp)
+        $exportedFiles = @()
+        for ($rotationIndex = [int]$script:DriverDiagnosticRetentionFiles; $rotationIndex -ge 1; $rotationIndex--) {
+            $rotatedPath = '{0}.{1}' -f $script:DriverDiagnosticFile,$rotationIndex
+            if (Test-Path -LiteralPath $rotatedPath -PathType Leaf) {
+                $rotatedDestination = Join-Path $script:ExportDir ("AMR_DriverDiagnostics_{0}.{1}.jsonl" -f $exportStamp,$rotationIndex)
+                Copy-Item -LiteralPath $rotatedPath -Destination $rotatedDestination -Force -ErrorAction Stop
+                $exportedFiles += $rotatedDestination
+            }
+        }
+        if (Test-Path -LiteralPath $script:DriverDiagnosticFile -PathType Leaf) { Copy-Item -LiteralPath $script:DriverDiagnosticFile -Destination $destination -Force -ErrorAction Stop }
+        else { [System.IO.File]::WriteAllText($destination,'',([System.Text.UTF8Encoding]::new($false))) }
+        $exportedFiles += $destination
+        Show-AMRMessage ('Driver Center diagnostics exported (' + $exportedFiles.Count + ' file(s)):' + "`n" + ($exportedFiles -join "`n")) 'Driver Diagnostics Export' OK Information | Out-Null
+        Write-AMRLog ('Exported Driver Center diagnostic log: ' + $destination) SUCCESS System
+    } catch { Write-AMRDriverDiagnostic -Severity ERROR -Operation LogExport -Stage Failed -Message 'Could not export Driver Center diagnostics.' -ErrorRecord $_; Show-AMRMessage ('Export failed: ' + $_.Exception.Message) 'Driver Diagnostics Export' OK Error | Out-Null }
+})
+$script:DriverLogRefreshTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:DriverLogRefreshTimer.Interval = [TimeSpan]::FromSeconds(2)
+$script:DriverLogRefreshTimer.Add_Tick({
+    if ($script:DriverLogConsole -and $script:DriverLogConsole.IsVisible) {
+        $search = [string](C 'DriverLogSearchBox').Text
+        $severityItem = (C 'DriverLogSeverityFilter').SelectedItem
+        $severity = if ($severityItem) { [string]$severityItem.Content } else { 'All' }
+        Refresh-AMRDriverLogView -SearchText $search -Severity $severity
+    }
+})
+$script:DriverLogRefreshTimer.Start()
+Refresh-AMRDriverLogView -Force
+
 (C 'ExportLogsBtn').Add_Click({
     try {
         $exportPath = Join-Path $script:ExportDir ("AMR_Log_Export_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
         Copy-Item -LiteralPath $script:LogFile -Destination $exportPath -Force -ErrorAction Stop
         $diagnosticExportPath = Join-Path $script:ExportDir ("AMR_Diagnostics_Export_{0}.jsonl" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+        $driverDiagnosticExportPath = Join-Path $script:ExportDir ("AMR_DriverDiagnostics_Export_{0}.jsonl" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+        $driverDiagnosticExported = $false
+        if (Test-Path -LiteralPath $script:DriverDiagnosticFile -PathType Leaf -ErrorAction Stop) {
+            Copy-Item -LiteralPath $script:DriverDiagnosticFile -Destination $driverDiagnosticExportPath -Force -ErrorAction Stop
+            $driverDiagnosticExported = $true
+        }
         $diagnosticExported = $false
         if (Test-Path -LiteralPath $script:DiagnosticFile -PathType Leaf -ErrorAction Stop) {
             Copy-Item -LiteralPath $script:DiagnosticFile -Destination $diagnosticExportPath -Force -ErrorAction Stop
             $diagnosticExported = $true
         }
-        $exportMessage = if ($diagnosticExported) { "Application log and diagnostic log exported:`n$exportPath`n$diagnosticExportPath" } else { "Application log exported:`n$exportPath`nNo diagnostic file exists yet." }
+        $exportMessage = "Application log exported:`n$exportPath"
+        if ($diagnosticExported) { $exportMessage += "`nApplication diagnostics:`n$diagnosticExportPath" }
+        if ($driverDiagnosticExported) { $exportMessage += "`nDriver Center diagnostics:`n$driverDiagnosticExportPath" }
+        if (-not $diagnosticExported -and -not $driverDiagnosticExported) { $exportMessage += "`nNo diagnostic files exist yet." }
         Show-AMRMessage $exportMessage "Export Complete" OK Information | Out-Null
         Write-AMRLog "Exported application log to: $exportPath" SUCCESS System
     } catch {
@@ -6066,6 +6327,10 @@ function Start-AMRDriverScan {
     }
     if($script:DriverOperationState.State -eq 'Running'){return}
     $script:DriverScanGeneration = [int]$script:DriverScanGeneration + 1
+    $script:DriverCurrentScanId = [guid]::NewGuid().ToString('N')
+    $script:DriverCurrentOperationId = $script:DriverCurrentScanId
+    $script:DriverScanStartedAt = Get-Date
+    Write-AMRDriverDiagnostic -Severity INFO -Operation DeviceScan -Stage Started -Message 'Driver Center device discovery started.' -ScanId $script:DriverCurrentScanId -OperationId $script:DriverCurrentScanId -Source 'Start-AMRDriverScan' -Context @{Generation=$script:DriverScanGeneration;Computer=$env:COMPUTERNAME}
 
     try {
         $button.IsEnabled = $false
@@ -6564,6 +6829,7 @@ function Start-AMRDriverScan {
                         if ($scanButton) { $scanButton.IsEnabled = $true; $scanButton.Content = '⌕  Scan Device' }
                         (C 'DriverScanStatus').Text = 'Scan stopped because its background job reference was lost. Start a new scan; review Diagnostics if this repeats.'
                         Write-AMRDiagnostic -Severity 'ERROR' -Area 'DriverCenter' -Operation 'ScanJobMissing' -Message 'The scan timer fired but DriverScanJob was null; UI state was recovered.'
+                        Write-AMRDriverDiagnostic -Severity ERROR -Operation DeviceScan -Stage JobReferenceLost -Message 'The scan timer lost its background job reference; the interface was recovered and a new scan is required.' -ScanId $script:DriverCurrentScanId -OperationId $script:DriverCurrentScanId -Source 'DriverScanTimer' -Result 'Failed'
                         Update-AMRDriverActionButtons
                     } catch { Write-AMRDiagnostic -Severity 'ERROR' -Area 'DriverCenter' -Operation 'ScanJobMissingRecovery' -Message 'Failed to recover the scan UI after the background job reference was lost.' -ErrorRecord $_ }
                     return
@@ -6576,6 +6842,7 @@ function Start-AMRDriverScan {
                             $script:DriverScanPartialShown = $true
                             $stage = $hardwareStage[0]
                             $stageDevices = @($stage.Devices)
+                            Write-AMRDriverDiagnostic -Severity TRACE -Operation DeviceScan -Stage HardwareInventoryReady -Message 'Initial Plug and Play hardware inventory is available; Windows Update matching is continuing.' -ScanId $script:DriverCurrentScanId -OperationId $script:DriverCurrentScanId -Source 'HardwareDiscoveryWorker' -DurationMs ([long]((Get-Date)-$script:DriverScanStartedAt).TotalMilliseconds) -Context @{DeviceCount=$stageDevices.Count;Generation=$script:DriverScanGeneration;ComputerModel=[string]$stage.ComputerModel;Manufacturer=[string]$stage.ComputerManufacturer}
                             $script:DriverAllDeviceRows = @($stageDevices)
                             (C 'DriverComputerModel').Text = $(if([string]::IsNullOrWhiteSpace([string]$stage.ComputerModel)){'Model unavailable'}else{[string]$stage.ComputerModel})
                             (C 'DriverComputerManufacturer').Text = 'Manufacturer: ' + $(if($stage.ComputerManufacturer){[string]$stage.ComputerManufacturer}else{'Unknown'})
@@ -6590,6 +6857,7 @@ function Start-AMRDriverScan {
                         }
                     } catch {
                         Write-AMRDiagnostic -Severity 'WARNING' -Area 'DriverCenter' -Operation 'ProgressiveHardwareDisplay' -Message ([string]$_.Exception.Message) -ErrorRecord $_
+                        Write-AMRDriverDiagnostic -Severity WARNING -Operation DeviceScan -Stage PartialDisplayFailed -Message 'The progressive hardware inventory could not be displayed while the scan continued.' -ScanId $script:DriverCurrentScanId -OperationId $script:DriverCurrentScanId -Source 'DriverScanTimer' -ErrorRecord $_
                     }
                     return
                 }
@@ -6677,11 +6945,13 @@ function Start-AMRDriverScan {
                     $supportButton.IsEnabled = $true
                     $supportButton.Content = 'Open ' + $support.Name + ' ↗'
                     Write-AMRLog ("Driver Center scan completed. Computer='{0} {1}', SystemClass='{2}', Platform='{3}', IdentityConfidence='{4}', SKU='{5}', Board='{6}', Boards={7}, CPUs={8}, GPUs={9}, Devices={10}, Issues={11}, WU candidates={12}, WU device matches={13}, multi-candidate devices={14}, WU status={15}, Support='{16}', Hardware={17}s, WU={18}s, Enrichment={19}s, Total={20}s." -f $scanResult.ComputerManufacturer, $scanResult.ComputerModel, $scanResult.SystemClass, $scanResult.PlatformType, $scanResult.IdentityConfidence, $scanResult.ComputerSystemSKU, $scanResult.BoardProduct, @($scanResult.BoardInventory).Count, @($scanResult.ProcessorNames).Count, @($scanResult.VideoControllerNames).Count, $devices.Count, $issueCount, $scanResult.WUDriverCandidateCount, $scanResult.WUMatchedDeviceCount, $scanResult.WUMultipleCandidateDeviceCount, $scanResult.WUScanStatus, $support.Name, $scanResult.HardwareScanSeconds, $scanResult.WUScanSeconds, $scanResult.EnrichmentSeconds, $scanResult.TotalWorkerSeconds) SUCCESS Overview
+                    Write-AMRDriverDiagnostic -Severity SUCCESS -Operation DeviceScan -Stage Completed -Message 'Device discovery and driver inventory scan completed.' -ScanId $script:DriverCurrentScanId -OperationId $script:DriverCurrentScanId -Source 'CIM/WMI + Windows Update' -DurationMs ([long]((Get-Date)-$script:DriverScanStartedAt).TotalMilliseconds) -Result 'Completed' -Context @{DeviceCount=$devices.Count;IssueCount=$issueCount;InstalledDriverCount=$scanResult.InstalledDriverCount;WUCandidateCount=$scanResult.WUDriverCandidateCount;WUMatchedDeviceCount=$scanResult.WUMatchedDeviceCount;WUStatus=$scanResult.WUScanStatus;Generation=$script:DriverScanGeneration}
                 } catch {
                     $scanFailure = $_
                     $failureMessage = [string]$scanFailure.Exception.Message
                     try { (C 'DriverScanStatus').Text = 'Scan failed: ' + $failureMessage } catch {}
                     Write-AMRLog ('Driver Center scan failed: ' + $failureMessage) ERROR Overview
+                    Write-AMRDriverDiagnostic -Severity ERROR -Operation DeviceScan -Stage Failed -Message 'Driver Center device discovery failed.' -ScanId $script:DriverCurrentScanId -OperationId $script:DriverCurrentScanId -DurationMs ([long]((Get-Date)-$script:DriverScanStartedAt).TotalMilliseconds) -Result 'Failed' -ErrorRecord $scanFailure -Context @{Generation=$script:DriverScanGeneration}
                     Write-AMRDiagnostic -Severity 'ERROR' -Area 'DriverCenter' -Operation 'ScanResultProcessing' -Message $failureMessage -ErrorRecord $scanFailure -Target ('Generation='+[string]$script:DriverScanGeneration)
                 } finally {
                     try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
@@ -6920,8 +7190,12 @@ function Add-AMRDriverHistoryEntry {
         [string]$Update,
         [string]$Version,
         [string]$Status,
-        [string]$Details
+        [string]$Details,
+        [string]$DeviceInstanceId = '',
+        [string]$OperationId = ''
     )
+    if ([string]::IsNullOrWhiteSpace($OperationId)) { $OperationId = [guid]::NewGuid().ToString('N') }
+    $diagnosticDeviceId = if (-not [string]::IsNullOrWhiteSpace($DeviceInstanceId)) { $DeviceInstanceId } else { $Device }
     try {
         $entry = [pscustomobject]@{
             Timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
@@ -6937,7 +7211,9 @@ function Add-AMRDriverHistoryEntry {
         } else {
             $entry | Export-Csv -LiteralPath $script:DriverHistoryFile -NoTypeInformation -Encoding UTF8 -ErrorAction Stop
         }
+        Write-AMRDriverDiagnostic -Severity $(if ($Status -match '^(?i:success|installedandverified|installedrestartrequired)$') {'SUCCESS'} elseif ($Status -match '(?i)fail|error') {'ERROR'} else {'INFO'}) -Operation $Action -Stage HistoryRecorded -Message ('Driver history event recorded: ' + $Status) -DeviceId $diagnosticDeviceId -OperationId $OperationId -Source 'DriverCenterHistory' -Result $Status -Context @{DeviceName=$Device;Update=$Update;Version=$Version;Details=$Details}
     } catch {
+        Write-AMRDriverDiagnostic -Severity WARNING -Operation $Action -Stage HistoryWriteFailed -Message 'Could not persist the Driver Center history CSV entry.' -DeviceId $diagnosticDeviceId -OperationId $OperationId -Source 'Add-AMRDriverHistoryEntry' -Result 'Failed' -ErrorRecord $_ -Context @{DeviceName=$Device;Update=$Update;Version=$Version}
         Write-AMRLog ('Could not write Driver Center history: ' + $_.Exception.Message) WARNING Overview
     }
 }
@@ -7886,6 +8162,15 @@ function Start-AMRDriverUpdateAction {
             if ($script:DriverActionProgressFile -and (Test-Path -LiteralPath $script:DriverActionProgressFile -PathType Leaf)) {
                 try {
                     $progressData = Get-Content -LiteralPath $script:DriverActionProgressFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                    $progressStage = [string]$progressData.Stage
+                    if ($progressStage -and $progressStage -ne [string]$script:DriverActionLastLoggedStage) {
+                        $script:DriverActionLastLoggedStage = $progressStage
+                        $progressContext = @{Stage=$progressStage}
+                        foreach ($progressPropertyName in @('Percent','BytesDownloaded','BytesTotal','SpeedBytesPerSecond','FileIndex','FileCount')) {
+                            if ($progressData.PSObject.Properties[$progressPropertyName]) { $progressContext[$progressPropertyName] = $progressData.$progressPropertyName }
+                        }
+                        Write-AMRDriverDiagnostic -Severity TRACE -Operation ('Driver' + [string]$script:DriverActionType) -Stage $progressStage -Message 'Driver action worker reported a new progress stage.' -DeviceId ([string]$script:DriverActionDeviceId) -OperationId $script:DriverCurrentOperationId -Source 'DriverActionWorker' -Context $progressContext
+                    }
                     $progressPercent = [int][Math]::Max(0,[Math]::Min(100,[double]$progressData.Percent))
                     (C 'DriverOperationProgress').IsIndeterminate = $false
                     (C 'DriverOperationProgress').Value = $progressPercent
@@ -7989,9 +8274,10 @@ function Start-AMRDriverUpdateAction {
                 if ($null -ne $actionResult.DeviceConfigManagerErrorCode) { $historyDetails += '; DeviceConfigManagerErrorCode=' + [string]$actionResult.DeviceConfigManagerErrorCode }
                 $historyStatus = if ($actionResult.OutcomeStatus) { [string]$actionResult.OutcomeStatus } else { 'Success' }
                 if ($actionResult.HResult) { $historyDetails += ('; HResult=0x{0:X8}' -f [int]$actionResult.HResult) }
-                Add-AMRDriverHistoryEntry -Action $actionResult.Action -Device ([string]$script:DriverActionDeviceName) -Update ([string]$script:DriverActionUpdateTitle) -Version ([string]$script:DriverActionVersion) -Status $historyStatus -Details $historyDetails
+                Add-AMRDriverHistoryEntry -Action $actionResult.Action -Device ([string]$script:DriverActionDeviceName) -Update ([string]$script:DriverActionUpdateTitle) -Version ([string]$script:DriverActionVersion) -Status $historyStatus -Details $historyDetails -DeviceInstanceId ([string]$script:DriverActionDeviceId) -OperationId $script:DriverCurrentOperationId
                 $completionLogLevel = if ($historyStatus -in @('Success','InstalledAndVerified','InstalledRestartRequired')) { 'SUCCESS' } else { 'WARNING' }
                 Write-AMRLog ("Driver update {0} completed with status {1}. UpdateId={2}; ResultCode={3}; RebootRequired={4}." -f $actionResult.Action,$historyStatus,$script:DriverActionUpdateId,$actionResult.ResultCode,$actionResult.RebootRequired) $completionLogLevel Overview
+                Write-AMRDriverDiagnostic -Severity $(if ($completionLogLevel -eq 'SUCCESS') {'SUCCESS'} else {'WARNING'}) -Operation ('Driver' + [string]$actionResult.Action) -Stage Completed -Message ('Driver operation completed with status ' + $historyStatus + '.') -DeviceId ([string]$script:DriverActionDeviceId) -OperationId $script:DriverCurrentOperationId -Source ([string]$script:DriverActionSource) -DurationMs ([long]((Get-Date)-$script:DriverActionStartedAt).TotalMilliseconds) -Result $historyStatus -Context @{UpdateId=$script:DriverActionUpdateId;ResultCode=$actionResult.ResultCode;RebootRequired=[bool]$actionResult.RebootRequired;PostInstallVerification=$actionResult.PostInstallVerification;InstalledDriverVersion=$actionResult.InstalledDriverVersion}
                 if ($actionResult.Action -eq 'Install' -and $actionResult.RebootRequired -and -not $script:DriverBatchActive) {
                     Show-AMRMessage 'The driver installation completed and Windows reports that a restart is required. Save your work and restart when convenient.' 'Restart Required' OK Information | Out-Null
                 }
@@ -8001,8 +8287,9 @@ function Start-AMRDriverUpdateAction {
                 }
             } catch {
                 (C 'DriverActionStatus').Text = 'Driver operation failed: ' + $_.Exception.Message
-                Add-AMRDriverHistoryEntry -Action ([string]$script:DriverActionType) -Device ([string]$script:DriverActionDeviceName) -Update ([string]$script:DriverActionUpdateTitle) -Version ([string]$script:DriverActionVersion) -Status 'Failed' -Details ([string]$_.Exception.Message)
+                Add-AMRDriverHistoryEntry -Action ([string]$script:DriverActionType) -Device ([string]$script:DriverActionDeviceName) -Update ([string]$script:DriverActionUpdateTitle) -Version ([string]$script:DriverActionVersion) -Status 'Failed' -Details ([string]$_.Exception.Message) -DeviceInstanceId ([string]$script:DriverActionDeviceId) -OperationId $script:DriverCurrentOperationId
                 Write-AMRLog ('Driver update action failed: ' + $_.Exception.Message) ERROR Overview
+                Write-AMRDriverDiagnostic -Severity ERROR -Operation ('Driver' + [string]$script:DriverActionType) -Stage Failed -Message 'Driver download/install operation failed.' -DeviceId ([string]$script:DriverActionDeviceId) -OperationId $script:DriverCurrentOperationId -DurationMs ([long]((Get-Date)-$script:DriverActionStartedAt).TotalMilliseconds) -Result 'Failed' -ErrorRecord $_ -Context @{UpdateId=$script:DriverActionUpdateId;UpdateTitle=$script:DriverActionUpdateTitle;Version=$script:DriverActionVersion}
                 if ($script:DriverBatchActive -and $script:DriverActionType -eq 'Install') {
                     $script:DriverBatchResults += [pscustomobject]@{ Device=[string]$script:DriverActionDeviceName; Update=[string]$script:DriverActionUpdateTitle; Success=$false; RebootRequired=$false; Status='Failed'; Details=[string]$_.Exception.Message }
                 } elseif ($script:DriverSmartQueueActive -and [string]$script:DriverActionType -eq 'Download') {
@@ -8020,8 +8307,11 @@ function Start-AMRDriverUpdateAction {
                 $script:DriverActionUpdateId = $null
                 $script:DriverActionType = $null
                 $script:DriverActionDeviceName = $null
+                $script:DriverActionDeviceId = $null
+                $script:DriverActionSource = $null
                 $script:DriverActionUpdateTitle = $null
                 $script:DriverActionVersion = $null
+                $script:DriverCurrentOperationId = $null
                 (C 'DriverOperationProgress').Visibility = 'Collapsed'
                 (C 'DriverOperationProgress').Value = 0
                 if ($script:DriverActionProgressFile) {
@@ -8094,7 +8384,13 @@ function Start-AMRDriverUpdateAction {
     }
     $script:DriverActionUpdateId = $updateId
     $script:DriverActionType = $Action
+    $script:DriverCurrentOperationId = [guid]::NewGuid().ToString('N')
+    $script:DriverActionStartedAt = Get-Date
+    $script:DriverActionLastLoggedStage = $null
+    Write-AMRDriverDiagnostic -Severity INFO -Operation ('Driver' + $Action) -Stage Started -Message ('Driver ' + $Action.ToLowerInvariant() + ' operation started.') -DeviceId ([string]$selected.DeviceId) -OperationId $script:DriverCurrentOperationId -Source ([string]$selected.SourceAdapter) -Context @{DeviceName=[string]$selected.DeviceName;UpdateId=$updateId;Revision=$revision;Version=[string]$selected.AvailableVersion;FromBatch=[bool]$FromBatch}
     $script:DriverActionDeviceName = [string]$selected.DeviceName
+    $script:DriverActionDeviceId = [string]$selected.DeviceId
+    $script:DriverActionSource = [string]$selected.SourceAdapter
     $script:DriverActionUpdateTitle = [string]$selected.AvailableUpdate
     $script:DriverActionVersion = [string]$selected.AvailableVersion
     $script:DriverActionTimer.Start()
@@ -8292,7 +8588,11 @@ function Write-AMRDriverWorkerProgress {
         $temporary=$Path+'.tmp'
         $payload | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $temporary -Encoding UTF8 -ErrorAction Stop
         Move-Item -LiteralPath $temporary -Destination $Path -Force -ErrorAction Stop | Out-Null
-    } catch {}
+    } catch {
+        $progressOperationId = ''
+        if ($script:DriverManagedJob -and $script:DriverManagedJob.PSObject.Properties['AMROperationId']) { $progressOperationId = [string]$script:DriverManagedJob.AMROperationId }
+        Write-AMRDriverDiagnostic -Severity WARNING -Operation ([string]$script:DriverOperationState.Name) -Stage ProgressWriteFailed -Message 'Could not persist managed driver worker progress.' -OperationId $progressOperationId -Source 'Write-AMRDriverWorkerProgress' -ErrorRecord $_ -Context @{ProgressPath=$Path;RequestedStage=$Stage}
+    }
 }
 
 function Get-AMRDriverWorkerFunctionBundle {
@@ -8331,17 +8631,48 @@ function Start-AMRDriverManagedWorker {
     } else { @() }
     $bundle = Get-AMRDriverWorkerFunctionBundle -FunctionNames $functionNames
     $generation = [int]$script:DriverOperationState.Generation + 1
+    $workerOperationId = [guid]::NewGuid().ToString('N')
+    $deviceInstanceId = if ($Device.PSObject.Properties['DeviceId']) { [string]$Device.DeviceId } elseif ($Device.PSObject.Properties['DeviceInstanceId']) { [string]$Device.DeviceInstanceId } else { '' }
+    Write-AMRDriverDiagnostic -Severity INFO -Operation $Operation -Stage Started -Message ('Managed driver worker started: ' + $Operation) -DeviceId $deviceInstanceId -OperationId $workerOperationId -Source 'Start-AMRDriverManagedWorker' -Context @{Generation=$generation;WorkerType=$Operation}
     $workerScript = {
-        param($functionBundle,$operationName,$deviceData,$candidateData,$downloadRoot,$windowsContext,$sessionId,$restorePointStatePath,$progressPath)
+        param($functionBundle,$operationName,$deviceData,$candidateData,$downloadRoot,$windowsContext,$sessionId,$restorePointStatePath,$progressPath,$diagnosticPath,$workerOperationId,$workerScanId)
         $ErrorActionPreference = 'Stop'
         Invoke-Expression $functionBundle
-        function Write-AMRLog { param($Message,$Level,$Category) }
+        $script:DriverDiagnosticFile = [string]$diagnosticPath
+        $script:AMRSessionId = [string]$sessionId
+        $script:WorkerOperationId = [string]$workerOperationId
+        $script:WorkerDeviceId = if ($deviceData.PSObject.Properties['DeviceId']) { [string]$deviceData.DeviceId } else { '' }
+        function Write-AMRDriverWorkerEvent {
+            param([string]$Severity='INFO',[string]$Stage='Worker',[string]$Message='',[string]$Result='',[object]$ErrorRecord=$null,[object]$Context=$null)
+            try {
+                $exceptionType=$null;$exceptionMessage=$null;$stack=$null;$errorFile=$null;$errorLine=$null;$errorFunction=$null
+                if($ErrorRecord){if($ErrorRecord -is [System.Management.Automation.ErrorRecord]){$exceptionType=$ErrorRecord.Exception.GetType().FullName;$exceptionMessage=$ErrorRecord.Exception.Message;$stack=[string]$ErrorRecord.ScriptStackTrace;if($ErrorRecord.InvocationInfo){$errorFile=[string]$ErrorRecord.InvocationInfo.ScriptName;$errorLine=[int]$ErrorRecord.InvocationInfo.ScriptLineNumber;$errorFunction=[string]$ErrorRecord.InvocationInfo.MyCommand.Name}}else{$exceptionType=$ErrorRecord.GetType().FullName;$exceptionMessage=$ErrorRecord.Message;$stack=[string]$ErrorRecord.StackTrace}}
+                $safeWorkerMessage=[regex]::Replace([string]$Message,'(?i)(password|passwd|token|access[_-]?token|refresh[_-]?token|client[_-]?secret|api[_-]?key)(\s*[=:]\s*)[^\s;&,]+','$1$2[REDACTED]');$safeWorkerMessage=[regex]::Replace($safeWorkerMessage,'(?i)(https?://[^\s/?#]+/[^\s?#]*\?)[^\s#]+','$1[QUERY_REDACTED]')
+                if($exceptionMessage){$exceptionMessage=[regex]::Replace([string]$exceptionMessage,'(?i)(password|passwd|token|access[_-]?token|refresh[_-]?token|client[_-]?secret|api[_-]?key)(\s*[=:]\s*)[^\s;&,]+','$1$2[REDACTED]');$exceptionMessage=[regex]::Replace($exceptionMessage,'(?i)(https?://[^\s/?#]+/[^\s?#]*\?)[^\s#]+','$1[QUERY_REDACTED]')}
+                $workerContext=if($Context){ConvertTo-Json -InputObject $Context -Depth 6 -Compress}else{$null}
+                if($workerContext){$workerContext=[regex]::Replace([string]$workerContext,'(?i)(\"(?:password|passwd|token|access[_-]?token|refresh[_-]?token|client[_-]?secret|api[_-]?key)\"\s*:\s*\")[^\"]*(\")','$1[REDACTED]$2');$workerContext=[regex]::Replace($workerContext,'(?i)(https?://[^\s/?#]+/[^\s?#]*\?)[^\s#]+','$1[QUERY_REDACTED]');try{$workerContext=ConvertFrom-Json -InputObject $workerContext -ErrorAction Stop}catch{}}
+                $event=[ordered]@{Timestamp=(Get-Date).ToString('o');Severity=$Severity;Operation=$operationName;Stage=$Stage;ScanId=$workerScanId;DeviceId=$script:WorkerDeviceId;OperationId=$script:WorkerOperationId;Source='ManagedWorker';DurationMs=$null;Result=$Result;Message=$safeWorkerMessage;Error=$exceptionMessage;ExceptionType=$exceptionType;Context=$workerContext;Function=$errorFunction;File=$errorFile;Line=$errorLine;StackTrace=$stack;SessionId=$script:AMRSessionId}
+                $workerMutex=[System.Threading.Mutex]::new($false,'Local\AMR_DriverDiagnosticLog');$workerHasMutex=$false
+                try {
+                    try{$workerHasMutex=$workerMutex.WaitOne(2500)}catch [System.Threading.AbandonedMutexException]{$workerHasMutex=$true}
+                    if($workerHasMutex){
+                        if((Test-Path -LiteralPath $script:DriverDiagnosticFile -PathType Leaf) -and (Get-Item -LiteralPath $script:DriverDiagnosticFile).Length -ge 5MB){
+                            for($rotateIndex=5;$rotateIndex -ge 1;$rotateIndex--){$rotateSource=if($rotateIndex -eq 1){$script:DriverDiagnosticFile}else{'{0}.{1}' -f $script:DriverDiagnosticFile,($rotateIndex-1)};$rotateDestination='{0}.{1}' -f $script:DriverDiagnosticFile,$rotateIndex;if(Test-Path -LiteralPath $rotateSource -PathType Leaf){if(Test-Path -LiteralPath $rotateDestination -PathType Leaf){Remove-Item -LiteralPath $rotateDestination -Force -ErrorAction SilentlyContinue};Move-Item -LiteralPath $rotateSource -Destination $rotateDestination -Force -ErrorAction Stop}}
+                        }
+                        [System.IO.File]::AppendAllText($script:DriverDiagnosticFile,(ConvertTo-Json -InputObject $event -Depth 8 -Compress)+[Environment]::NewLine,([System.Text.UTF8Encoding]::new($false)))
+                    }
+                } finally {if($workerHasMutex){try{$workerMutex.ReleaseMutex()}catch{}};$workerMutex.Dispose()}
+            } catch {
+                try { $workerFallback=Join-Path $env:TEMP 'AMR_DriverDiagnostics_Fallback.log';$workerFallbackLine='[{0}] [WORKER] Driver diagnostic write failed: {1}' -f (Get-Date -Format 'o'),$_.Exception.Message;[System.IO.File]::AppendAllText($workerFallback,$workerFallbackLine+[Environment]::NewLine,([System.Text.UTF8Encoding]::new($false))) } catch {}
+            }
+        }
+        function Write-AMRLog { param($Message,$Level='INFO',$Category='DriverCenter'); $severity=switch([string]$Level){'SUCCESS'{'SUCCESS'} 'WARNING'{'WARNING'} 'ERROR'{'ERROR'} 'DEBUG'{'DEBUG'} default{'INFO'}}; Write-AMRDriverWorkerEvent -Severity $severity -Stage 'WorkerLog' -Message ([string]$Message) -Context @{Category=[string]$Category} }
         $script:DownloadDir = [string]$downloadRoot
         $script:DriverWindowsContext = [string]$windowsContext
         $script:AMRSessionId = [string]$sessionId
         $script:DriverRestorePointStateFile = [string]$restorePointStatePath
         $script:DriverWorkerProgressPath = [string]$progressPath
-        function Write-AMRDriverWorkerProgress { param([string]$Path,[string]$Stage,[int]$Percent=-1,[long]$BytesReceived=0,[long]$BytesTotal=0); if([string]::IsNullOrWhiteSpace($Path)){return}; try{$payload=[pscustomobject]@{Stage=$Stage;Percent=$Percent;BytesReceived=$BytesReceived;BytesTotal=$BytesTotal;UpdatedAt=(Get-Date).ToString('o')};$temporary=$Path+'.tmp';$payload | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $temporary -Encoding UTF8 -ErrorAction Stop;Move-Item -LiteralPath $temporary -Destination $Path -Force -ErrorAction Stop | Out-Null}catch{} }
+        function Write-AMRDriverWorkerProgress { param([string]$Path,[string]$Stage,[int]$Percent=-1,[long]$BytesReceived=0,[long]$BytesTotal=0); if(-not [string]::IsNullOrWhiteSpace($Path)){try{$payload=[pscustomobject]@{Stage=$Stage;Percent=$Percent;BytesReceived=$BytesReceived;BytesTotal=$BytesTotal;UpdatedAt=(Get-Date).ToString('o')};$temporary=$Path+'.tmp';$payload | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $temporary -Encoding UTF8 -ErrorAction Stop;Move-Item -LiteralPath $temporary -Destination $Path -Force -ErrorAction Stop | Out-Null}catch{Write-AMRDriverWorkerEvent -Severity WARNING -Stage 'ProgressWriteFailed' -Message 'Could not persist worker progress.' -ErrorRecord $_}}; Write-AMRDriverWorkerEvent -Severity TRACE -Stage $Stage -Message 'Worker progress stage updated.' -Context @{Percent=$Percent;BytesReceived=$BytesReceived;BytesTotal=$BytesTotal} }
         if ($operationName -eq 'CatalogDiscovery') {
             Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Preparing Microsoft Update Catalog searches'
             $discovery=Get-AMRDriverCatalogDiscovery -Device $deviceData
@@ -8479,15 +8810,20 @@ function Start-AMRDriverManagedWorker {
     $workerId=[guid]::NewGuid().ToString('N')
     $progressPath=Join-Path $progressRoot ($workerId+'.json')
     $null=Write-AMRDriverWorkerProgress -Path $progressPath -Stage 'Starting background operation'
-    $arguments = @($bundle,$Operation,$Device,$Candidate,[string]$script:DownloadDir,[string]$script:DriverWindowsContext,[string]$script:AMRSessionId,[string]$script:DriverRestorePointStateFile,$progressPath)
+    $arguments = @($bundle,$Operation,$Device,$Candidate,[string]$script:DownloadDir,[string]$script:DriverWindowsContext,[string]$script:AMRSessionId,[string]$script:DriverRestorePointStateFile,$progressPath,[string]$script:DriverDiagnosticFile,$workerOperationId,[string]$script:DriverCurrentScanId)
     try { $job = Start-Job -Name ('AMR-Driver-' + $Operation) -ArgumentList $arguments -ScriptBlock $workerScript -ErrorAction Stop }
-    catch { try{Remove-Item -LiteralPath $progressPath -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath ($progressPath+'.tmp') -Force -ErrorAction SilentlyContinue}catch{}; throw }
+    catch {
+        Write-AMRDriverDiagnostic -Severity ERROR -Operation $Operation -Stage WorkerStartFailed -Message 'Could not start the managed driver background worker.' -DeviceId $deviceInstanceId -OperationId $workerOperationId -Source 'Start-AMRDriverManagedWorker' -Result 'Failed' -ErrorRecord $_
+        try{Remove-Item -LiteralPath $progressPath -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath ($progressPath+'.tmp') -Force -ErrorAction SilentlyContinue}catch{}
+        throw
+    }
     $job | Add-Member -NotePropertyName AMRGeneration -NotePropertyValue $generation -Force
     $job | Add-Member -NotePropertyName AMRWorkerId -NotePropertyValue $workerId -Force
+    $job | Add-Member -NotePropertyName AMROperationId -NotePropertyValue $workerOperationId -Force
     $script:DriverManagedJob = $job
     $script:DriverManagedProgressFile=$progressPath
     $script:DriverManagedWorkerId=$workerId
-    $script:DriverOperationState = [pscustomobject]@{ Name=$Operation; State='Running'; StartedAt=(Get-Date); Generation=$generation; ScanGeneration=[int]$script:DriverScanGeneration; WorkerId=$workerId; CanCancel=($Operation -in @('CatalogDiscovery','RollbackCheck','VendorDiscovery')); Status=$(switch($Operation){'CatalogDiscovery'{'Searching Microsoft Update Catalog'} 'CatalogAcquisition'{'Downloading and verifying the selected driver package'} 'CatalogStaging'{'Revalidating and staging the verified driver package'} 'RollbackCheck'{'Checking rollback and recovery records'} 'RestorePoint'{'Creating and verifying a System Restore point'} 'VendorDiscovery'{'Searching registered official vendor providers'} 'VendorPackageAcquisition'{'Acquiring and verifying a package through the local vendor API'}}) }
+    $script:DriverOperationState = [pscustomobject]@{ Name=$Operation; State='Running'; StartedAt=(Get-Date); Generation=$generation; ScanGeneration=[int]$script:DriverScanGeneration; WorkerId=$workerId; DeviceId=$deviceInstanceId; CanCancel=($Operation -in @('CatalogDiscovery','RollbackCheck','VendorDiscovery')); Status=$(switch($Operation){'CatalogDiscovery'{'Searching Microsoft Update Catalog'} 'CatalogAcquisition'{'Downloading and verifying the selected driver package'} 'CatalogStaging'{'Revalidating and staging the verified driver package'} 'RollbackCheck'{'Checking rollback and recovery records'} 'RestorePoint'{'Creating and verifying a System Restore point'} 'VendorDiscovery'{'Searching registered official vendor providers'} 'VendorPackageAcquisition'{'Acquiring and verifying a package through the local vendor API'}}) }
     try {
         (C 'DriverActionStatus').Text = ([string]$script:DriverOperationState.Status + '…')
         (C 'DriverOperationProgress').Visibility='Visible'; (C 'DriverOperationProgress').IsIndeterminate=$true
@@ -8518,6 +8854,7 @@ function Stop-AMRDriverManagedWorker {
     if (-not $Force -and -not $script:DriverOperationState.CanCancel) {
         throw 'This package operation is in a verification stage that cannot yet be safely interrupted. Wait for completion.'
     }
+    Write-AMRDriverDiagnostic -Severity WARNING -Operation ([string]$script:DriverOperationState.Name) -Stage Cancelled -Message 'Managed driver operation was cancelled.' -DeviceId ([string]$script:DriverOperationState.DeviceId) -OperationId ([string]$script:DriverManagedJob.AMROperationId) -Source 'Stop-AMRDriverManagedWorker' -Result 'Cancelled'
     try { Stop-Job -Job $script:DriverManagedJob -ErrorAction SilentlyContinue } catch {}
     try { Remove-Job -Job $script:DriverManagedJob -Force -ErrorAction SilentlyContinue } catch {}
     $script:DriverManagedJob = $null
@@ -8542,12 +8879,24 @@ function Complete-AMRDriverManagedWorker {
         Stop-AMRDriverManagedWorker -Force
         throw 'A stale background result was rejected because the device scan changed while the operation was running.'
     }
+    $workerOperationState = $script:DriverOperationState
+    $workerDurationMs = if ($workerOperationState.StartedAt) { [long]((Get-Date)-[datetime]$workerOperationState.StartedAt).TotalMilliseconds } else { $null }
+    $workerDeviceId = ''
+    if ($workerOperationState -and $workerOperationState.PSObject.Properties['DeviceId']) { $workerDeviceId = [string]$workerOperationState.DeviceId }
     $result = $null
     $receiveError = $null
+    $receiveErrorRecord = $null
     try {
         if ($job.State -eq 'Completed') { $received = @(Receive-Job -Job $job -ErrorAction Stop); if ($received.Count -gt 0) { $result = $received[-1] } }
-        else { $receiveError = (($job.ChildJobs | ForEach-Object { $_.JobStateInfo.Reason.Message }) -join '; '); if (-not $receiveError) { $receiveError = 'The background operation did not complete.' } }
-    } catch { $receiveError = [string]$_.Exception.Message }
+        else {
+            $workerErrorRecords = @()
+            foreach ($childJob in @($job.ChildJobs)) { foreach ($workerError in @($childJob.Error)) { if ($workerError) { $workerErrorRecords += $workerError } } }
+            if ($workerErrorRecords.Count -gt 0) { $receiveErrorRecord = $workerErrorRecords[-1] }
+            $receiveError = (($job.ChildJobs | ForEach-Object { $_.JobStateInfo.Reason.Message }) -join '; ')
+            if (-not $receiveError -and $receiveErrorRecord) { $receiveError = [string]$receiveErrorRecord.Exception.Message }
+            if (-not $receiveError) { $receiveError = 'The background operation did not complete.' }
+        }
+    } catch { $receiveErrorRecord = $_; $receiveError = [string]$_.Exception.Message }
     try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
     $script:DriverManagedJob = $null
     $script:DriverManagedTimer=$null
@@ -8557,7 +8906,11 @@ function Complete-AMRDriverManagedWorker {
     $script:DriverOperationState = [pscustomobject]@{ Name='Idle'; State='Idle'; StartedAt=$null; Generation=[int]$script:DriverOperationState.Generation; CanCancel=$false; Status='Ready' }
     try { (C 'DriverOperationProgress').IsIndeterminate=$false; (C 'DriverOperationProgress').Visibility='Collapsed'; $cancelButton=C 'DriverCancelManagedOperationBtn';if($cancelButton){$cancelButton.Visibility='Collapsed';$cancelButton.IsEnabled=$false} } catch {}
     Update-AMRDriverActionButtons
-    if ($receiveError) { throw $receiveError }
+    if ($receiveError) {
+        Write-AMRDriverDiagnostic -Severity ERROR -Operation $job.Name -Stage Failed -Message 'Managed driver worker did not complete successfully.' -OperationId ([string]$job.AMROperationId) -DeviceId $workerDeviceId -Source 'Complete-AMRDriverManagedWorker' -DurationMs $workerDurationMs -Result 'Failed' -ErrorRecord $(if ($receiveErrorRecord) { $receiveErrorRecord } else { $receiveError })
+        throw $receiveError
+    }
+    Write-AMRDriverDiagnostic -Severity SUCCESS -Operation $job.Name -Stage Completed -Message 'Managed driver worker completed and its result was collected.' -OperationId ([string]$job.AMROperationId) -DeviceId $workerDeviceId -Source 'Complete-AMRDriverManagedWorker' -DurationMs $workerDurationMs -Result 'Completed'
     return $result
 }
 
@@ -9257,7 +9610,7 @@ function Show-AMRProfessionalCandidateManager {
         try { (C 'DriverDeviceList').SelectedItems.Clear(); [void](C 'DriverDeviceList').SelectedItems.Add($Device) } catch {}
         (C 'DriverActionStatus').Text = if($isCatalogChoice){('Professional Catalog candidate selected: {0}. The verified package is already downloaded and staged; choose Install when ready.' -f $choice.Title)}else{('Professional candidate selected: {0} ({1}). Download and validate this package before installation.' -f $choice.Title,$choice.MatchConfidence)}
         $selectionHistoryStatus=if($isCatalogChoice -and [bool]$choice.IsInstallable){'Selected – downloaded, verified and staged; not installed'}else{'Selected – not downloaded or installed'}
-        Add-AMRDriverHistoryEntry -Action 'Professional Candidate Selection' -Device ([string]$Device.DeviceName) -Update ([string]$choice.Title) -Version ([string]$choice.Version) -Status $selectionHistoryStatus -Details ('Source={0}; Match={1}; UpdateId={2}; Revision={3}; CatalogUpdateId={4}; Staged={5}' -f $choice.Source,$choice.MatchConfidence,$choice.UpdateId,$choice.UpdateRevision,$choice.CatalogUpdateId,$choice.IsInstallable)
+        Add-AMRDriverHistoryEntry -Action 'Professional Candidate Selection' -Device ([string]$Device.DeviceName) -Update ([string]$choice.Title) -Version ([string]$choice.Version) -Status $selectionHistoryStatus -Details ('Source={0}; Match={1}; UpdateId={2}; Revision={3}; CatalogUpdateId={4}; Staged={5}' -f $choice.Source,$choice.MatchConfidence,$choice.UpdateId,$choice.UpdateRevision,$choice.CatalogUpdateId,$choice.IsInstallable) -DeviceInstanceId ([string]$Device.DeviceId) -OperationId ([guid]::NewGuid().ToString('N'))
         Update-AMRDriverActionButtons
     }
 }
