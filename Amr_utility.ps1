@@ -58,13 +58,103 @@ $script:DriverDiagnosticLastRefresh = [datetime]::MinValue
 $script:DriverDiagnosticLastFilter = ''
 $script:DriverRestorePointStateFile = Join-Path $script:LogDir 'DriverCenterRestorePoint.json'
 $script:AMRSessionId = [guid]::NewGuid().ToString()
+# AMR_PHASE1_DEFINITIONS_BEGIN# AMR Driver Center Phase 1 stabilization state.
+$script:AMRDriverOpLockState = [pscustomobject]@{ Mutex=$null; Name=''; Held=$false; OwnerThread=0; Operation=''; AcquiredAt=$null }
+$script:AMRDriverTimeouts = @{ Scan=600; Download=1200; Install=10800; CatalogDiscovery=1200; CatalogAcquisition=1200; CatalogStaging=1200; RestorePoint=600; RollbackCheck=600; VendorDiscovery=1200; VendorPackageAcquisition=1200 }
+$script:AMRDriverMaxQueueIterations = 100
+$script:DriverSmartQueueIterations = 0
+$script:DriverBatchQueueIterations = 0
+$script:DriverManagedWatchdog = $null
+function Acquire-AMRDriverOperationLock {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][string]$Operation)
+    if ($null -eq $script:AMRDriverOpLockState) { throw 'Driver operation lock state is not initialized.' }
+    if ([bool]$script:AMRDriverOpLockState.Held) { return $false }
+    $mutex=$null; $created=$false
+    foreach($name in @('Global\AMR_DriverCenter_OperationLock','Local\AMR_DriverCenter_OperationLock')) {
+        try { $mutex=[System.Threading.Mutex]::new($false,$name,[ref]$created); break } catch { $mutex=$null }
+    }
+    if ($null -eq $mutex) { throw 'Could not create the AMR Driver Center operation mutex.' }
+    $acquired=$false
+    try { try { $acquired=$mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $acquired=$true } }
+    catch { $mutex.Dispose(); throw }
+    if (-not $acquired) { $mutex.Dispose(); return $false }
+    $script:AMRDriverOpLockState.Mutex=$mutex
+    $script:AMRDriverOpLockState.Name=$name
+    $script:AMRDriverOpLockState.Held=$true
+    $script:AMRDriverOpLockState.OwnerThread=[Threading.Thread]::CurrentThread.ManagedThreadId
+    $script:AMRDriverOpLockState.Operation=$Operation
+    $script:AMRDriverOpLockState.AcquiredAt=Get-Date
+    return $true
+}
+function Release-AMRDriverOperationLock {
+    [CmdletBinding()]
+    param()
+    if ($null -eq $script:AMRDriverOpLockState) { return }
+    $mutex=$script:AMRDriverOpLockState.Mutex
+    if ($mutex) {
+        try { if ([bool]$script:AMRDriverOpLockState.Held -and [int]$script:AMRDriverOpLockState.OwnerThread -eq [Threading.Thread]::CurrentThread.ManagedThreadId) { $mutex.ReleaseMutex() } }
+        catch { Write-AMRDiagnostic -Severity 'WARNING' -Area 'DriverCenter' -Operation 'OperationLockRelease' -Message ([string]$_.Exception.Message) }
+        finally { try { $mutex.Dispose() } catch {}; $script:AMRDriverOpLockState.Mutex=$null }
+    }
+    $script:AMRDriverOpLockState.Held=$false
+    $script:AMRDriverOpLockState.OwnerThread=0
+    $script:AMRDriverOpLockState.Operation=''
+    $script:AMRDriverOpLockState.AcquiredAt=$null
+}
+function Test-AMRDriverOperationTimeout {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][string]$Operation,[Parameter(Mandatory=$true)][datetime]$StartedAt)
+    $seconds=0
+    if ($script:AMRDriverTimeouts -and $script:AMRDriverTimeouts.ContainsKey($Operation)) { $seconds=[int]$script:AMRDriverTimeouts[$Operation] }
+    if ($seconds -le 0) { return $false }
+    return (((Get-Date)-$StartedAt).TotalSeconds -ge $seconds)
+}
+function Write-AMRDriverTimeoutEvent {
+    [CmdletBinding()]
+    param([string]$Operation,[string]$Message,[string]$OperationId='')
+    try { Write-AMRDriverDiagnostic -Severity ERROR -Operation $Operation -Stage Timeout -Message $Message -OperationId $OperationId -Source 'Phase1Watchdog' -Result 'TimedOut' } catch {}
+}
+function Register-AMRDriverManagedWatchdog {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][string]$Operation,[Parameter(Mandatory=$true)][datetime]$StartedAt)
+    $timeoutSeconds=0
+    if($script:AMRDriverTimeouts -and $script:AMRDriverTimeouts.ContainsKey($Operation)){$timeoutSeconds=[int]$script:AMRDriverTimeouts[$Operation]}
+    $script:DriverManagedWatchdog=[pscustomobject]@{Operation=$Operation;StartedAt=$StartedAt;TimeoutSeconds=$timeoutSeconds;RegisteredAt=(Get-Date)}
+    return $script:DriverManagedWatchdog
+}
+function Test-AMRDriverVersionMatch {
+    [CmdletBinding()]
+    param([string]$Installed,[string]$Target,[string[]]$Providers=@())
+    $installedText=([string]$Installed).Trim(); $targetText=([string]$Target).Trim()
+    if ([string]::IsNullOrWhiteSpace($installedText) -or [string]::IsNullOrWhiteSpace($targetText)) { return [pscustomobject]@{Matches=$false;MatchType='None'} }
+    if ($installedText.Equals($targetText,[System.StringComparison]::OrdinalIgnoreCase)) { return [pscustomobject]@{Matches=$true;MatchType='Exact'} }
+    $installedParts=@($installedText -split '[^0-9]+' | Where-Object { $_ -ne '' })
+    $targetParts=@($targetText -split '[^0-9]+' | Where-Object { $_ -ne '' })
+    # Windows may prepend the OS version (10.0) to a vendor driver version.
+    if ($installedParts.Count -ge 3 -and $installedParts[0] -eq '10' -and $installedParts[1] -eq '0') {
+        $installedParts=@($installedParts | Select-Object -Skip 2)
+    }
+    # A version is verified only when every numeric component is present and equal.
+    # Short prefixes (for example 31 matching 31.0.15.5161) are not sufficient.
+    if ($installedParts.Count -ge 2 -and $targetParts.Count -ge 2 -and $installedParts.Count -eq $targetParts.Count) {
+        $same=$true
+        for ($i=0; $i -lt $targetParts.Count; $i++) {
+            if ($installedParts[$i] -ne $targetParts[$i]) { $same=$false; break }
+        }
+        if ($same) { return [pscustomobject]@{Matches=$true;MatchType='NumericExact'} }
+    }
+    return [pscustomobject]@{Matches=$false;MatchType='None'}
+}
+# AMR_PHASE1_DEFINITIONS_END
+
 
 $script:Window = $null
 # Initialize refresh state before registering WPF handlers (StrictMode is enabled).
 $script:OverviewRefreshing = $false
 $script:DriverScanJob = $null
 $script:DriverScanTimer = $null
-$script:DriverScanPartialShown = $false
+
 $script:DriverActionJob = $null
 $script:DriverActionTimer = $null
 # Phase 6.4: one coordinated background-operation slot for professional driver work.
@@ -73,7 +163,7 @@ $script:DriverManagedTimer = $null
 $script:DriverManagedProgressTimer = $null
 $script:DriverManagedProgressFile = $null
 $script:DriverManagedWorkerId = $null
-$script:DriverOperationState = [pscustomobject]@{ Name='Idle'; State='Idle'; StartedAt=$null; Generation=0; CanCancel=$false; Status='Ready' }
+$script:DriverOperationState = [pscustomobject]@{ Name='Idle'; State='Idle'; StartedAt=$null; Generation=0; CanCancel=$false; Status='Ready'; PartialShown=$false }
 $script:DriverScanGeneration = 0
 $script:DriverActionProgressFile = $null
 $script:DriverActionUpdateId = $null
@@ -2978,7 +3068,7 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
       <Border Background="#182638" BorderBrush="#35506D" BorderThickness="1" CornerRadius="14" Padding="18" Margin="8" MaxWidth="820" HorizontalAlignment="Left">
        <StackPanel>
         <TextBlock Text="AMR Driver Safety Point" FontSize="15" FontWeight="Bold" Foreground="#7DD3FC" Margin="0,0,0,6"/>
-        <TextBlock Text="Create a Windows restore point before driver changes. AMR also attempts to export the current OEM driver package before replacing it; Professional users can review retained packages and use Windows rollback tools when supported. Smart Restore validates the exact AMR point." Foreground="#CBD5E1" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,10"/>
+        <TextBlock Text="Create a Windows restore point manually whenever you choose; driver installation never creates one automatically. Smart Restore verifies and targets the exact AMR restore point saved by Create Restore Point, without asking you to choose from a list. AMR also attempts to export the current OEM driver package before replacing it." Foreground="#CBD5E1" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,10"/>
         <WrapPanel>
          <Button Name="DriverCreateRestorePointBtn" Content="Create Restore Point" Background="#244A70" Foreground="#EAF2FF" BorderBrush="#4B83B8" Padding="14,8" FontSize="11" Margin="0,0,8,8"/>
          <Button Name="DriverSmartRestoreBtn" Content="Smart Restore" IsEnabled="False" Background="#65412B" Foreground="#FFF1E6" BorderBrush="#A66B45" Padding="14,8" FontSize="11" Margin="0,0,8,8"/>
@@ -4691,7 +4781,7 @@ function Update-AMRDriverRestorePointStatus {
         (C 'DriverRestorePointStatus').Text = ('Verified AMR restore point #{0} • {1} • {2}' -f $record.State.SequenceNumber,$record.State.Description,$when)
         (C 'DriverSmartRestoreBtn').IsEnabled = $true
     } catch {
-        (C 'DriverRestorePointStatus').Text = 'No verified AMR driver restore point is currently recorded. Create one before changing drivers.'
+        (C 'DriverRestorePointStatus').Text = 'No verified AMR restore point is recorded. Use Create Restore Point whenever you want to save a recovery point.'
         (C 'DriverSmartRestoreBtn').IsEnabled = $false
     }
 }
@@ -4703,7 +4793,7 @@ function Invoke-AMRDriverSmartRestore {
         $sequence = [long]$record.Point.SequenceNumber
         $description = [string]$record.Point.Description
         $created = [string]$record.Point.CreationTime
-        $message = "AMR found and verified the exact restore point it created:`n`n$description`nSequence: $sequence`nCreated: $created`n`nWindows will start System Restore using this exact sequence number. This can close applications and restart Windows. Save your work before continuing. Other restore points will not be deleted.`n`nStart restoring now?"
+        $message = "AMR found and verified the exact restore point you saved with Create Restore Point:`n`n$description`nSequence: $sequence`nCreated: $created`n`nWindows will start System Restore using this exact sequence number. This can close applications and restart Windows. Save your work before continuing. Other restore points will not be deleted.`n`nStart restoring now?"
         if ((Show-AMRMessage $message 'Confirm Smart Restore' YesNo Warning) -ne 'Yes') { return }
         $restoreCommand = Get-Command -Name Restore-Computer -ErrorAction SilentlyContinue
         if (-not $restoreCommand) {
@@ -6326,6 +6416,7 @@ function Start-AMRDriverScan {
         return
     }
     if($script:DriverOperationState.State -eq 'Running'){return}
+    if (-not (Acquire-AMRDriverOperationLock -Operation 'Scan')) { (C 'DriverScanStatus').Text='Another Driver Center operation is active. Wait for it to finish.'; return }
     $script:DriverScanGeneration = [int]$script:DriverScanGeneration + 1
     $script:DriverCurrentScanId = [guid]::NewGuid().ToString('N')
     $script:DriverCurrentOperationId = $script:DriverCurrentScanId
@@ -6354,7 +6445,7 @@ function Start-AMRDriverScan {
             $driverWorkerFunctionDefinitions += [pscustomobject]@{Name=$functionName;Definition=[string]$functionInfo.Definition}
         }
         $driverWorkerPayload = [pscustomobject]@{DriverPackageRoot=$driverPackageRoot;FunctionDefinitions=@($driverWorkerFunctionDefinitions)}
-        $script:DriverScanPartialShown = $false
+        $script:DriverOperationState.PartialShown = $false
         $script:DriverScanJob = Start-Job -ArgumentList $driverWorkerPayload -ScriptBlock {
             param($WorkerPayload)
             $DriverPackageRoot = [string]$WorkerPayload.DriverPackageRoot
@@ -6679,10 +6770,15 @@ function Start-AMRDriverScan {
                     foreach ($rankedCandidate in $orderedMatches) {
                         $candidateRank++
                         $candidate = $rankedCandidate.Candidate
+                        $candidateVersionText = [string]$candidate.Version
+                        if ([string]::IsNullOrWhiteSpace($candidateVersionText)) {
+                            $candidateTitleVersion = [regex]::Match([string]$candidate.Title,'(?<![0-9.])[0-9]+(?:\.[0-9]+){2,}(?![0-9.])')
+                            if ($candidateTitleVersion.Success) { $candidateVersionText = [string]$candidateTitleVersion.Value }
+                        }
                         $candidateOptions += [pscustomobject]@{
                             Rank = $candidateRank
                             Title = [string]$candidate.Title
-                            Version = [string]$candidate.Version
+                            Version = $candidateVersionText
                             DriverDate = $(if ($candidate.DriverDate -and [datetime]$candidate.DriverDate -ne [datetime]::MinValue) { ([datetime]$candidate.DriverDate).ToString('yyyy-MM-dd') } else { 'Not supplied' })
                             Manufacturer = [string]$candidate.Manufacturer
                             Model = [string]$candidate.Model
@@ -6715,7 +6811,12 @@ function Start-AMRDriverScan {
                     $deviceRow.MatchConfidence = $(if ($bestMatch.MatchTypeRank -eq 0) { 'High – exact hardware match' } else { 'Moderate – compatible ID match' })
                     $deviceRow.MatchReason = ('{0}; ID priority #{1}; {2} candidate(s) compared' -f $bestMatch.MatchType,($bestMatch.MatchIdIndex + 1),$rankedMatches.Count)
                     $deviceRow.UpdateStatus = ('Best of {0}: {1}' -f $rankedMatches.Count,$bestMatch.MatchType)
-                    $deviceRow.AvailableVersion = $(if ($matchedUpdate.Version) { [string]$matchedUpdate.Version } else { 'Version not supplied' })
+                    $matchedVersionText = [string]$matchedUpdate.Version
+                    if ([string]::IsNullOrWhiteSpace($matchedVersionText)) {
+                        $titleVersionMatch = [regex]::Match([string]$matchedUpdate.Title,'(?<![0-9.])[0-9]+(?:\.[0-9]+){2,}(?![0-9.])')
+                        if ($titleVersionMatch.Success) { $matchedVersionText = [string]$titleVersionMatch.Value }
+                    }
+                    $deviceRow.AvailableVersion = if (-not [string]::IsNullOrWhiteSpace($matchedVersionText)) { $matchedVersionText } else { 'Version not supplied' }
                     $deviceRow.AvailableUpdate = [string]$matchedUpdate.Title
                     $deviceRow.UpdateId = [string]$matchedUpdate.UpdateId
                     $deviceRow.UpdateRevision = [int]$matchedUpdate.UpdateRevision
@@ -6815,7 +6916,7 @@ function Start-AMRDriverScan {
         }
 
         $scanGeneration=[int]$script:DriverOperationState.Generation+1
-        $script:DriverOperationState=[pscustomobject]@{Name='DeviceScan';State='Running';StartedAt=(Get-Date);Generation=$scanGeneration;ScanGeneration=[int]$script:DriverScanGeneration;CanCancel=$false;Status='Scanning devices and Windows Update'}
+        $script:DriverOperationState=[pscustomobject]@{Name='DeviceScan';State='Running';StartedAt=(Get-Date);Generation=$scanGeneration;ScanGeneration=[int]$script:DriverScanGeneration;CanCancel=$false;Status='Scanning devices and Windows Update';PartialShown=$false}
         if (-not $script:DriverScanTimer) {
             $script:DriverScanTimer = New-Object System.Windows.Threading.DispatcherTimer
             $script:DriverScanTimer.Interval = [TimeSpan]::FromMilliseconds(500)
@@ -6823,6 +6924,7 @@ function Start-AMRDriverScan {
                 $job = $script:DriverScanJob
                 if (-not $job) {
                     $script:DriverScanTimer.Stop()
+                    Release-AMRDriverOperationLock
                     try {
                         if ($script:DriverOperationState.Name -eq 'DeviceScan') { $script:DriverOperationState = [pscustomobject]@{Name='Idle';State='Idle';StartedAt=$null;Generation=[int]$script:DriverOperationState.Generation;CanCancel=$false;Status='Ready'} }
                         $scanButton = C 'ScanDriversBtn'
@@ -6835,11 +6937,24 @@ function Start-AMRDriverScan {
                     return
                 }
                 if ($job.State -eq 'Running') {
+                    if (Test-AMRDriverOperationTimeout -Operation 'Scan' -StartedAt ([datetime]$script:DriverScanStartedAt)) {
+                        try { Stop-Job -Job $job -ErrorAction SilentlyContinue; Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
+                        $script:DriverScanJob = $null; $script:DriverScanTimer.Stop(); Release-AMRDriverOperationLock
+                        if($script:DriverOperationState.Name -eq 'DeviceScan'){$script:DriverOperationState=[pscustomobject]@{Name='Idle';State='Idle';StartedAt=$null;Generation=[int]$script:DriverOperationState.Generation;CanCancel=$false;Status='Ready';PartialShown=$false}}
+                        Write-AMRDriverTimeoutEvent -Operation DeviceScan -Message 'Driver scan exceeded its 600-second timeout.' -OperationId ([string]$script:DriverCurrentScanId)
+                        (C 'DriverScanStatus').Text = 'Driver scan timed out. The operation was stopped; review Diagnostics and scan again.'
+                        $scanButton = C 'ScanDriversBtn'; if ($scanButton) { $scanButton.IsEnabled=$true; $scanButton.Content='⌕  Scan Device' }
+                        Update-AMRDriverActionButtons
+                        return
+                    }
                     try {
-                        $availableStages = @(Receive-Job -Job $job -Keep -ErrorAction SilentlyContinue)
+                        $availableStages = @()
+                        if (-not [bool]$script:DriverOperationState.PartialShown) {
+                            $availableStages = @(Receive-Job -Job $job -Keep -ErrorAction SilentlyContinue)
+                        }
                         $hardwareStage = @($availableStages | Where-Object { $_ -and $_.ScanStage -eq 'HardwareReady' } | Select-Object -Last 1)
-                        if ($hardwareStage.Count -gt 0 -and -not $script:DriverScanPartialShown) {
-                            $script:DriverScanPartialShown = $true
+                        if ($hardwareStage.Count -gt 0 -and -not $script:DriverOperationState.PartialShown) {
+                            $script:DriverOperationState.PartialShown = $true
                             $stage = $hardwareStage[0]
                             $stageDevices = @($stage.Devices)
                             Write-AMRDriverDiagnostic -Severity TRACE -Operation DeviceScan -Stage HardwareInventoryReady -Message 'Initial Plug and Play hardware inventory is available; Windows Update matching is continuing.' -ScanId $script:DriverCurrentScanId -OperationId $script:DriverCurrentScanId -Source 'HardwareDiscoveryWorker' -DurationMs ([long]((Get-Date)-$script:DriverScanStartedAt).TotalMilliseconds) -Context @{DeviceCount=$stageDevices.Count;Generation=$script:DriverScanGeneration;ComputerModel=[string]$stage.ComputerModel;Manufacturer=[string]$stage.ComputerManufacturer}
@@ -6864,6 +6979,7 @@ function Start-AMRDriverScan {
                 if ($job.State -notin @('Completed','Failed','Stopped')) { return }
 
                 $script:DriverScanTimer.Stop()
+                Release-AMRDriverOperationLock
                 try {
                     if ($job.State -ne 'Completed') {
                         $jobState = [string]$job.State
@@ -6956,7 +7072,7 @@ function Start-AMRDriverScan {
                 } finally {
                     try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
                     $script:DriverScanJob = $null
-                    $script:DriverScanPartialShown = $false
+                    $script:DriverOperationState.PartialShown = $false
                     if($script:DriverOperationState.Name -eq 'DeviceScan'){$script:DriverOperationState=[pscustomobject]@{Name='Idle';State='Idle';StartedAt=$null;Generation=[int]$script:DriverOperationState.Generation;CanCancel=$false;Status='Ready'}}
                     $scanButton = C 'ScanDriversBtn'
                     $scanButton.IsEnabled = $true
@@ -6972,7 +7088,8 @@ function Start-AMRDriverScan {
         if ($script:DriverScanTimer) { $script:DriverScanTimer.Stop() }
         if ($script:DriverScanJob) { try { Stop-Job -Job $script:DriverScanJob -ErrorAction SilentlyContinue } catch {}; try { Remove-Job -Job $script:DriverScanJob -Force -ErrorAction SilentlyContinue } catch {} }
         $script:DriverScanJob = $null
-        if($script:DriverOperationState.Name -eq 'DeviceScan'){$script:DriverOperationState=[pscustomobject]@{Name='Idle';State='Idle';StartedAt=$null;Generation=[int]$script:DriverOperationState.Generation;CanCancel=$false;Status='Ready'}}
+        Release-AMRDriverOperationLock
+        if($script:DriverOperationState.Name -eq 'DeviceScan'){$script:DriverOperationState=[pscustomobject]@{Name='Idle';State='Idle';StartedAt=$null;Generation=[int]$script:DriverOperationState.Generation;CanCancel=$false;Status='Ready';PartialShown=$false}}
         $button.IsEnabled = $true
         $button.Content = '⌕  Scan Device'
         Update-AMRDriverActionButtons
@@ -7438,6 +7555,7 @@ function Start-AMRSmartInstall {
         return
     }
 
+    $script:DriverSmartQueueIterations = 0
     $script:DriverSmartQueueActive = $true
     $script:DriverSmartDownloadQueue = @($downloadQueue | Select-Object -Skip 1)
     $script:DriverSmartDownloadTotal = $downloadQueue.Count
@@ -7459,9 +7577,7 @@ function Start-AMRDriverUpdateAction {
         [ValidateSet('Download','Install')][string]$Action,
         [object]$Device = $null,
         [switch]$SkipConfirmation,
-        [switch]$FromBatch,
-        [switch]$RestorePointPrepared,
-        [string]$PreparedRestorePointStatus = ''
+        [switch]$FromBatch
     )
     if ($script:DriverManagedJob -or ($script:DriverOperationState.State -eq 'Running' -and $script:DriverOperationState.Name -notin @('Idle'))) { (C 'DriverActionStatus').Text='Wait for the active driver operation to finish first.'; return }
     if ($script:DriverActionJob -and $script:DriverActionJob.State -in @('Running','NotStarted')) { return }
@@ -7496,7 +7612,7 @@ function Start-AMRDriverUpdateAction {
         }
         if (-not $SkipConfirmation) {
             $sourceLabel=if($isCatalogPackage){'Microsoft Update Catalog package staged by Windows'}else{'Microsoft-matched driver update'}
-            $confirmText = "Install this $sourceLabel?`n`nDevice: $($selected.DeviceName)`nUpdate: $($selected.AvailableUpdate)`nVersion: $($selected.AvailableVersion)`n`nThe installation may temporarily affect the device and may require restarting Windows. Continue?"
+            $confirmText = "Install this ${sourceLabel}?`n`nDevice: $($selected.DeviceName)`nUpdate: $($selected.AvailableUpdate)`nVersion: $($selected.AvailableVersion)`n`nThe installation may temporarily affect the device and may require restarting Windows. Continue?"
             if ((Show-AMRMessage $confirmText 'Confirm Driver Installation' YesNo Warning) -ne 'Yes') { return }
         }
     } else {
@@ -7507,74 +7623,11 @@ function Start-AMRDriverUpdateAction {
 
     $restorePointStatus = 'Not applicable to download'
     if ($Action -eq 'Install') {
-        if ($FromBatch -and -not [string]::IsNullOrWhiteSpace([string]$script:DriverBatchRestorePointStatus)) {
-            $restorePointStatus = [string]$script:DriverBatchRestorePointStatus
-        } elseif ($RestorePointPrepared) {
-            $restorePointStatus = [string]$PreparedRestorePointStatus
-            if ([string]::IsNullOrWhiteSpace($restorePointStatus)) { $restorePointStatus='No verified AMR restore point was available; user explicitly approved continuing.' }
-            if ($FromBatch) { $script:DriverBatchRestorePointStatus = $restorePointStatus }
-        } else {
-            try {
-                $null=Start-AMRDriverManagedWorker -Operation RestorePoint -Device $selected -AllowDuringBatch:$FromBatch
-                (C 'DriverActionStatus').Text='Creating and verifying a System Restore point in the background before installation…'
-                (C 'DriverOperationProgress').Visibility='Visible'
-                (C 'DriverOperationProgress').IsIndeterminate=$true
-                $poll=New-Object System.Windows.Threading.DispatcherTimer
-                $poll.Interval=[TimeSpan]::FromMilliseconds(500)
-                $poll.Add_Tick(({
-                    if(-not $script:DriverManagedJob){$poll.Stop();return}
-                    if($script:DriverManagedJob.State -in @('Completed','Failed','Stopped')){
-                        $poll.Stop()
-                        try {
-                            $preflight=Complete-AMRDriverManagedWorker
-                            if(-not $preflight){throw 'Restore Point preflight returned no result.'}
-                            $approvedStatus=''
-                            if([bool]$preflight.Success){
-                                $approvedStatus=[string]$preflight.Status
-                                Write-AMRLog ('Driver install preflight created restore point: '+$approvedStatus) SUCCESS Overview
-                            } elseif($preflight.ExistingState){
-                                $existingState=$preflight.ExistingState
-                                $existingPointTime=[datetime]$existingState.CreationTime
-                                $existingPointAge=(Get-Date)-$existingPointTime
-                                $reusePrompt="AMR could not create a fresh restore point before this installation.`n`nA previously verified AMR restore point exists:`n$($existingState.Description)`nCreated: $existingPointTime`nAge: $([math]::Max(0,[int]$existingPointAge.TotalHours)) hour(s)`n`nThis older point is NOT a snapshot immediately before the current driver change. Do you explicitly want to continue using it?"
-                                if((Show-AMRMessage $reusePrompt 'Use Older Restore Point?' YesNo Warning) -eq 'Yes'){
-                                    $approvedStatus=('User approved previously verified AMR restore point #{0} ({1}); a fresh point could not be created: {2}' -f $existingState.SequenceNumber,$existingPointTime,[string]$preflight.Failure)
-                                    Write-AMRLog $approvedStatus WARNING Overview
-                                }
-                            } else {
-                                $continueWithout=Show-AMRMessage ("AMR could not create or verify a System Restore point before this driver installation.`n`nReason: $($preflight.Failure)`n`nContinue without a verified AMR restore point? This reduces recovery options if the driver causes problems.") 'Restore Point Unavailable' YesNo Warning
-                                if($continueWithout -eq 'Yes'){$approvedStatus='No verified AMR restore point was available; user explicitly approved continuing.'}
-                            }
-                            if([string]::IsNullOrWhiteSpace($approvedStatus)){
-                                if($FromBatch){$script:DriverBatchActive=$false;$script:DriverBatchQueue=@();$script:DriverBatchTotal=0;$script:DriverBatchCompleted=0;$script:DriverBatchResults=@();$script:DriverBatchRestorePointStatus=$null;$script:DriverBatchRebootRequired=$false}
-                                (C 'DriverOperationProgress').IsIndeterminate=$false
-                                (C 'DriverOperationProgress').Visibility='Collapsed'
-                                (C 'DriverActionStatus').Text='Installation cancelled because no restore-point option was approved.'
-                                Update-AMRDriverActionButtons
-                                return
-                            }
-                            $restoreDisplayState=if($preflight.Success){$preflight.RestoreState}else{$preflight.ExistingState}
-                            if($restoreDisplayState){(C 'DriverRestorePointStatus').Text=('Verified AMR restore point #{0} • {1} • {2}' -f $restoreDisplayState.SequenceNumber,$restoreDisplayState.Description,$restoreDisplayState.CreationTime);(C 'DriverSmartRestoreBtn').IsEnabled=$true}
-                            (C 'DriverOperationProgress').IsIndeterminate=$false
-                            (C 'DriverOperationProgress').Visibility='Collapsed'
-                            Start-AMRDriverUpdateAction -Action $Action -Device $selected -SkipConfirmation -FromBatch:$FromBatch -RestorePointPrepared -PreparedRestorePointStatus $approvedStatus
-                        } catch {
-                            (C 'DriverOperationProgress').IsIndeterminate=$false
-                            (C 'DriverOperationProgress').Visibility='Collapsed'
-                            (C 'DriverActionStatus').Text='Restore Point preflight failed: '+[string]$_.Exception.Message
-                            Show-AMRMessage ([string]$_.Exception.Message) 'Restore Point Preflight' OK Error | Out-Null
-                            if($FromBatch){$script:DriverBatchActive=$false;$script:DriverBatchQueue=@();$script:DriverBatchRestorePointStatus=$null}
-                            Update-AMRDriverActionButtons
-                        }
-                    }
-                }).GetNewClosure())
-                $script:DriverManagedTimer=$poll; $poll.Start()
-                return
-            } catch {
-                (C 'DriverActionStatus').Text='Could not start restore-point preflight: '+[string]$_.Exception.Message
-                Show-AMRMessage ([string]$_.Exception.Message) 'Restore Point Preflight' OK Error | Out-Null
-                return
-            }
+        # Restore points are deliberately user-managed. Never create one as part
+        # of a single, Smart, or batch driver installation.
+        $restorePointStatus = 'Restore points are managed manually; AMR did not create one automatically.'
+        if ($FromBatch) {
+            $script:DriverBatchRestorePointStatus = $restorePointStatus
         }
     }
 
@@ -7601,17 +7654,48 @@ function Start-AMRDriverUpdateAction {
     $targetAvailableVersion = [string]$selected.AvailableVersion
     $targetSourceAdapter = if($isCatalogPackage){'MicrosoftUpdateCatalog'}else{[string]$selected.SourceAdapter}
     if($isCatalogPackage -and -not [string]::IsNullOrWhiteSpace([string]$selected.LocalPackageFolder)){$localPackageFolder=[string]$selected.LocalPackageFolder}
-    $script:DriverActionJob = Start-Job -ArgumentList $updateId,$revision,$Action,[string]$selected.DeviceId,$hardwareIdsText,$compatibleIdsText,$script:DriverActionProgressFile,$driverPackageRoot,$restorePointStatus,$localPackageFolder,$targetAvailableVersion,$targetSourceAdapter -ScriptBlock {
+    if (-not (Acquire-AMRDriverOperationLock -Operation ([string]$Action))) { (C 'DriverActionStatus').Text='Another Driver Center operation is active. Wait for it to finish.'; return }
+    try {
+        $script:DriverActionJob = Start-Job -ArgumentList $updateId,$revision,$Action,[string]$selected.DeviceId,$hardwareIdsText,$compatibleIdsText,$script:DriverActionProgressFile,$driverPackageRoot,$restorePointStatus,$localPackageFolder,$targetAvailableVersion,$targetSourceAdapter -ScriptBlock {
         param($TargetUpdateId,$TargetRevision,$RequestedAction,$TargetDeviceId,$TargetHardwareIdsText,$TargetCompatibleIdsText,$ProgressFile,$TargetDownloadRoot,$RestorePointStatus,$TargetLocalPackageFolder,$TargetAvailableVersion,$TargetSourceAdapter)
+function Test-AMRDriverVersionMatch {
+    [CmdletBinding()]
+    param([string]$Installed,[string]$Target,[string[]]$Providers=@())
+    $installedText=([string]$Installed).Trim(); $targetText=([string]$Target).Trim()
+    if ([string]::IsNullOrWhiteSpace($installedText) -or [string]::IsNullOrWhiteSpace($targetText)) { return [pscustomobject]@{Matches=$false;MatchType='None'} }
+    if ($installedText.Equals($targetText,[System.StringComparison]::OrdinalIgnoreCase)) { return [pscustomobject]@{Matches=$true;MatchType='Exact'} }
+    $installedParts=@($installedText -split '[^0-9]+' | Where-Object { $_ -ne '' })
+    $targetParts=@($targetText -split '[^0-9]+' | Where-Object { $_ -ne '' })
+    # Windows may prepend the OS version (10.0) to a vendor driver version.
+    if ($installedParts.Count -ge 3 -and $installedParts[0] -eq '10' -and $installedParts[1] -eq '0') {
+        $installedParts=@($installedParts | Select-Object -Skip 2)
+    }
+    # A version is verified only when every numeric component is present and equal.
+    # Short prefixes (for example 31 matching 31.0.15.5161) are not sufficient.
+    if ($installedParts.Count -ge 2 -and $targetParts.Count -ge 2 -and $installedParts.Count -eq $targetParts.Count) {
+        $same=$true
+        for ($i=0; $i -lt $targetParts.Count; $i++) {
+            if ($installedParts[$i] -ne $targetParts[$i]) { $same=$false; break }
+        }
+        if ($same) { return [pscustomobject]@{Matches=$true;MatchType='NumericExact'} }
+    }
+    return [pscustomobject]@{Matches=$false;MatchType='None'}
+}
         $ErrorActionPreference = 'Stop'
         function Get-AMRTargetDriverState {
             param([string]$DeviceInstanceId)
-            $driver = $null; $device = $null
-            try { $driver = Get-CimInstance -ClassName Win32_PnPSignedDriver -ErrorAction Stop | Where-Object { ([string]$_.DeviceID).Equals($DeviceInstanceId,[System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1 } catch {}
-            try { $device = Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction Stop | Where-Object { ([string]$_.PNPDeviceID).Equals($DeviceInstanceId,[System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1 } catch {}
-            if (-not $driver) { return [pscustomobject]@{ Found=$false; DriverVersion=''; InfName=''; ProviderName=''; IsSigned=$false; ConfigManagerErrorCode=$null; Status='Driver record not found' } }
-            $errorCode = $null; if ($device) { try { $errorCode = [int]$device.ConfigManagerErrorCode } catch {} }
-            return [pscustomobject]@{ Found=$true; DriverVersion=[string]$driver.DriverVersion; InfName=[string]$driver.InfName; ProviderName=[string]$driver.DriverProviderName; IsSigned=[bool]$driver.IsSigned; ConfigManagerErrorCode=$errorCode; Status=[string]$(if ($device) { $device.Status } else { 'Device state unavailable' }) }
+            $driver = $null; $device = $null; $driverQueryError = ''; $deviceQueryError = ''
+            try {
+                $driver = Get-CimInstance -ClassName Win32_PnPSignedDriver -ErrorAction Stop | Where-Object { ([string]$_.DeviceID).Equals($DeviceInstanceId,[System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
+            } catch { $driverQueryError = [string]$_.Exception.Message }
+            try {
+                $device = Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction Stop | Where-Object { ([string]$_.PNPDeviceID).Equals($DeviceInstanceId,[System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
+            } catch { $deviceQueryError = [string]$_.Exception.Message }
+            if (-not $driver) {
+                return [pscustomobject]@{ Found=$false; DriverVersion=''; InfName=''; ProviderName=''; IsSigned=$false; ConfigManagerErrorCode=$null; Status='Driver record not found'; DriverQueryError=$driverQueryError; DeviceQueryError=$deviceQueryError }
+            }
+            $errorCode = $null; if ($device) { try { $errorCode = [int]$device.ConfigManagerErrorCode } catch { $deviceQueryError = [string]$_.Exception.Message } }
+            return [pscustomobject]@{ Found=$true; DriverVersion=[string]$driver.DriverVersion; InfName=[string]$driver.InfName; ProviderName=[string]$driver.DriverProviderName; IsSigned=[bool]$driver.IsSigned; ConfigManagerErrorCode=$errorCode; Status=[string]$(if ($device) { $device.Status } else { 'Device state unavailable' }); DriverQueryError=$driverQueryError; DeviceQueryError=$deviceQueryError }
         }
         function Test-AMRInfExactHardwareId {
             param([string]$InfText,[string[]]$DeviceIds)
@@ -8054,7 +8138,8 @@ function Start-AMRDriverUpdateAction {
                     Start-Sleep -Seconds 2
                     $driverStateAfter = Get-AMRTargetDriverState -DeviceInstanceId $TargetDeviceId
                     $signatureAudit = if ($driverStateAfter.Found -and $driverStateAfter.IsSigned) { 'Installed device driver reports IsSigned=True.' } elseif ($driverStateAfter.Found) { 'WARNING: installed device driver reports IsSigned=False.' } else { 'The active driver record could not be queried after PnPUtil.' }
-                    $versionMatches = (-not [string]::IsNullOrWhiteSpace([string]$TargetAvailableVersion) -and ([string]$driverStateAfter.DriverVersion).Trim() -eq ([string]$TargetAvailableVersion).Trim())
+                    $versionMatchResult = Test-AMRDriverVersionMatch -Installed ([string]$driverStateAfter.DriverVersion) -Target ([string]$TargetAvailableVersion) -Providers @([string]$driverStateAfter.ProviderName)
+                    $versionMatches = [bool]$versionMatchResult.Matches
                     $deviceHealthy = ($driverStateAfter.ConfigManagerErrorCode -eq 0)
                     $postInstallVerification = 'Pending: active driver version or device health could not yet be confirmed.'
                     $outcomeStatus = 'CompletedVerificationPending'
@@ -8124,12 +8209,37 @@ function Start-AMRDriverUpdateAction {
                     $installDonePayload | ConvertTo-Json -Compress | Set-Content -LiteralPath ($ProgressFile + '.tmp') -Encoding UTF8
                     Move-Item -LiteralPath ($ProgressFile + '.tmp') -Destination $ProgressFile -Force
                 } catch {}
-                Start-Sleep -Seconds 2
-                $driverStateAfter = Get-AMRTargetDriverState -DeviceInstanceId $TargetDeviceId
-                $signatureAudit = if ($driverStateAfter.Found -and $driverStateAfter.IsSigned) { 'Installed device driver reports IsSigned=True.' } elseif ($driverStateAfter.Found) { 'WARNING: installed device driver reports IsSigned=False.' } else { 'The active driver record could not be queried after Windows Update.' }
+                # Windows Update may report completion before PnP/CIM exposes the new active
+                # driver record. Resolve a missing UI version from the authoritative WU title,
+                # then poll the exact device for up to 30 seconds instead of making one early query.
+                $expectedTargetVersion = [string]$TargetAvailableVersion
+                if ([string]::IsNullOrWhiteSpace($expectedTargetVersion) -or $expectedTargetVersion -match '(?i)^version not supplied$') {
+                    $titleVersionMatch = [regex]::Match([string]$target.Title,'(?<![0-9.])[0-9]+(?:\.[0-9]+){2,}(?![0-9.])')
+                    if ($titleVersionMatch.Success) { $expectedTargetVersion = [string]$titleVersionMatch.Value }
+                }
                 $wuaRebootRequired = [bool]$installResult.RebootRequired -or [bool]$itemResult.RebootRequired
-                $versionMatches = (-not [string]::IsNullOrWhiteSpace([string]$TargetAvailableVersion) -and ([string]$driverStateAfter.DriverVersion).Trim() -eq ([string]$TargetAvailableVersion).Trim())
-                $deviceHealthy = ($driverStateAfter.ConfigManagerErrorCode -eq 0)
+                try {
+                    $verifyPayload = [pscustomobject]@{ Percent=100; Stage='Verifying installed driver state'; Updated=(Get-Date).ToString('o') }
+                    $verifyPayload | ConvertTo-Json -Compress | Set-Content -LiteralPath ($ProgressFile + '.tmp') -Encoding UTF8
+                    Move-Item -LiteralPath ($ProgressFile + '.tmp') -Destination $ProgressFile -Force
+                } catch {}
+                $verificationDeadline = (Get-Date).AddSeconds(30)
+                $verificationAttempts = 0
+                $driverStateAfter = $null
+                $versionMatchResult = [pscustomobject]@{ Matches=$false; MatchType='None' }
+                $versionMatches = $false
+                $deviceHealthy = $false
+                do {
+                    $verificationAttempts++
+                    $driverStateAfter = Get-AMRTargetDriverState -DeviceInstanceId $TargetDeviceId
+                    $versionMatchResult = Test-AMRDriverVersionMatch -Installed ([string]$driverStateAfter.DriverVersion) -Target $expectedTargetVersion -Providers @([string]$driverStateAfter.ProviderName)
+                    $versionMatches = [bool]$versionMatchResult.Matches
+                    $deviceHealthy = ($null -ne $driverStateAfter.ConfigManagerErrorCode -and [int]$driverStateAfter.ConfigManagerErrorCode -eq 0)
+                    if ($driverStateAfter.Found -and $driverStateAfter.IsSigned -and $deviceHealthy -and ($versionMatches -or [string]::IsNullOrWhiteSpace($expectedTargetVersion))) { break }
+                    if ((Get-Date) -ge $verificationDeadline) { break }
+                    Start-Sleep -Milliseconds 1000
+                } while ($true)
+                $signatureAudit = if ($driverStateAfter.Found -and $driverStateAfter.IsSigned) { 'Installed device driver reports IsSigned=True.' } elseif ($driverStateAfter.Found) { 'WARNING: installed driver record reports IsSigned=False.' } elseif (-not [string]::IsNullOrWhiteSpace([string]$driverStateAfter.DriverQueryError)) { 'The active driver record query failed: ' + [string]$driverStateAfter.DriverQueryError } else { 'The active driver record was not found after the 30-second verification window.' }
                 $postInstallVerification = 'Pending: active driver version or device health could not yet be confirmed.'
                 if ($driverStateAfter.Found -and $driverStateAfter.IsSigned -and $deviceHealthy -and $versionMatches) {
                     $postInstallVerification = ('Passed: active signed driver version {0} is active and the device reports ConfigManagerErrorCode=0.' -f $driverStateAfter.DriverVersion)
@@ -8137,10 +8247,13 @@ function Start-AMRDriverUpdateAction {
                     $outcomeMessage = if ($wuaRebootRequired) { 'Windows Update completed the driver installation; the expected signed driver is active and Windows requires a restart.' } else { 'Windows Update completed the driver installation and AMR verified the active signed driver and device status.' }
                 } else {
                     $outcomeStatus = 'CompletedVerificationPending'
-                    if (-not $driverStateAfter.Found) { $postInstallVerification = 'Pending: Windows Update returned success, but AMR could not find the active driver record. Rescan before treating this as installed.' }
+                    if (-not $driverStateAfter.Found -and -not [string]::IsNullOrWhiteSpace([string]$driverStateAfter.DriverQueryError)) { $postInstallVerification = ('Pending: active driver query failed after {0} attempt(s): {1}' -f $verificationAttempts,$driverStateAfter.DriverQueryError) }
+                    elseif (-not $driverStateAfter.Found) { $postInstallVerification = ('Pending: Windows Update returned success, but AMR could not find the active driver record after {0} verification attempt(s). Rescan before treating this as installed.' -f $verificationAttempts) }
                     elseif (-not $driverStateAfter.IsSigned) { $postInstallVerification = 'Warning: Windows reports IsSigned=False for the active driver; this is not verified.' }
                     elseif ($null -ne $driverStateAfter.ConfigManagerErrorCode -and $driverStateAfter.ConfigManagerErrorCode -ne 0) { $postInstallVerification = ('Pending: device problem code {0} is reported after installation.' -f $driverStateAfter.ConfigManagerErrorCode) }
-                    else { $postInstallVerification = ('Pending: active version {0} does not exactly match expected version {1}.' -f $driverStateAfter.DriverVersion,$TargetAvailableVersion) }
+                    elseif ($null -eq $driverStateAfter.ConfigManagerErrorCode) { $postInstallVerification = ('Pending: driver record was found, but device health could not be queried within 30 seconds ({0} attempts). {1}' -f $verificationAttempts,[string]$driverStateAfter.DeviceQueryError) }
+                    elseif ([string]::IsNullOrWhiteSpace($expectedTargetVersion)) { $postInstallVerification = 'Pending: Windows Update did not provide a parseable target driver version in its metadata or title. The active driver was found, but version matching cannot be confirmed.' }
+                    elseif ($driverStateAfter.Found -and -not $versionMatches) { $postInstallVerification = ('Pending: active version {0} does not exactly match expected version {1} after {2} verification attempt(s).' -f $driverStateAfter.DriverVersion,$expectedTargetVersion,$verificationAttempts) }
                     $outcomeMessage = 'Windows Update completed its operation, but AMR could not fully verify the active driver. Rescan the device before treating the installation as complete.'
                 }
                 [pscustomobject]@{ Success=$true; OutcomeStatus=$outcomeStatus; Action='Install'; Message=$outcomeMessage; RebootRequired=$wuaRebootRequired; ResultCode=$installResultCode; HResult=[int]$itemResult.HResult; RestorePointStatus=$restorePointStatus; PreInstallVerification=$preInstallVerification; SignatureAudit=$signatureAudit; PostInstallVerification=$postInstallVerification; InstalledDriverVersion=[string]$driverStateAfter.DriverVersion; InstalledDriverInf=[string]$driverStateAfter.InfName; PreviousDriverVersion=[string]$driverStateBefore.DriverVersion; PreviousDriverBackupStatus=[string]$previousDriverBackup.Status; PreviousDriverBackupPath=[string]$previousDriverBackup.Path; DeviceConfigManagerErrorCode=$driverStateAfter.ConfigManagerErrorCode }
@@ -8158,7 +8271,40 @@ function Start-AMRDriverUpdateAction {
         $script:DriverActionTimer.Interval = [TimeSpan]::FromMilliseconds(500)
         $script:DriverActionTimer.Add_Tick({
             $job = $script:DriverActionJob
-            if (-not $job) { $script:DriverActionTimer.Stop(); return }
+            if (-not $job) {
+                $script:DriverActionTimer.Stop()
+                Release-AMRDriverOperationLock
+                $lostActionType=[string]$script:DriverActionType
+                $lostOperationId=[string]$script:DriverCurrentOperationId
+                if ($script:DriverActionProgressFile) {
+                    try { Remove-Item -LiteralPath $script:DriverActionProgressFile -Force -ErrorAction SilentlyContinue } catch {}
+                    try { Remove-Item -LiteralPath ($script:DriverActionProgressFile + '.tmp') -Force -ErrorAction SilentlyContinue } catch {}
+                }
+                $script:DriverActionProgressFile=$null
+                $script:DriverActionJob=$null
+                $script:DriverActionUpdateId=$null
+                $script:DriverActionType=$null
+                $script:DriverActionDeviceName=$null
+                $script:DriverActionDeviceId=$null
+                $script:DriverActionSource=$null
+                $script:DriverActionUpdateTitle=$null
+                $script:DriverActionVersion=$null
+                $script:DriverCurrentOperationId=$null
+                $script:DriverSmartQueueActive=$false; $script:DriverSmartDownloadQueue=@()
+                $script:DriverBatchActive=$false; $script:DriverBatchQueue=@()
+                if ($script:DriverOperationState.Name -in @('DriverDownload','DriverInstall')) {
+                    $script:DriverOperationState=[pscustomobject]@{Name='Idle';State='Idle';StartedAt=$null;Generation=[int]$script:DriverOperationState.Generation;CanCancel=$false;Status='Ready';PartialShown=$false}
+                }
+                try {
+                    (C 'DriverOperationProgress').Visibility='Collapsed'
+                    (C 'DriverOperationProgress').IsIndeterminate=$false
+                    (C 'DriverOperationProgress').Value=0
+                    (C 'DriverActionStatus').Text=('The {0} worker reference was lost. The operation state was reset; check Diagnostics and rescan before retrying.' -f $(if($lostActionType){$lostActionType}else{'driver'}))
+                } catch {}
+                Write-AMRDriverDiagnostic -Severity ERROR -Operation ('Driver'+$(if($lostActionType){$lostActionType}else{'Action'})) -Stage WorkerReferenceLost -Message 'The dispatcher timer found no active driver action job reference; UI state and operation lock were recovered.' -OperationId $lostOperationId -Source 'Phase1ActionRecovery' -Result 'Recovered'
+                Update-AMRDriverActionButtons
+                return
+            }
             if ($script:DriverActionProgressFile -and (Test-Path -LiteralPath $script:DriverActionProgressFile -PathType Leaf)) {
                 try {
                     $progressData = Get-Content -LiteralPath $script:DriverActionProgressFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
@@ -8202,6 +8348,29 @@ function Start-AMRDriverUpdateAction {
                         (C 'DriverActionStatus').Text = ('{0} driver via Windows Update: {1}%' -f $stageText,$progressPercent)
                     }
                 } catch {}
+            }
+            $actionTimeoutOperation=[string]$script:DriverActionType
+            $actionTimeoutGraceSeconds=if($actionTimeoutOperation -eq 'Install'){300}else{0}
+            $actionTimeoutExpired=(Test-AMRDriverOperationTimeout -Operation $actionTimeoutOperation -StartedAt ([datetime]$script:DriverActionStartedAt))
+            if ($actionTimeoutExpired -and $actionTimeoutGraceSeconds -gt 0) {
+                # The WUA worker has its own 180-minute RequestAbort path. Give it five
+                # minutes to return that result before the UI watchdog terminates the job.
+                $configuredTimeout=[int]$script:AMRDriverTimeouts[$actionTimeoutOperation]
+                $actionTimeoutExpired=(((Get-Date)-[datetime]$script:DriverActionStartedAt).TotalSeconds -ge ($configuredTimeout+$actionTimeoutGraceSeconds))
+            }
+            if ($job.State -eq 'Running' -and $actionTimeoutExpired) {
+                try { Stop-Job -Job $job -ErrorAction SilentlyContinue; Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
+                $script:DriverActionJob=$null; $script:DriverActionTimer.Stop(); Release-AMRDriverOperationLock
+                if($script:DriverActionProgressFile){try{Remove-Item -LiteralPath $script:DriverActionProgressFile -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath ($script:DriverActionProgressFile+'.tmp') -Force -ErrorAction SilentlyContinue}catch{}}
+                $timedOutAction=[string]$script:DriverActionType
+                $script:DriverActionProgressFile=$null; $script:DriverActionType=$null; $script:DriverActionUpdateId=$null
+                $script:DriverSmartQueueActive=$false; $script:DriverSmartDownloadQueue=@(); $script:DriverBatchActive=$false; $script:DriverBatchQueue=@()
+                if($script:DriverOperationState.Name -in @('DriverDownload','DriverInstall')){$script:DriverOperationState=[pscustomobject]@{Name='Idle';State='Idle';StartedAt=$null;Generation=[int]$script:DriverOperationState.Generation;CanCancel=$false;Status='Ready'}}
+                (C 'DriverOperationProgress').Visibility='Collapsed'; (C 'DriverOperationProgress').IsIndeterminate=$false
+                Write-AMRDriverTimeoutEvent -Operation ('Driver'+$timedOutAction) -Message $(if($timedOutAction -eq 'Install'){'Driver installation exceeded its configured timeout plus the Windows Update abort grace period and was stopped.'}else{'Driver action exceeded its configured timeout and was stopped.'}) -OperationId ([string]$script:DriverCurrentOperationId)
+                (C 'DriverActionStatus').Text='Driver operation timed out and was stopped. Review Diagnostics and retry only after checking device state.'
+                Update-AMRDriverActionButtons
+                return
             }
             if ($job.State -notin @('Completed','Failed','Stopped')) { return }
             $script:DriverActionTimer.Stop()
@@ -8290,6 +8459,11 @@ function Start-AMRDriverUpdateAction {
                 Add-AMRDriverHistoryEntry -Action ([string]$script:DriverActionType) -Device ([string]$script:DriverActionDeviceName) -Update ([string]$script:DriverActionUpdateTitle) -Version ([string]$script:DriverActionVersion) -Status 'Failed' -Details ([string]$_.Exception.Message) -DeviceInstanceId ([string]$script:DriverActionDeviceId) -OperationId $script:DriverCurrentOperationId
                 Write-AMRLog ('Driver update action failed: ' + $_.Exception.Message) ERROR Overview
                 Write-AMRDriverDiagnostic -Severity ERROR -Operation ('Driver' + [string]$script:DriverActionType) -Stage Failed -Message 'Driver download/install operation failed.' -DeviceId ([string]$script:DriverActionDeviceId) -OperationId $script:DriverCurrentOperationId -DurationMs ([long]((Get-Date)-$script:DriverActionStartedAt).TotalMilliseconds) -Result 'Failed' -ErrorRecord $_ -Context @{UpdateId=$script:DriverActionUpdateId;UpdateTitle=$script:DriverActionUpdateTitle;Version=$script:DriverActionVersion}
+                if ([string]$script:DriverActionType -eq 'Install') {
+                    $recoveryRoot=Join-Path $env:ProgramData 'AMR Windows Utility\DriverRecovery'
+                    $recoveryPrompt="The driver installation failed. Recovery options:`n`n1. Device Manager > device Properties > Driver > Roll Back Driver (if Windows enables it).`n2. Use Smart Restore to target the exact verified AMR System Restore point you created manually, if available.`n3. Review previous-driver exports under:`n$recoveryRoot`n`nOpen Device Manager now?"
+                    if((Show-AMRMessage $recoveryPrompt 'Driver Installation Recovery' YesNo Warning) -eq 'Yes'){try{Start-Process -FilePath 'devmgmt.msc' -ErrorAction Stop}catch{Show-AMRMessage ('Could not open Device Manager: '+[string]$_.Exception.Message) 'Recovery' OK Warning | Out-Null}}
+                }
                 if ($script:DriverBatchActive -and $script:DriverActionType -eq 'Install') {
                     $script:DriverBatchResults += [pscustomobject]@{ Device=[string]$script:DriverActionDeviceName; Update=[string]$script:DriverActionUpdateTitle; Success=$false; RebootRequired=$false; Status='Failed'; Details=[string]$_.Exception.Message }
                 } elseif ($script:DriverSmartQueueActive -and [string]$script:DriverActionType -eq 'Download') {
@@ -8302,6 +8476,7 @@ function Start-AMRDriverUpdateAction {
                 $wasBatchInstall = ($script:DriverBatchActive -and [string]$script:DriverActionType -eq 'Install')
                 $wasSmartDownload = ($script:DriverSmartQueueActive -and [string]$script:DriverActionType -eq 'Download')
                 try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
+                Release-AMRDriverOperationLock
                 $script:DriverActionJob = $null
                 if($script:DriverOperationState.Name -in @('DriverDownload','DriverInstall')){$script:DriverOperationState=[pscustomobject]@{Name='Idle';State='Idle';StartedAt=$null;Generation=[int]$script:DriverOperationState.Generation;CanCancel=$false;Status='Ready'}}
                 $script:DriverActionUpdateId = $null
@@ -8321,7 +8496,14 @@ function Start-AMRDriverUpdateAction {
                 $script:DriverActionProgressFile = $null
                 Update-AMRDriverActionButtons
                 if ($wasSmartDownload) {
-                    $script:DriverSmartDownloadCompleted++
+                    $script:DriverSmartQueueIterations = [int]$script:DriverSmartQueueIterations + 1
+                    if ($script:DriverSmartQueueIterations -gt [int]$script:AMRDriverMaxQueueIterations) {
+                        $script:DriverSmartQueueActive = $false; $script:DriverSmartDownloadQueue = @()
+                        Write-AMRDriverDiagnostic -Severity ERROR -Operation SmartInstall -Stage QueueGuard -Message 'Smart Install queue stopped after exceeding the safety iteration limit.' -Source 'Phase1QueueGuard' -Result 'Stopped'
+                        (C 'DriverActionStatus').Text = 'Smart Install queue stopped by its safety limit. Review Diagnostics before retrying.'
+                        Update-AMRDriverActionButtons
+                    }
+                    if ($script:DriverSmartQueueActive) { $script:DriverSmartDownloadCompleted++
                     if (@($script:DriverSmartDownloadQueue).Count -gt 0) {
                         $nextSmartDevice = $script:DriverSmartDownloadQueue[0]
                         if (@($script:DriverSmartDownloadQueue).Count -gt 1) { $script:DriverSmartDownloadQueue = @($script:DriverSmartDownloadQueue | Select-Object -Skip 1) } else { $script:DriverSmartDownloadQueue = @() }
@@ -8340,10 +8522,18 @@ function Start-AMRDriverUpdateAction {
                         $script:DriverSmartDownloadQueue = @()
                         Complete-AMRSmartInstallPreparation
                     }
+                    }
                 }
                 if ($wasBatchInstall) {
                     $script:DriverBatchCompleted++
                     while (@($script:DriverBatchQueue).Count -gt 0 -and -not $script:DriverActionJob -and -not $script:DriverBatchRebootRequired) {
+                        $script:DriverBatchQueueIterations = [int]$script:DriverBatchQueueIterations + 1
+                        if ($script:DriverBatchQueueIterations -gt [int]$script:AMRDriverMaxQueueIterations) {
+                            $script:DriverBatchQueue = @(); $script:DriverBatchActive = $false
+                            Write-AMRDriverDiagnostic -Severity ERROR -Operation BatchInstall -Stage QueueGuard -Message 'Batch Install queue stopped after exceeding the safety iteration limit.' -Source 'Phase1QueueGuard' -Result 'Stopped'
+                            (C 'DriverActionStatus').Text = 'Batch Install queue stopped by its safety limit. Review Diagnostics before retrying.'
+                            break
+                        }
                         $nextBatchDevice = $script:DriverBatchQueue[0]
                         if (@($script:DriverBatchQueue).Count -gt 1) { $script:DriverBatchQueue = @($script:DriverBatchQueue | Select-Object -Skip 1) } else { $script:DriverBatchQueue = @() }
                         try {
@@ -8382,6 +8572,7 @@ function Start-AMRDriverUpdateAction {
             }
         })
     }
+    } catch { Release-AMRDriverOperationLock; throw }
     $script:DriverActionUpdateId = $updateId
     $script:DriverActionType = $Action
     $script:DriverCurrentOperationId = [guid]::NewGuid().ToString('N')
@@ -8421,7 +8612,12 @@ function Get-AMRDriverInstallPlan {
         $key = ('{0}|{1}' -f [string]$row.UpdateId,[int]$row.UpdateRevision)
         if ($seen.ContainsKey($key)) { continue }
         $seen[$key] = $true
-        $classText = (([string]$row.DeviceClass) + ' ' + [string]$row.DriverClass + ' ' + [string]$row.DeviceName).ToLowerInvariant()
+        # Driver rows can originate from different providers and may not expose every optional class field.
+        # Read optional properties through PSObject.Properties to avoid WPF dispatcher exceptions.
+        $deviceClassValue = if ($row.PSObject.Properties['DeviceClass']) { [string]$row.PSObject.Properties['DeviceClass'].Value } else { '' }
+        $driverClassValue = if ($row.PSObject.Properties['DriverClass']) { [string]$row.PSObject.Properties['DriverClass'].Value } else { '' }
+        $deviceNameValue = if ($row.PSObject.Properties['DeviceName']) { [string]$row.PSObject.Properties['DeviceName'].Value } else { '' }
+        $classText = ($deviceClassValue + ' ' + $driverClassValue + ' ' + $deviceNameValue).ToLowerInvariant()
         $priority = 50; $group = 'Other devices'; $reason = 'No special dependency class detected; install after platform-level drivers.'
         if ($classText -match 'system|chipset|smbus|pci|processor|motherboard') { $priority=10; $group='Platform / chipset'; $reason='Platform-level device class; schedule early.' }
         elseif ($classText -match 'storage|sata|raid|scsi|nvme|controller') { $priority=20; $group='Storage / controllers'; $reason='Storage/controller class; schedule before peripheral drivers.' }
@@ -8445,7 +8641,7 @@ function Show-AMRDriverInstallPlan {
         $version=if ([string]::IsNullOrWhiteSpace([string]$row.AvailableVersion)) {'version not reported'} else {[string]$row.AvailableVersion}
         $lines += ('{0}. [{1}] {2} — {3} ({4})' -f $index,$entry.Group,[string]$row.DeviceName,[string]$row.AvailableUpdate,$version)
     }
-    $body = "AMR proposed installation order`n`n" + ($lines -join "`n") + "`n`nPlanning rules: platform/chipset → storage/controllers → network → graphics → audio → other devices. This is a conservative class-based heuristic, not a vendor-provided dependency graph. Each package is revalidated immediately before installation. If Windows requests a restart, the remaining queue will pause until you restart and scan again. A verified System Restore point is created before the batch; AMR also attempts to export the currently installed OEM driver package for each device when Windows permits it.`n`nContinue with this plan?"
+    $body = "AMR proposed installation order`n`n" + ($lines -join "`n") + "`n`nPlanning rules: platform/chipset → storage/controllers → network → graphics → audio → other devices. This is a conservative class-based heuristic, not a vendor-provided dependency graph. Each package is revalidated immediately before installation. If Windows requests a restart, the remaining queue will pause until you restart and scan again. AMR does not create a System Restore point automatically. Create one manually first if you want a recovery point; AMR also attempts to export the currently installed OEM driver package for each device when Windows permits it.`n`nContinue with this plan?"
     if ((Show-AMRMessage $body 'Review Driver Installation Plan' YesNo Warning) -ne 'Yes') { return }
     Start-AMRDriverBatchInstall -ApprovedPlan $plan
 }
@@ -8474,6 +8670,7 @@ function Start-AMRDriverBatchInstall {
         if ((Show-AMRMessage $confirmText 'Confirm Batch Driver Installation' YesNo Warning) -ne 'Yes') { return }
     }
 
+    $script:DriverBatchQueueIterations = 0
     $script:DriverBatchActive = $true
     $script:DriverBatchTotal = $uniqueRows.Count
     $script:DriverBatchCompleted = 0
@@ -8811,10 +9008,12 @@ function Start-AMRDriverManagedWorker {
     $progressPath=Join-Path $progressRoot ($workerId+'.json')
     $null=Write-AMRDriverWorkerProgress -Path $progressPath -Stage 'Starting background operation'
     $arguments = @($bundle,$Operation,$Device,$Candidate,[string]$script:DownloadDir,[string]$script:DriverWindowsContext,[string]$script:AMRSessionId,[string]$script:DriverRestorePointStateFile,$progressPath,[string]$script:DriverDiagnosticFile,$workerOperationId,[string]$script:DriverCurrentScanId)
+    if (-not (Acquire-AMRDriverOperationLock -Operation $Operation)) { throw 'Another Driver Center operation is active. Wait for it to finish.' }
     try { $job = Start-Job -Name ('AMR-Driver-' + $Operation) -ArgumentList $arguments -ScriptBlock $workerScript -ErrorAction Stop }
     catch {
         Write-AMRDriverDiagnostic -Severity ERROR -Operation $Operation -Stage WorkerStartFailed -Message 'Could not start the managed driver background worker.' -DeviceId $deviceInstanceId -OperationId $workerOperationId -Source 'Start-AMRDriverManagedWorker' -Result 'Failed' -ErrorRecord $_
         try{Remove-Item -LiteralPath $progressPath -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath ($progressPath+'.tmp') -Force -ErrorAction SilentlyContinue}catch{}
+        Release-AMRDriverOperationLock
         throw
     }
     $job | Add-Member -NotePropertyName AMRGeneration -NotePropertyValue $generation -Force
@@ -8824,6 +9023,7 @@ function Start-AMRDriverManagedWorker {
     $script:DriverManagedProgressFile=$progressPath
     $script:DriverManagedWorkerId=$workerId
     $script:DriverOperationState = [pscustomobject]@{ Name=$Operation; State='Running'; StartedAt=(Get-Date); Generation=$generation; ScanGeneration=[int]$script:DriverScanGeneration; WorkerId=$workerId; DeviceId=$deviceInstanceId; CanCancel=($Operation -in @('CatalogDiscovery','RollbackCheck','VendorDiscovery')); Status=$(switch($Operation){'CatalogDiscovery'{'Searching Microsoft Update Catalog'} 'CatalogAcquisition'{'Downloading and verifying the selected driver package'} 'CatalogStaging'{'Revalidating and staging the verified driver package'} 'RollbackCheck'{'Checking rollback and recovery records'} 'RestorePoint'{'Creating and verifying a System Restore point'} 'VendorDiscovery'{'Searching registered official vendor providers'} 'VendorPackageAcquisition'{'Acquiring and verifying a package through the local vendor API'}}) }
+    Register-AMRDriverManagedWatchdog -Operation $Operation -StartedAt ([datetime]$script:DriverOperationState.StartedAt) | Out-Null
     try {
         (C 'DriverActionStatus').Text = ([string]$script:DriverOperationState.Status + '…')
         (C 'DriverOperationProgress').Visibility='Visible'; (C 'DriverOperationProgress').IsIndeterminate=$true
@@ -8832,6 +9032,14 @@ function Start-AMRDriverManagedWorker {
         $progressTimer.Interval=[TimeSpan]::FromMilliseconds(350)
         $progressTimer.Add_Tick({
             if(-not $script:DriverManagedJob){$progressTimer=$script:DriverManagedProgressTimer;if($progressTimer){$progressTimer.Stop()};$script:DriverManagedProgressTimer=$null;return}
+            $managedWatchdog=$script:DriverManagedWatchdog
+            if($managedWatchdog -and [int]$managedWatchdog.TimeoutSeconds -gt 0 -and (Test-AMRDriverOperationTimeout -Operation ([string]$managedWatchdog.Operation) -StartedAt ([datetime]$managedWatchdog.StartedAt))){
+                $timedOutOperation=[string]$managedWatchdog.Operation; $timedOutId=[string]$script:DriverManagedJob.AMROperationId
+                Write-AMRDriverTimeoutEvent -Operation $timedOutOperation -Message ('Managed driver operation exceeded its configured timeout: '+$timedOutOperation) -OperationId $timedOutId
+                try { Stop-AMRDriverManagedWorker -Force } catch { Write-AMRDiagnostic -Severity 'ERROR' -Area 'DriverCenter' -Operation 'ManagedWorkerTimeoutRecovery' -Message ([string]$_.Exception.Message) }
+                (C 'DriverActionStatus').Text=('The {0} operation timed out and was stopped. Review Diagnostics before retrying.' -f $timedOutOperation)
+                return
+            }
             $path=[string]$script:DriverManagedProgressFile
             if($path -and (Test-Path -LiteralPath $path -PathType Leaf)){
                 try {
@@ -8862,6 +9070,8 @@ function Stop-AMRDriverManagedWorker {
     if($script:DriverManagedProgressTimer){try{$script:DriverManagedProgressTimer.Stop()}catch{};$script:DriverManagedProgressTimer=$null}
     if($script:DriverManagedProgressFile){try{Remove-Item -LiteralPath $script:DriverManagedProgressFile -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath ($script:DriverManagedProgressFile+'.tmp') -Force -ErrorAction SilentlyContinue}catch{}}
     $script:DriverManagedProgressFile=$null; $script:DriverManagedWorkerId=$null
+    $script:DriverManagedWatchdog=$null
+    Release-AMRDriverOperationLock
     $script:DriverOperationState = [pscustomobject]@{ Name='Idle'; State='Idle'; StartedAt=$null; Generation=[int]$script:DriverOperationState.Generation; CanCancel=$false; Status='Ready' }
     try { (C 'DriverOperationProgress').IsIndeterminate=$false; (C 'DriverOperationProgress').Visibility='Collapsed'; $cancelButton=C 'DriverCancelManagedOperationBtn';if($cancelButton){$cancelButton.Visibility='Collapsed';$cancelButton.IsEnabled=$false} } catch {}
     Update-AMRDriverActionButtons
@@ -8903,6 +9113,8 @@ function Complete-AMRDriverManagedWorker {
     if($script:DriverManagedProgressTimer){try{$script:DriverManagedProgressTimer.Stop()}catch{};$script:DriverManagedProgressTimer=$null}
     if($script:DriverManagedProgressFile){try{Remove-Item -LiteralPath $script:DriverManagedProgressFile -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath ($script:DriverManagedProgressFile+'.tmp') -Force -ErrorAction SilentlyContinue}catch{}}
     $script:DriverManagedProgressFile=$null; $script:DriverManagedWorkerId=$null
+    $script:DriverManagedWatchdog=$null
+    Release-AMRDriverOperationLock
     $script:DriverOperationState = [pscustomobject]@{ Name='Idle'; State='Idle'; StartedAt=$null; Generation=[int]$script:DriverOperationState.Generation; CanCancel=$false; Status='Ready' }
     try { (C 'DriverOperationProgress').IsIndeterminate=$false; (C 'DriverOperationProgress').Visibility='Collapsed'; $cancelButton=C 'DriverCancelManagedOperationBtn';if($cancelButton){$cancelButton.Visibility='Collapsed';$cancelButton.IsEnabled=$false} } catch {}
     Update-AMRDriverActionButtons
@@ -9447,9 +9659,9 @@ function Get-AMRProfessionalCandidateComparison {
             }
         } elseif ($adapter -eq 'MicrosoftUpdateCatalog') {
             $matchRank = 2
-            try { $matchRank = [int]$item.MatchTypeRank } catch {}
+            if ($item.PSObject.Properties['MatchTypeRank'] -and $null -ne $item.MatchTypeRank) { try { $matchRank = [int]$item.MatchTypeRank } catch { $matchRank = 2 } }
             $idIndex = 0
-            try { $idIndex = [int]$item.MatchIdIndex } catch {}
+            if ($item.PSObject.Properties['MatchIdIndex'] -and $null -ne $item.MatchIdIndex) { try { $idIndex = [int]$item.MatchIdIndex } catch { $idIndex = 0 } }
             if ($matchRank -eq 0) {
                 $score = if ([bool]$item.IsInstallable) { 950 } else { 700 }
                 $score -= ($idIndex * 10)
@@ -9468,7 +9680,7 @@ function Get-AMRProfessionalCandidateComparison {
             $reason = if ([bool]$item.IsDownloaded) { 'Exact OEM model/OS driver-pack catalog match; package hash/signature checked. Bundle contents are not yet extracted and INF-validated, so it is not installable.' } else { 'Exact OEM model/OS driver-pack catalog match; direct package URL is available but acquisition and signature/hash verification are pending.' }
         } elseif ($adapter -eq 'OfficialVendorPortal') {
             $priority = 5
-            try { $priority = [int]$item.Rank } catch {}
+            if ($item.PSObject.Properties['Rank'] -and $null -ne $item.Rank) { try { $priority = [int]$item.Rank } catch { $priority = 5 } }
             $score = 100 - ($priority * 5)
             $reason = 'Official vendor source lead only; no driver package or version has been retrieved or verified.'
         } else {
@@ -9588,7 +9800,12 @@ function Show-AMRProfessionalCandidateManager {
         $Device.UpdateId = if($isCatalogChoice){[string]$choice.CatalogUpdateId}else{[string]$choice.UpdateId}
         $Device.UpdateRevision = if($isCatalogChoice){0}else{[int]$choice.UpdateRevision}
         $Device.AvailableUpdate = [string]$choice.Title
-        $Device.AvailableVersion = if ([string]::IsNullOrWhiteSpace([string]$choice.Version)) { 'Version not supplied' } else { [string]$choice.Version }
+        $choiceVersionText = [string]$choice.Version
+        if ([string]::IsNullOrWhiteSpace($choiceVersionText)) {
+            $choiceTitleVersion = [regex]::Match([string]$choice.Title,'(?<![0-9.])[0-9]+(?:\.[0-9]+){2,}(?![0-9.])')
+            if ($choiceTitleVersion.Success) { $choiceVersionText = [string]$choiceTitleVersion.Value }
+        }
+        $Device.AvailableVersion = if (-not [string]::IsNullOrWhiteSpace($choiceVersionText)) { $choiceVersionText } else { 'Version not supplied' }
         $Device.UpdateStatus = ('Professional choice: candidate #{0} from {1}' -f $choice.Rank,$choice.Source)
         $Device.MatchConfidence = [string]$choice.MatchConfidence
         $Device.MatchReason = [string]$choice.MatchReason
