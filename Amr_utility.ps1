@@ -44,6 +44,15 @@ $script:LogDir      = Join-Path $script:AppRoot 'Logs'
 $script:ExportDir   = Join-Path $script:AppRoot 'Exports'
 $script:IconDir     = Join-Path $script:AppRoot 'Icons'
 $script:DownloadDir = Join-Path $script:AppRoot 'Downloads'
+$script:ScriptRoot = ''
+if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+    $script:ScriptRoot = $PSScriptRoot
+} elseif (-not [string]::IsNullOrWhiteSpace($PSCommandPath)) {
+    $script:ScriptRoot = Split-Path -Parent $PSCommandPath
+}
+$script:BundledIconArchivePath = if (-not [string]::IsNullOrWhiteSpace($script:ScriptRoot)) {
+    Join-Path $script:ScriptRoot 'Icons.zip'
+} else { '' }
 
 New-Item -ItemType Directory -Force -Path $script:BackupDir,$script:LogDir,$script:ExportDir,$script:IconDir,$script:DownloadDir | Out-Null
 $script:LogFile = Join-Path $script:LogDir ("AMR_{0}.log" -f (Get-Date -Format 'yyyyMMdd'))
@@ -2259,157 +2268,307 @@ $RawApps = @(
 # Download once on first use; reuse local icons afterward; refresh when the catalog has unmatched icons
 # or GitHub publishes a newer archive. Archive validation is based on actual contents, not a fixed count.
 $script:IconArchiveUrl = 'https://raw.githubusercontent.com/3mr10aa/Amr_tools/dd7a4529b9e7dc09a76b5e683025fc48d72ad3a0/Icons.zip'
-$script:IconArchiveApiUrl = 'https://api.github.com/repos/3mr10aa/Amr_tools/commits/dd7a4529b9e7dc09a76b5e683025fc48d72ad3a0'
+$script:IconArchiveApiUrl = ''
 $script:IconArchivePath = Join-Path $script:DownloadDir 'amr-software-icons.zip'
 $script:IconArchiveMarkerPath = Join-Path $script:DownloadDir 'amr-software-icons.cache'
 
 function Initialize-AMRSoftwareIcons {
     param([Parameter(Mandatory = $true)][object[]]$Apps)
 
-    $downloadTemp = "$($script:IconArchivePath).download"
-    $stagingDir = Join-Path $script:DownloadDir 'AMR_Icons_Staging'
-    $cacheValid = $true
-    $missingIcons = 0
-    $catalogIds = New-Object System.Collections.Generic.List[string]
-
-    Write-AMRLog ("Icon initialization started. Apps={0}; IconDir={1}" -f $Apps.Count,$script:IconDir) INFO Software
-    if (-not (Test-Path -LiteralPath $script:IconDir -PathType Container)) {
-        New-Item -ItemType Directory -Path $script:IconDir -Force -ErrorAction Stop | Out-Null
+    # Pinned, immutable archive: avoids GitHub API discovery, which can stall in
+    # Windows PowerShell 5.1 even when raw.githubusercontent.com is reachable.
+    $owner = '3mr10aa'
+    $repo = 'Amr_tools'
+    $commitSha = 'dd7a4529b9e7dc09a76b5e683025fc48d72ad3a0'
+    $branch = 'pinned-' + $commitSha.Substring(0,12)
+    $archiveUrl = "https://raw.githubusercontent.com/$owner/$repo/$commitSha/Icons.zip"
+    $manifestPath = Join-Path $script:DownloadDir 'amr-icons-manifest.json'
+    $stageRoot = Join-Path $script:DownloadDir ('AMR_Icons_Stage_' + [guid]::NewGuid().ToString('N'))
+    $backupRoot = Join-Path $script:DownloadDir ('AMR_Icons_Backup_' + [guid]::NewGuid().ToString('N'))
+    $tempRoot = Join-Path $script:DownloadDir ('AMR_Icons_Download_' + [guid]::NewGuid().ToString('N'))
+    $archiveTemp = Join-Path $tempRoot 'amr-software-icons.zip'
+    $archiveCache = [string]$script:IconArchivePath
+    if ([string]::IsNullOrWhiteSpace($archiveCache)) {
+        $archiveCache = Join-Path $script:DownloadDir 'amr-software-icons.zip'
     }
-    if (-not (Test-Path -LiteralPath $script:DownloadDir -PathType Container)) {
-        New-Item -ItemType Directory -Path $script:DownloadDir -Force -ErrorAction Stop | Out-Null
+    $remoteFiles = @()
+    $missingIds = New-Object 'System.Collections.Generic.List[string]'
+    $promoted = $false
+    $backupMoved = $false
+
+    function Get-AMRFileSha256 {
+        param([Parameter(Mandatory=$true)][string]$Path)
+        $stream = [System.IO.File]::OpenRead($Path)
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-','').ToLowerInvariant()
+        } finally {
+            $sha.Dispose()
+            $stream.Dispose()
+        }
     }
 
-    foreach ($app in $Apps) {
-        $candidateIds = @([string]$app.Id)
-        if ($app.PSObject.Properties['IconAliases'] -and $app.IconAliases) {
-            $candidateIds += @($app.IconAliases | ForEach-Object { [string]$_ })
+    function Test-AMRImageFile {
+        param([Parameter(Mandatory=$true)][string]$Path)
+        $stream = [System.IO.File]::OpenRead($Path)
+        try {
+            if ($stream.Length -le 128) { return $false }
+            $head = New-Object byte[] 8
+            $read = $stream.Read($head,0,8)
+            if ($read -lt 3) { return $false }
+            $isPng = ($read -eq 8 -and
+                $head[0] -eq 137 -and $head[1] -eq 80 -and
+                $head[2] -eq 78 -and $head[3] -eq 71 -and
+                $head[4] -eq 13 -and $head[5] -eq 10 -and
+                $head[6] -eq 26 -and $head[7] -eq 10)
+            $isJpeg = ($head[0] -eq 255 -and $head[1] -eq 216 -and $head[2] -eq 255)
+            return ($isPng -or $isJpeg)
+        } finally {
+            $stream.Dispose()
         }
-        foreach ($candidateId in $candidateIds) {
-            if (-not [string]::IsNullOrWhiteSpace($candidateId)) { $catalogIds.Add($candidateId) }
+    }
+
+    try {
+        foreach ($dir in @($script:IconDir,$script:DownloadDir)) {
+            if (-not (Test-Path -LiteralPath $dir -PathType Container)) {
+                New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null
+            }
         }
-        $hasCachedIcon = $false
-        foreach ($candidateId in $candidateIds) {
-            foreach ($extension in @('.png','.jpg','.jpeg')) {
-                $candidatePath = Join-Path $script:IconDir ($candidateId + $extension)
-                if (Test-Path -LiteralPath $candidatePath -PathType Leaf) {
-                    if ((Get-Item -LiteralPath $candidatePath -ErrorAction SilentlyContinue).Length -gt 128) { $hasCachedIcon = $true; break }
+        try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+        Write-AMRLog ("Pinned icon sync started. Repo={0}/{1}; Commit={2}; Apps={3}" -f $owner,$repo,$commitSha.Substring(0,12),$Apps.Count) INFO Software
+
+        # A schema-3 manifest is trusted only when every cached image still matches
+        # its recorded SHA-256. Older manifests force a clean archive refresh.
+        $oldManifest = $null
+        if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+            try {
+                $oldManifest = Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop |
+                    ConvertFrom-Json -ErrorAction Stop
+            } catch {
+                Write-AMRLog 'Existing icon manifest is unreadable; a clean archive refresh will be performed.' WARNING Software
+            }
+        }
+
+        $cacheHealthy = $false
+        if ($oldManifest -and [int]$oldManifest.schema -eq 3 -and
+            [string]$oldManifest.commit -eq $commitSha -and
+            @($oldManifest.files).Count -gt 0 -and
+            (Test-Path -LiteralPath $script:IconDir -PathType Container)) {
+            $cacheHealthy = $true
+            foreach ($entry in @($oldManifest.files)) {
+                $entryPath = [string]$entry.path
+                $leaf = [IO.Path]::GetFileName($entryPath)
+                if ([string]::IsNullOrWhiteSpace($leaf) -or $entryPath -ne ('Icons/' + $leaf)) {
+                    $cacheHealthy = $false
+                    break
+                }
+                $cached = Join-Path $script:IconDir $leaf
+                if (-not (Test-Path -LiteralPath $cached -PathType Leaf)) {
+                    $cacheHealthy = $false
+                    break
+                }
+                try {
+                    if ((Get-AMRFileSha256 -Path $cached) -ne [string]$entry.sha256) {
+                        $cacheHealthy = $false
+                        break
+                    }
+                } catch {
+                    $cacheHealthy = $false
+                    break
                 }
             }
-            if ($hasCachedIcon) { break }
+            if ($cacheHealthy) {
+                foreach ($app in $Apps) {
+                    $requiredId = [string]$app.Id
+                    if ([string]::IsNullOrWhiteSpace($requiredId)) { continue }
+                    $requiredFound = $false
+                    foreach ($requiredExt in @('.png','.jpg','.jpeg')) {
+                        if (Test-Path -LiteralPath (Join-Path $script:IconDir ($requiredId + $requiredExt)) -PathType Leaf) {
+                            $requiredFound = $true
+                            break
+                        }
+                    }
+                    if (-not $requiredFound -and $app.PSObject.Properties['IconAliases'] -and $app.IconAliases) {
+                        foreach ($requiredAlias in @($app.IconAliases)) {
+                            foreach ($requiredExt in @('.png','.jpg','.jpeg')) {
+                                if (Test-Path -LiteralPath (Join-Path $script:IconDir ([string]$requiredAlias + $requiredExt)) -PathType Leaf) {
+                                    $requiredFound = $true
+                                    break
+                                }
+                            }
+                            if ($requiredFound) { break }
+                        }
+                    }
+                    if (-not $requiredFound) {
+                        $cacheHealthy = $false
+                        Write-AMRLog ("Cached icon manifest is incomplete for App.Id='{0}'; archive repair required." -f $requiredId) WARNING Software
+                        break
+                    }
+                }
+            }
         }
-        if (-not $hasCachedIcon) { $missingIcons++; $cacheValid = $false }
-    }
 
-    $fingerprintText = (($catalogIds | Sort-Object -Unique) -join "`n")
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $catalogFingerprint = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($fingerprintText)))).Replace('-','').ToLowerInvariant()
-    } finally { $sha.Dispose() }
-
-    $cachedFingerprint = ''
-    if (Test-Path -LiteralPath $script:IconArchiveMarkerPath -PathType Leaf) {
-        try {
-            $markerLines = @(Get-Content -LiteralPath $script:IconArchiveMarkerPath -ErrorAction Stop)
-            if ($markerLines.Count -ge 2) { $cachedFingerprint = [string]$markerLines[1] }
-        } catch { Write-AMRLog ("Could not read icon marker: {0}" -f $_.Exception.Message) WARNING Software }
-    }
-
-    # The archive URL is pinned to a specific Git commit. Avoid a separate GitHub API
-    # request here: it can stall the isolated worker and is unnecessary for this source.
-    $catalogMatches = ($cachedFingerprint -eq $catalogFingerprint)
-    $archiveExists = Test-Path -LiteralPath $script:IconArchivePath -PathType Leaf
-    $needsArchiveRefresh = (-not $cacheValid) -or (-not $catalogMatches) -or (-not $archiveExists)
-    Write-AMRLog ("Icon cache decision: cacheValid={0}; missing={1}; catalogMatches={2}; archiveExists={3}; downloadRequired={4}" -f $cacheValid,$missingIcons,$catalogMatches,$archiveExists,$needsArchiveRefresh) INFO Software
-
-    try {
-        if ($needsArchiveRefresh) {
-            Write-AMRLog ("Downloading pinned icon archive from GitHub. Missing icons={0}" -f $missingIcons) INFO Software
-            Remove-Item -LiteralPath $downloadTemp -Force -ErrorAction SilentlyContinue
-            try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
-            Invoke-WebRequest -Uri $script:IconArchiveUrl -OutFile $downloadTemp -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
-            if (-not (Test-Path -LiteralPath $downloadTemp -PathType Leaf)) { throw 'GitHub download did not create the ZIP file.' }
-            $downloadedLength = (Get-Item -LiteralPath $downloadTemp).Length
-            if ($downloadedLength -lt 1024) { throw ("Downloaded icon ZIP is too small ({0} bytes)." -f $downloadedLength) }
-            Write-AMRLog ("Icon ZIP downloaded successfully: {0} bytes" -f $downloadedLength) INFO Software
+        if ($cacheHealthy) {
+            $remoteFiles = @($oldManifest.files)
+            Write-AMRLog ("Pinned icon cache verified. Commit={0}; Images={1}; download skipped." -f $commitSha.Substring(0,12),$remoteFiles.Count) SUCCESS Software
+        } else {
+            New-Item -ItemType Directory -Path $stageRoot,$tempRoot -Force -ErrorAction Stop | Out-Null
+            $usedBundledArchive = $false
+            if (-not [string]::IsNullOrWhiteSpace($script:BundledIconArchivePath) -and
+                (Test-Path -LiteralPath $script:BundledIconArchivePath -PathType Leaf)) {
+                Write-AMRLog ("Using bundled local icon archive: {0}" -f $script:BundledIconArchivePath) INFO Software
+                Copy-Item -LiteralPath $script:BundledIconArchivePath -Destination $archiveTemp -Force -ErrorAction Stop
+                $usedBundledArchive = $true
+            } else {
+                Write-AMRLog ("Bundled archive unavailable; downloading pinned archive. URL={0}" -f $archiveUrl) INFO Software
+                Invoke-WebRequest -Uri $archiveUrl -OutFile $archiveTemp -UseBasicParsing -TimeoutSec 180 -ErrorAction Stop
+            }
+            if (-not (Test-Path -LiteralPath $archiveTemp -PathType Leaf)) {
+                throw 'Icon archive source did not create a file.'
+            }
+            $archiveItem = Get-Item -LiteralPath $archiveTemp -ErrorAction Stop
+            if ($archiveItem.Length -lt 1024) {
+                throw ("Icon archive is unexpectedly small: {0} bytes." -f $archiveItem.Length)
+            }
+            Write-AMRLog ("Archive ready. Source={0}; Bytes={1}; SHA256={2}" -f $(if ($usedBundledArchive) { 'BundledLocal' } else { 'PinnedRemote' }),$archiveItem.Length,(Get-AMRFileSha256 -Path $archiveTemp)) INFO Software
 
             Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
-            $zipCheck = [System.IO.Compression.ZipFile]::OpenRead($downloadTemp)
+            $zip = [IO.Compression.ZipFile]::OpenRead($archiveTemp)
             try {
-                $zipImages = @($zipCheck.Entries | Where-Object { $_.FullName -match '(?i)\.(png|jpe?g)$' })
-                if ($zipImages.Count -lt 1) { throw 'Downloaded ZIP contains no PNG/JPG images.' }
-                Write-AMRLog ("ZIP integrity verified: {0} image entries" -f $zipImages.Count) INFO Software
-            } finally { $zipCheck.Dispose() }
-            Move-Item -LiteralPath $downloadTemp -Destination $script:IconArchivePath -Force -ErrorAction Stop
-        }
-
-        if (Test-Path -LiteralPath $stagingDir) { Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue }
-        New-Item -ItemType Directory -Path $stagingDir -Force -ErrorAction Stop | Out-Null
-        Write-AMRLog 'Extracting icon ZIP into staging folder...' INFO Software
-        Expand-Archive -LiteralPath $script:IconArchivePath -DestinationPath $stagingDir -Force -ErrorAction Stop
-        $imageFiles = @(Get-ChildItem -LiteralPath $stagingDir -Recurse -File -ErrorAction Stop | Where-Object { $_.Extension -match '(?i)^\.(png|jpe?g)$' })
-        if ($imageFiles.Count -lt 1) { throw 'Extracted ZIP contains no PNG/JPG images.' }
-        Write-AMRLog ("Extraction completed: {0} image files found" -f $imageFiles.Count) INFO Software
-
-        $byBaseName = @{}
-        $byNormalizedName = @{}
-        foreach ($file in $imageFiles) {
-            $base = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
-            $key = $base.ToLowerInvariant()
-            if (-not $byBaseName.ContainsKey($key)) { $byBaseName[$key] = $file }
-            $normalized = ($base -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
-            if (-not $byNormalizedName.ContainsKey($normalized)) { $byNormalizedName[$normalized] = $file }
-        }
-
-        $copied = 0
-        foreach ($app in $Apps) {
-            $appId = [string]$app.Id
-            if ([string]::IsNullOrWhiteSpace($appId)) { continue }
-            $candidateIds = @($appId)
-            if ($app.PSObject.Properties['IconAliases'] -and $app.IconAliases) { $candidateIds += @($app.IconAliases | ForEach-Object { [string]$_ }) }
-            $sourceIcon = $null
-            foreach ($candidateId in $candidateIds) {
-                $key = $candidateId.ToLowerInvariant()
-                if ($byBaseName.ContainsKey($key)) { $sourceIcon = $byBaseName[$key]; break }
-                $normalized = ($candidateId -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
-                if ($byNormalizedName.ContainsKey($normalized)) { $sourceIcon = $byNormalizedName[$normalized]; break }
-            }
-            if ($null -ne $sourceIcon) {
-                $targetExtension = if ($sourceIcon.Extension -ieq '.jpeg') { '.jpg' } else { $sourceIcon.Extension.ToLowerInvariant() }
-                Copy-Item -LiteralPath $sourceIcon.FullName -Destination (Join-Path $script:IconDir ($appId + $targetExtension)) -Force -ErrorAction Stop
-                $copied++
-            }
-        }
-
-        $remainingMissing = 0
-        foreach ($app in $Apps) {
-            $found = $false
-            $idsToCheck = @([string]$app.Id)
-            if ($app.PSObject.Properties['IconAliases'] -and $app.IconAliases) { $idsToCheck += @($app.IconAliases | ForEach-Object { [string]$_ }) }
-            foreach ($idToCheck in $idsToCheck) {
-                foreach ($ext in @('.png','.jpg','.jpeg')) {
-                    $localPath = Join-Path $script:IconDir ($idToCheck + $ext)
-                    if ((Test-Path -LiteralPath $localPath -PathType Leaf) -and (Get-Item -LiteralPath $localPath -ErrorAction SilentlyContinue).Length -gt 128) { $found = $true; break }
+                $entries = @($zip.Entries | Where-Object {
+                    $_.FullName -match '(?i)^Icons/[^/]+\.(png|jpe?g)$' -and
+                    $_.FullName -notmatch '(^/|^[a-zA-Z]:|(^|/)\.\.(/|$))'
+                })
+                if ($entries.Count -lt 100) {
+                    throw ("Icon archive contains too few image files ({0}); refusing to replace the cache." -f $entries.Count)
                 }
-                if ($found) { break }
+
+                $seenNames = @{}
+                Write-AMRLog ("Archive extraction started. ImageEntries={0}" -f $entries.Count) INFO Software
+                foreach ($entry in $entries) {
+                    $leaf = [IO.Path]::GetFileName($entry.FullName)
+                    $key = $leaf.ToLowerInvariant()
+                    if ($seenNames.ContainsKey($key)) {
+                        throw ("Archive contains duplicate icon filename: {0}" -f $leaf)
+                    }
+                    $seenNames[$key] = $true
+                    $dest = Join-Path $stageRoot $leaf
+                    $inputStream = $entry.Open()
+                    try {
+                        $outputStream = [IO.File]::Create($dest)
+                        try {
+                            $inputStream.CopyTo($outputStream)
+                        } finally {
+                            $outputStream.Dispose()
+                        }
+                    } finally {
+                        $inputStream.Dispose()
+                    }
+                    if (-not (Test-AMRImageFile -Path $dest)) {
+                        throw ("Extracted file is not a valid PNG/JPEG image: {0}" -f $leaf)
+                    }
+                    $remoteFiles += [pscustomobject]@{
+                        path = ('Icons/' + $leaf)
+                        size = [long](Get-Item -LiteralPath $dest).Length
+                        sha256 = (Get-AMRFileSha256 -Path $dest)
+                    }
+                }
+            } finally {
+                $zip.Dispose()
             }
-            if (-not $found) { $remainingMissing++ }
+
+            if ($remoteFiles.Count -lt 100) {
+                throw 'Icon archive extraction did not produce a usable image inventory.'
+            }
+
+            $newManifest = [pscustomobject]@{
+                schema = 3
+                repository = "$owner/$repo"
+                branch = $branch
+                commit = $commitSha
+                archiveUrl = $archiveUrl
+                updated = (Get-Date).ToString('o')
+                files = @($remoteFiles)
+            }
+            $manifestTemp = "$manifestPath.tmp"
+            $newManifest | ConvertTo-Json -Depth 6 |
+                Set-Content -LiteralPath $manifestTemp -Encoding UTF8 -Force -ErrorAction Stop
+
+            # Keep the previous cache untouched until the complete new archive has
+            # been extracted and validated. Promote with rollback on any failure.
+            if (Test-Path -LiteralPath $script:IconDir -PathType Container) {
+                Move-Item -LiteralPath $script:IconDir -Destination $backupRoot -Force -ErrorAction Stop
+                $backupMoved = $true
+            }
+            try {
+                Move-Item -LiteralPath $stageRoot -Destination $script:IconDir -Force -ErrorAction Stop
+                $promoted = $true
+                Move-Item -LiteralPath $manifestTemp -Destination $manifestPath -Force -ErrorAction Stop
+                if ($backupMoved -and (Test-Path -LiteralPath $backupRoot -PathType Container)) {
+                    Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue
+                    $backupMoved = $false
+                }
+            } catch {
+                if ($promoted -and (Test-Path -LiteralPath $script:IconDir -PathType Container)) {
+                    Remove-Item -LiteralPath $script:IconDir -Recurse -Force -ErrorAction SilentlyContinue
+                }
+                if ($backupMoved -and (Test-Path -LiteralPath $backupRoot -PathType Container)) {
+                    Move-Item -LiteralPath $backupRoot -Destination $script:IconDir -Force -ErrorAction SilentlyContinue
+                    $backupMoved = $false
+                }
+                throw
+            }
+
+            # Retain the validated archive for diagnostics/recovery; it is not used
+            # as the source of truth once the cache has been promoted.
+            try {
+                Move-Item -LiteralPath $archiveTemp -Destination $archiveCache -Force -ErrorAction SilentlyContinue
+            } catch {}
+            Write-AMRLog ("Icon cache synchronized from pinned archive. Commit={0}; Images={1}; FirstInstallOrRepair=True" -f $commitSha.Substring(0,12),$remoteFiles.Count) SUCCESS Software
         }
 
-        if ($remainingMissing -eq 0) {
-            @('pinned-dd7a4529b9e7dc09a76b5e683025fc48d72ad3a0',$catalogFingerprint,$imageFiles.Count,(Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK')) |
-                Set-Content -LiteralPath $script:IconArchiveMarkerPath -Encoding UTF8 -Force -ErrorAction Stop
-            Write-AMRLog ("Software icon cache ready: {0} copied/updated; all {1} catalog entries have icons." -f $copied,$Apps.Count) SUCCESS Software
-        } else {
-            Write-AMRLog ("Icon cache incomplete: {0} catalog entries still have no matching image; next launch will retry." -f $remainingMissing) WARNING Software
+        foreach ($app in $Apps) {
+            $id = [string]$app.Id
+            if ([string]::IsNullOrWhiteSpace($id)) { continue }
+            $found = $false
+            foreach ($ext in @('.png','.jpg','.jpeg')) {
+                $candidate = Join-Path $script:IconDir ($id + $ext)
+                if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                    if ((Get-Item -LiteralPath $candidate -ErrorAction Stop).Length -gt 128) {
+                        $found = $true
+                        break
+                    }
+                }
+            }
+            if (-not $found) { $missingIds.Add($id) }
         }
-    }
-    catch {
-        Write-AMRLog ("Could not refresh software icon cache: {0}" -f $_.Exception.Message) WARNING Software
-        if (Test-Path -LiteralPath $downloadTemp) { Remove-Item -LiteralPath $downloadTemp -Force -ErrorAction SilentlyContinue }
-    }
-    finally {
-        if (Test-Path -LiteralPath $stagingDir) { Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue }
+        $matchedIdCount = $Apps.Count - $missingIds.Count
+        Write-AMRLog ("Icon mapping diagnostics. CatalogApps={0}; ArchiveImages={1}; ExactOrAliasMatches={2}; Missing={3}; CacheDir={4}" -f $Apps.Count,$remoteFiles.Count,$matchedIdCount,$missingIds.Count,$script:IconDir) INFO Software
+        if ($missingIds.Count -gt 0) {
+            Write-AMRLog ("Icon sync completed, but exact-ID images are absent for {0} apps: {1}" -f $missingIds.Count,(($missingIds | Select-Object -First 60) -join ', ')) WARNING Software
+        } else {
+            Write-AMRLog ("Icon cache ready. Apps={0}; RepositoryImages={1}; AllCatalogIdsMatched=True" -f $Apps.Count,$remoteFiles.Count) SUCCESS Software
+        }
+    } catch {
+        $record = $_
+        Write-AMRLog ("Pinned icon sync failed; existing cache was retained where possible. Error={0}; Line={1}; Command={2}" -f $record.Exception.Message,$record.InvocationInfo.ScriptLineNumber,$record.InvocationInfo.Line) WARNING Software
+        if ($backupMoved -and (Test-Path -LiteralPath $backupRoot -PathType Container) -and
+            -not (Test-Path -LiteralPath $script:IconDir -PathType Container)) {
+            Move-Item -LiteralPath $backupRoot -Destination $script:IconDir -Force -ErrorAction SilentlyContinue
+            $backupMoved = $false
+        }
+        throw
+    } finally {
+        if (Test-Path -LiteralPath $tempRoot -PathType Container) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $stageRoot -PathType Container) {
+            Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        # Never delete a backup that could be the only remaining good cache.
+        if (-not $backupMoved -and (Test-Path -LiteralPath $backupRoot -PathType Container)) {
+            Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -2496,7 +2655,7 @@ $RawApps | ForEach-Object {
 }
 
 $loadedIconCount = @($script:SoftwareCatalog | Where-Object { $null -ne $_.Icon }).Count
-Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog.Count) catalog entries from '$script:IconDir'." INFO Software
+Write-AMRLog ("Startup local-cache icons loaded: {0}/{1} from '{2}'. Background archive synchronization will report the final UI count separately." -f $loadedIconCount,$script:SoftwareCatalog.Count,$script:IconDir) INFO Software
 
 # --- 4. FULL WPF XAML INTERFACE WITH PROGRESS BAR & 27 CUSTOMIZE TOOLS ---
 [xml]$xaml = @'
@@ -10165,6 +10324,190 @@ function Update-AMRSoftwareCategoryCounts {
 Update-AMRSoftwareCategoryCounts
 try { (C 'UninstallSelectedBtn').Visibility = 'Collapsed' } catch {}
 
+# Universal installed-app inventory is deliberately separate from SoftwareCatalog.
+# Unknown apps must never enter Smart Install / Update / Repair pipelines.
+$script:InstalledAppsInventory = New-Object 'System.Collections.ObjectModel.ObservableCollection[object]'
+$script:InstalledAppsView = $null
+
+function New-AMRInstalledInventoryRecord {
+    param(
+        [string]$Name, [string]$Publisher='', [string]$DisplayVersion='', [string]$InstallDate='',
+        [string]$InstallLocation='', [string]$UninstallString='', [string]$QuietUninstallString='',
+        [bool]$WindowsInstaller=$false, [string]$RegistryKeyPath='', [string]$RegistryHive='',
+        [string]$RegistryView='', [string]$AppxPackageFullName='', [string]$PackageFamilyName='',
+        [string]$WingetId='', [string]$ChocoId='', [string]$ScoopName='', [string]$Source='',
+        [bool]$IsCatalogApp=$false, [string]$CatalogId='', [bool]$IsInstalled=$true,
+        [bool]$CanUninstall=$false, [string]$UninstallMethod='', [string]$UninstallReason='',
+        [string]$PortableExecutablePath='', [string]$PortableRootFolder='', [bool]$IsPortable=$false,
+        [string]$IdentityKey='', [string]$Confidence='High'
+    )
+    if ([string]::IsNullOrWhiteSpace($IdentityKey)) {
+        $IdentityKey = if ($RegistryKeyPath) { 'REG:' + $RegistryKeyPath.ToLowerInvariant() }
+            elseif ($AppxPackageFullName) { 'APPX:' + $AppxPackageFullName.ToLowerInvariant() }
+            elseif ($WingetId) { 'WINGET:' + $WingetId.ToLowerInvariant() }
+            elseif ($ChocoId) { 'CHOCO:' + $ChocoId.ToLowerInvariant() }
+            elseif ($ScoopName) { 'SCOOP:' + $ScoopName.ToLowerInvariant() }
+            elseif ($PortableExecutablePath) { 'PORTABLE:' + $PortableExecutablePath.ToLowerInvariant() }
+            else { 'OTHER:' + (($Name -replace '\s+',' ').Trim().ToLowerInvariant()) }
+    }
+    $initials = (($Name -split '\s+' | Where-Object { $_ } | Select-Object -First 2 | ForEach-Object { $_.Substring(0,1) }) -join '').ToUpperInvariant()
+    return [pscustomobject][ordered]@{
+        Name=$Name; Publisher=$Publisher; DisplayVersion=$DisplayVersion; InstallDate=$InstallDate
+        InstallLocation=$InstallLocation; UninstallString=$UninstallString; QuietUninstallString=$QuietUninstallString
+        WindowsInstaller=$WindowsInstaller; RegistryKeyPath=$RegistryKeyPath; RegistryHive=$RegistryHive; RegistryView=$RegistryView
+        AppxPackageFullName=$AppxPackageFullName; PackageFamilyName=$PackageFamilyName; WingetId=$WingetId
+        ChocoId=$ChocoId; ScoopName=$ScoopName; Source=$Source; IsCatalogApp=$IsCatalogApp; CatalogId=$CatalogId
+        IsInstalled=$IsInstalled; IsSelected=$false; CanUninstall=$CanUninstall; UninstallMethod=$UninstallMethod
+        UninstallReason=$UninstallReason; Initials=$initials; Icon=$null; Id=$(if($CatalogId){$CatalogId}elseif($WingetId){$WingetId}elseif($AppxPackageFullName){$AppxPackageFullName}else{$IdentityKey})
+        IdentityKey=$IdentityKey; Confidence=$Confidence; PortableExecutablePath=$PortableExecutablePath
+        PortableRootFolder=$PortableRootFolder; IsPortable=$IsPortable
+    }
+}
+
+function Get-AMRUniversalInstalledInventory {
+    [CmdletBinding()]
+    param()
+    $records = New-Object 'System.Collections.Generic.List[object]'
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $readProperty = { param($object, [string]$propertyName) $property = $object.PSObject.Properties[$propertyName]; if ($property) { return $property.Value }; return $null }
+    $registrySpecs = @(
+        @{ Path='HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*'; Hive='HKLM'; View='64-bit' },
+        @{ Path='HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'; Hive='HKLM'; View='32-bit' },
+        @{ Path='HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*'; Hive='HKCU'; View='User' },
+        @{ Path='HKCU:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'; Hive='HKCU'; View='User-32-bit' }
+    )
+    foreach ($spec in $registrySpecs) {
+        try {
+            foreach ($entry in @(Get-ItemProperty -Path $spec.Path -ErrorAction SilentlyContinue)) {
+                $name = [string](& $readProperty $entry 'DisplayName')
+                if ([string]::IsNullOrWhiteSpace($name)) { continue }
+                $systemComponent = & $readProperty $entry 'SystemComponent'
+                $releaseType = [string](& $readProperty $entry 'ReleaseType')
+                $parentKeyName = [string](& $readProperty $entry 'ParentKeyName')
+                $noDisplay = & $readProperty $entry 'NoDisplay'
+                $protectedComponent = ($systemComponent -eq 1) -or (-not [string]::IsNullOrWhiteSpace($releaseType)) -or (-not [string]::IsNullOrWhiteSpace($parentKeyName)) -or ($noDisplay -eq 1)
+                $keyPath = [string](& $readProperty $entry 'PSPath')
+                if ([string]::IsNullOrWhiteSpace($keyPath)) { continue }
+                $uninstall = [string](& $readProperty $entry 'UninstallString')
+                $quiet = [string](& $readProperty $entry 'QuietUninstallString')
+                $msiValue = & $readProperty $entry 'WindowsInstaller'
+                $msi = $false; try { $msi = ([int]$msiValue -eq 1) } catch {}
+                $hasCommand = $msi -or -not [string]::IsNullOrWhiteSpace($uninstall) -or -not [string]::IsNullOrWhiteSpace($quiet)
+                $can = $hasCommand -and -not $protectedComponent
+                $method = if ($msi) {'MSI'} elseif ($hasCommand) {'Registry'} else {''}
+                $reason = if ($protectedComponent) {'Windows marks this as a system/hidden/parent component; automatic removal is blocked to protect shared dependencies.'} elseif ($can) {'Registered native uninstaller is available.'} else {'Windows has no registered uninstall command for this entry.'}
+                $record = New-AMRInstalledInventoryRecord -Name $name -Publisher ([string](& $readProperty $entry 'Publisher')) -DisplayVersion ([string](& $readProperty $entry 'DisplayVersion')) -InstallDate ([string](& $readProperty $entry 'InstallDate')) -InstallLocation ([string](& $readProperty $entry 'InstallLocation')) -UninstallString $uninstall -QuietUninstallString $quiet -WindowsInstaller $msi -RegistryKeyPath $keyPath -RegistryHive $spec.Hive -RegistryView $spec.View -Source 'Windows Registry' -CanUninstall $can -UninstallMethod $method -UninstallReason $reason -IdentityKey ('REG:' + $keyPath.ToLowerInvariant())
+                if ($seen.Add($record.IdentityKey)) { [void]$records.Add($record) }
+            }
+        } catch {}
+    }
+
+    # AppX/MSIX: current-user packages only. AllUsers staged registrations are not
+    # represented as installed apps and must not be removed on behalf of other users.
+    try {
+        foreach ($pkg in @(Get-AppxPackage -ErrorAction SilentlyContinue)) {
+            if ([string]::IsNullOrWhiteSpace([string]$pkg.PackageFullName)) { continue }
+            $appxFramework = & $readProperty $pkg 'IsFramework'
+            $appxResource = & $readProperty $pkg 'IsResourcePackage'
+            $appxBundle = & $readProperty $pkg 'IsBundle'
+            $appxProtected = [bool]$appxFramework -or [bool]$appxResource -or [bool]$appxBundle
+            $appxCanRemove = -not $appxProtected
+            $appxReason = if ($appxProtected) {'Framework/resource/bundle package is protected as a shared dependency.'} else {'Exact current-user AppX/MSIX package identity is available.'}
+            $record = New-AMRInstalledInventoryRecord -Name ([string](& $readProperty $pkg 'Name')) -Publisher ([string](& $readProperty $pkg 'Publisher')) -DisplayVersion ([string](& $readProperty $pkg 'Version')) -AppxPackageFullName ([string](& $readProperty $pkg 'PackageFullName')) -PackageFamilyName ([string](& $readProperty $pkg 'PackageFamilyName')) -Source 'AppX/MSIX' -CanUninstall $appxCanRemove -UninstallMethod 'AppX' -UninstallReason $appxReason -IdentityKey ('APPX:' + ([string]$pkg.PackageFullName).ToLowerInvariant())
+            if ($seen.Add($record.IdentityKey)) { [void]$records.Add($record) }
+        }
+    } catch {}
+
+    # WinGet, Chocolatey and Scoop are supplemental identity sources. Their records
+    # are retained only when not already represented by a native uninstall identity.
+    try {
+        $wg = Get-Command winget.exe -ErrorAction SilentlyContinue
+        if ($wg) {
+            $out = & $wg.Source list --disable-interactivity --accept-source-agreements 2>$null
+            $lines = @($out | ForEach-Object { [string]$_ })
+            $header = -1; $idStart = -1; $verStart = -1
+            for ($i=0; $i -lt $lines.Count; $i++) {
+                $mi=[regex]::Match($lines[$i],'(?i)\bId\b'); $mv=[regex]::Match($lines[$i],'(?i)\bVersion\b')
+                if ($mi.Success -and $mv.Success -and $mv.Index -gt $mi.Index) { $header=$i; $idStart=$mi.Index; $verStart=$mv.Index; break }
+            }
+            if ($header -ge 0) {
+                for ($i=$header+1; $i -lt $lines.Count; $i++) {
+                    $line=$lines[$i]; if ($line.Length -le $idStart) { continue }
+                    $len=[Math]::Min(($verStart-$idStart),($line.Length-$idStart)); if ($len -le 0) { continue }
+                    $id=$line.Substring($idStart,$len).Trim()
+                    $wingetDisplayName = $line.Substring(0,$idStart).Trim()
+                    if ([string]::IsNullOrWhiteSpace($wingetDisplayName)) { $wingetDisplayName = $id }
+                    if ($id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { continue }
+                    $norm=($id -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
+                    $already=$false
+                    foreach($r in $records){ if((([string]$r.Name -replace '[^a-zA-Z0-9]','').ToLowerInvariant()) -eq $norm){$already=$true;break} }
+                    if(-not $already){ $rec=New-AMRInstalledInventoryRecord -Name $wingetDisplayName -WingetId $id -Source 'WinGet' -CanUninstall $true -UninstallMethod 'WinGet' -UninstallReason 'Exact WinGet package ID was reported by winget list.' -IdentityKey ('WINGET:'+$id.ToLowerInvariant()) -Confidence 'Medium'; if($seen.Add($rec.IdentityKey)){[void]$records.Add($rec)} }
+                }
+            }
+        }
+    } catch {}
+    $chocoRoots=@(); if($env:ChocolateyInstall){$chocoRoots+= $env:ChocolateyInstall}; if($env:ProgramData){$chocoRoots+= (Join-Path $env:ProgramData 'chocolatey')}
+    foreach($root in @($chocoRoots | Select-Object -Unique)){
+        $lib=Join-Path $root 'lib'; if(-not(Test-Path -LiteralPath $lib -PathType Container)){continue}
+        foreach($folder in @(Get-ChildItem -LiteralPath $lib -Directory -ErrorAction SilentlyContinue)){
+            if(@(Get-ChildItem -LiteralPath $folder.FullName -Filter '*.nuspec' -File -ErrorAction SilentlyContinue).Count -gt 0){
+                $id=$folder.Name; $norm=($id -replace '[^a-zA-Z0-9]','').ToLowerInvariant(); $exists=$false
+                foreach($r in $records){if((([string]$r.Name -replace '[^a-zA-Z0-9]','').ToLowerInvariant()) -eq $norm){$exists=$true;break}}
+                if(-not $exists){$rec=New-AMRInstalledInventoryRecord -Name $id -ChocoId $id -Source 'Chocolatey' -CanUninstall $true -UninstallMethod 'Chocolatey' -UninstallReason 'Exact local Chocolatey package folder and nuspec were found.' -IdentityKey ('CHOCO:'+$id.ToLowerInvariant()) -Confidence 'Medium'; if($seen.Add($rec.IdentityKey)){[void]$records.Add($rec)}}
+            }
+        }
+    }
+    $scoopRoots=@(); if($env:SCOOP){$scoopRoots+=$env:SCOOP}; if($env:SCOOP_GLOBAL){$scoopRoots+=$env:SCOOP_GLOBAL}; if($env:USERPROFILE){$scoopRoots+=(Join-Path $env:USERPROFILE 'scoop')}; if($env:ProgramData){$scoopRoots+=(Join-Path $env:ProgramData 'scoop')}
+    foreach($root in @($scoopRoots | Select-Object -Unique)){
+        $apps=Join-Path $root 'apps'; if(-not(Test-Path -LiteralPath $apps -PathType Container)){continue}
+        foreach($folder in @(Get-ChildItem -LiteralPath $apps -Directory -ErrorAction SilentlyContinue)){
+            $id=$folder.Name -replace '\\current$',''; $norm=($id -replace '[^a-zA-Z0-9]','').ToLowerInvariant(); $exists=$false
+            foreach($r in $records){if((([string]$r.Name -replace '[^a-zA-Z0-9]','').ToLowerInvariant()) -eq $norm){$exists=$true;break}}
+            if(-not $exists){$rec=New-AMRInstalledInventoryRecord -Name $id -ScoopName $id -InstallLocation $folder.FullName -Source 'Scoop' -CanUninstall $true -UninstallMethod 'Scoop' -UninstallReason 'Exact Scoop app directory was found.' -IdentityKey ('SCOOP:'+$id.ToLowerInvariant()) -Confidence 'Medium'; if($seen.Add($rec.IdentityKey)){[void]$records.Add($rec)}}
+        }
+    }
+
+    # Conservative portable discovery: only shortcuts in Desktop/Start Menu and
+    # executables directly inside known portable roots / top-level Downloads folders.
+    $shortcutRoots=@(); foreach($v in @([Environment]::GetFolderPath('Desktop'),(Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'),(Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs'))){if($v -and (Test-Path -LiteralPath $v -PathType Container)){$shortcutRoots+=$v}}
+    $portableRoots=@(); if($env:USERPROFILE){$portableRoots+=(Join-Path $env:USERPROFILE 'PortableApps')}; if($env:ProgramData){$portableRoots+=(Join-Path $env:ProgramData 'PortableApps')}; $portableRoots+='C:\PortableApps'
+    $targets=New-Object 'System.Collections.Generic.List[string]'
+    try {
+        $ws=New-Object -ComObject WScript.Shell
+        foreach($root in $shortcutRoots){ foreach($lnk in @(Get-ChildItem -LiteralPath $root -Filter '*.lnk' -File -Recurse -ErrorAction SilentlyContinue)){ try{$sc=$ws.CreateShortcut($lnk.FullName);$target=[string]$sc.TargetPath;if($target -and [IO.Path]::GetExtension($target) -ieq '.exe' -and (Test-Path -LiteralPath $target -PathType Leaf)){[void]$targets.Add($target)}}catch{} } }
+    } catch {}
+    foreach($root in @($portableRoots | Select-Object -Unique)){
+        if(Test-Path -LiteralPath $root -PathType Container){foreach($exe in @(Get-ChildItem -LiteralPath $root -Filter '*.exe' -File -Recurse -ErrorAction SilentlyContinue)){[void]$targets.Add($exe.FullName)}}
+    }
+    $downloads=Join-Path $env:USERPROFILE 'Downloads'
+    if(Test-Path -LiteralPath $downloads -PathType Container){foreach($exe in @(Get-ChildItem -LiteralPath $downloads -Filter '*.exe' -File -ErrorAction SilentlyContinue)){[void]$targets.Add($exe.FullName)}}
+    $blocked=@('setup.exe','uninstall.exe','unins000.exe','update.exe','crashpad_handler.exe','vc_redist.x64.exe','vc_redist.x86.exe')
+    foreach($target in @($targets | Select-Object -Unique)){
+        try {
+            $leaf=[IO.Path]::GetFileName($target); if($blocked -contains $leaf.ToLowerInvariant()){continue}
+            $root=[IO.Path]::GetDirectoryName($target); $base=[IO.Path]::GetFileNameWithoutExtension($target)
+            if($root -match '(?i)\\(Windows|System32|SysWOW64|Program Files|Program Files \(x86\))($|\\)'){continue}
+            $managedPortable = $false; $portableAppRoot = $root
+            foreach($allowedRoot in @($portableRoots | Select-Object -Unique)){
+                try {
+                    $allowedFull=[IO.Path]::GetFullPath($allowedRoot).TrimEnd('\')+'\'
+                    $targetFull=[IO.Path]::GetFullPath($target)
+                    if($targetFull.StartsWith($allowedFull,[StringComparison]::OrdinalIgnoreCase)){
+                        $relative=$targetFull.Substring($allowedFull.Length); $firstPart=($relative -split '[\\/]')[0]
+                        if(-not [string]::IsNullOrWhiteSpace($firstPart)){$portableAppRoot=Join-Path $allowedRoot $firstPart;if(Test-Path -LiteralPath $portableAppRoot -PathType Container){$managedPortable=$true;break}else{$portableAppRoot=$root}}
+                    }
+                } catch {}
+            }
+            $existing=$false; foreach($r in $records){if($r.InstallLocation -and ([string]$r.InstallLocation).TrimEnd('\') -ieq $portableAppRoot.TrimEnd('\')){$existing=$true;break}}
+            if($existing){continue}
+            $portableReason = if($managedPortable){'Exact application folder is inside a designated PortableApps root; removal is limited to this folder.'}else{'Portable executable found via shortcut or Downloads. Its containing folder is not a managed PortableApps root, so deletion is disabled.'}
+            $rec=New-AMRInstalledInventoryRecord -Name $base -InstallLocation $portableAppRoot -Source 'Portable candidate' -CanUninstall $managedPortable -UninstallMethod $(if($managedPortable){'Portable'}else{''}) -UninstallReason $portableReason -PortableExecutablePath $target -PortableRootFolder $portableAppRoot -IsPortable $true -IdentityKey ('PORTABLE:'+$portableAppRoot.ToLowerInvariant()) -Confidence 'Low'
+            if($seen.Add($rec.IdentityKey)){[void]$records.Add($rec)}
+        } catch {}
+    }
+    return @($records | Sort-Object Name)
+}
+
 function Update-AMRInstalledCatalogState {
     # Build a multi-source local inventory once, then match it against the catalog.
     # Evidence sources: Windows uninstall registry, AppX/MSIX, WinGet, Chocolatey and Scoop.
@@ -10426,6 +10769,7 @@ function Update-AMRInstalledCatalogState {
 # ----------------------------------------------------------
 $script:InstalledScanState = @{
     Current = $null
+    Inventory = @()
     Ready = $false
     Count = 0
     Error = ''
@@ -10437,13 +10781,35 @@ function Set-AMRInstalledViewVisible {
     param([int]$InstalledCount)
 
     $script:ShowInstalledOnly = $true
+    $InstalledCount = @($script:InstalledScanState.Inventory).Count
+    $script:InstalledAppsInventory.Clear()
+    foreach ($record in @($script:InstalledScanState.Inventory)) {
+        $recordNorm = ([string]$record.Name -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
+        foreach ($catalogApp in $script:SoftwareCatalog) {
+            $catalogNorm = ([string]$catalogApp.Name -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
+            if (([string]$record.Id -ieq [string]$catalogApp.Id) -or ($recordNorm -and $recordNorm -eq $catalogNorm)) {
+                $record.IsCatalogApp = $true; $record.CatalogId = [string]$catalogApp.Id
+                if ($record.Icon -eq $null) { $record.Icon = $catalogApp.Icon }
+                break
+            }
+        }
+        [void]$script:InstalledAppsInventory.Add($record)
+    }
+    $script:InstalledAppsView = [System.Windows.Data.CollectionViewSource]::GetDefaultView($script:InstalledAppsInventory)
+    $script:InstalledAppsView.Filter = [System.Predicate[object]]{ param($item)
+        $searchText = (C 'SearchBox').Text
+        if ([string]::IsNullOrWhiteSpace($searchText)) { return $true }
+        $escaped = [regex]::Escape($searchText)
+        return ([string]$item.Name -match "(?i)$escaped") -or ([string]$item.Id -match "(?i)$escaped") -or ([string]$item.Publisher -match "(?i)$escaped")
+    }
+    (C 'SoftwareGrid').ItemsSource = $script:InstalledAppsView
+    (C 'SoftwareCategoryList').ItemsSource = @([pscustomobject]@{Name='All Applications';DisplayText=('All Installed (' + $script:InstalledAppsInventory.Count + ')')})
+    (C 'SoftwareCategoryList').SelectedIndex = 0
     (C 'ShowInstalledBtn').Content = "Show All ($InstalledCount)"
     (C 'ShowInstalledBtn').ToolTip = 'Return to the full software catalog.'
     (C 'ShowInstalledBtn').IsEnabled = $true
     (C 'UninstallSelectedBtn').Visibility = 'Visible'
-    Update-AMRSoftwareCategoryCounts
-    $script:AppsView.Refresh()
-    Write-AMRLog "Installed-app filter enabled: $InstalledCount catalog application(s) detected." INFO Software
+    Write-AMRLog "Universal installed inventory displayed: $InstalledCount record(s)." INFO Software
 }
 
 function Complete-AMRInstalledCatalogScan {
@@ -10488,6 +10854,7 @@ function Complete-AMRInstalledCatalogScan {
             }
             $JobState.Ready = $true
             $JobState.Count = [int]$payload.Count
+            $JobState.Inventory = @($payload.Inventory)
             $JobState.Error = ''
             foreach ($entry in @($payload.Logs)) {
                 if ($entry -and $entry.Message) {
@@ -10562,9 +10929,13 @@ function Start-AMRInstalledCatalogScan {
     try {
         $inventoryCommand = Get-Command Update-AMRInstalledCatalogState -ErrorAction Stop
         $inventoryFunctionBody = $inventoryCommand.ScriptBlock.ToString()
+        $universalCommand = Get-Command Get-AMRUniversalInstalledInventory -ErrorAction Stop
+        $universalFunctionBody = $universalCommand.ScriptBlock.ToString()
+        $recordCommand = Get-Command New-AMRInstalledInventoryRecord -ErrorAction Stop
+        $recordFunctionBody = $recordCommand.ScriptBlock.ToString()
 
         $workerScript = @'
-param($CatalogSnapshot, $InventoryFunctionBody)
+param($CatalogSnapshot, $InventoryFunctionBody, $UniversalFunctionBody, $RecordFunctionBody)
 $ErrorActionPreference = 'Continue'
 $script:SoftwareCatalog = @($CatalogSnapshot)
 $script:InventoryLogs = New-Object 'System.Collections.Generic.List[object]'
@@ -10580,11 +10951,17 @@ function Write-AMRLog {
 }
 $definition = "function Update-AMRInstalledCatalogState {`r`n" + $InventoryFunctionBody + "`r`n}"
 Invoke-Expression $definition
+$recordDefinition = "function New-AMRInstalledInventoryRecord {`r`n" + $RecordFunctionBody + "`r`n}"
+Invoke-Expression $recordDefinition
+$universalDefinition = "function Get-AMRUniversalInstalledInventory {`r`n" + $UniversalFunctionBody + "`r`n}"
+Invoke-Expression $universalDefinition
 $count = Update-AMRInstalledCatalogState
 $flags = @($script:SoftwareCatalog | ForEach-Object { [bool]$_.IsInstalled })
+$inventory = @(Get-AMRUniversalInstalledInventory)
 [pscustomobject]@{
     Count = [int]$count
     InstalledFlags = $flags
+    Inventory = $inventory
     Logs = @($script:InventoryLogs.ToArray())
 }
 '@
@@ -10596,6 +10973,8 @@ $flags = @($script:SoftwareCatalog | ForEach-Object { [bool]$_.IsInstalled })
         [void]$powerShell.AddScript($workerScript)
         [void]$powerShell.AddArgument($catalogSnapshot)
         [void]$powerShell.AddArgument($inventoryFunctionBody)
+        [void]$powerShell.AddArgument($universalFunctionBody)
+        [void]$powerShell.AddArgument($recordFunctionBody)
         $asyncResult = $powerShell.BeginInvoke()
 
         $timer = New-Object System.Windows.Threading.DispatcherTimer
@@ -10655,11 +11034,11 @@ $script:AppsView.Filter = [System.Predicate[object]]{
     $selected = (C 'SoftwareCategoryList').SelectedItem
     if ($null -ne $selected) {
         $script:SelectedSoftwareCategory = [string]$selected.Name
-        $script:AppsView.Refresh()
+        if ($script:ShowInstalledOnly -and $script:InstalledAppsView) { $script:InstalledAppsView.Refresh() } else { $script:AppsView.Refresh() }
     }
 })
 
-(C 'SearchBox').Add_TextChanged({ $script:AppsView.Refresh() })
+(C 'SearchBox').Add_TextChanged({ if ($script:ShowInstalledOnly -and $script:InstalledAppsView) { $script:InstalledAppsView.Refresh() } else { $script:AppsView.Refresh() } })
 (C 'ShowInstalledBtn').Add_Click({
     if (-not $script:ShowInstalledOnly) {
         if ($script:InstalledScanState.Ready) {
@@ -10672,6 +11051,9 @@ $script:AppsView.Filter = [System.Predicate[object]]{
         }
     } else {
         $script:ShowInstalledOnly = $false
+        (C 'SoftwareGrid').ItemsSource = $script:AppsView
+        (C 'SoftwareCategoryList').ItemsSource = $script:SoftwareCategories
+        Update-AMRSoftwareCategoryCounts
         (C 'ShowInstalledBtn').Content = 'Show Installed'
         (C 'ShowInstalledBtn').ToolTip = 'Show only applications detected as installed on this PC.'
         (C 'ShowInstalledBtn').IsEnabled = $true
@@ -10714,7 +11096,7 @@ $script:Window.Add_StateChanged({ & $script:UpdateSoftwareGridColumns })
         Write-AMRLog "Cannot clear selection while an installation queue is running." WARNING Software
         return
     }
-    foreach ($app in $script:SoftwareCatalog) { $app.IsSelected = $false }
+    if ($script:ShowInstalledOnly) { foreach ($app in $script:InstalledAppsInventory) { $app.IsSelected = $false } } else { foreach ($app in $script:SoftwareCatalog) { $app.IsSelected = $false } }
     $script:AppsView.Refresh()
     Write-AMRLog "Cleared app selections." INFO Software
 })
@@ -12157,7 +12539,7 @@ function Show-AMRUninstallChoice {
 
     $result = @{ Choice = 'Cancel' }
     $preserve = New-Object System.Windows.Controls.Button
-    $preserve.Content = 'Uninstall only — keep data & settings'
+    $preserve.Content = 'Uninstall — keep app data where the native method supports it'
     $preserve.Height = 40; $preserve.Margin = '0,0,0,8'; $preserve.Padding = '12,8'
     $preserve.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#293B50')
     $preserve.Foreground = [System.Windows.Media.Brushes]::White; $preserve.FontWeight = 'SemiBold'
@@ -12167,7 +12549,7 @@ function Show-AMRUninstallChoice {
     $root.Children.Add($preserve) | Out-Null
 
     $complete = New-Object System.Windows.Controls.Button
-    $complete.Content = 'Complete uninstall — remove app files & settings too'
+    $complete.Content = 'Complete — run native uninstaller (no AMR extra cleanup)'
     $complete.Height = 40; $complete.Margin = '0,0,0,8'; $complete.Padding = '12,8'
     $complete.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#B94A52')
     $complete.Foreground = [System.Windows.Media.Brushes]::White; $complete.FontWeight = 'SemiBold'
@@ -12177,7 +12559,7 @@ function Show-AMRUninstallChoice {
     $root.Children.Add($complete) | Out-Null
 
     $note = New-Object System.Windows.Controls.TextBlock
-    $note.Text = 'Complete uninstall targets only verified app-specific folders and registry entries. Personal documents, projects, downloads, and shared folders are protected.'
+    $note.Text = 'Win32 cleanup is controlled by the vendor uninstaller; AMR cannot guarantee its data behavior. AppX Keep Data requests data preservation where supported. Portable apps are removed as exact folders after a separate confirmation. AMR performs no extra registry or folder cleanup.'
     $note.TextWrapping = 'Wrap'; $note.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FBBF24'); $note.Margin = '0,4,0,10'
     $root.Children.Add($note) | Out-Null
     $cancel = New-Object System.Windows.Controls.Button
@@ -12525,27 +12907,134 @@ function Invoke-AMRExactNativeUninstall {
     return [pscustomobject]@{ Success=$false; Detail=('All supported exact uninstall methods failed or were unavailable: ' + ($attempts -join ' | ')) }
 }
 
+function Test-AMRInventoryIdentityRemoved {
+    param($App)
+    try {
+        switch ([string]$App.UninstallMethod) {
+            { $_ -in @('MSI','Registry') } {
+                if ([string]::IsNullOrWhiteSpace([string]$App.RegistryKeyPath)) { return $false }
+                return (-not (Test-Path -LiteralPath ([string]$App.RegistryKeyPath)))
+            }
+            'Portable' { return (-not (Test-Path -LiteralPath ([string]$App.PortableRootFolder) -PathType Container)) }
+            'AppX' {
+                $remaining = @(Get-AppxPackage -ErrorAction SilentlyContinue | Where-Object { [string]$_.PackageFullName -ceq [string]$App.AppxPackageFullName })
+                return ($remaining.Count -eq 0)
+            }
+            'WinGet' {
+                $wg = Get-Command winget.exe -ErrorAction SilentlyContinue
+                if (-not $wg) { return $false }
+                $output = @(& $wg.Source list --id ([string]$App.WingetId) --exact --disable-interactivity 2>$null | ForEach-Object { [string]$_ }) -join "`n"
+                return ($output -notmatch ('(?i)(?<![A-Za-z0-9_.-])' + [regex]::Escape([string]$App.WingetId) + '(?![A-Za-z0-9_.-])'))
+            }
+            'Chocolatey' {
+                $roots=@(); if($env:ChocolateyInstall){$roots+=$env:ChocolateyInstall}; if($env:ProgramData){$roots+=(Join-Path $env:ProgramData 'chocolatey')}
+                foreach($root in @($roots | Select-Object -Unique)){if(Test-Path -LiteralPath (Join-Path (Join-Path $root 'lib') ([string]$App.ChocoId)) -PathType Container){return $false}}
+                return $true
+            }
+            'Scoop' {
+                $roots=@(); if($env:SCOOP){$roots+=$env:SCOOP}; if($env:SCOOP_GLOBAL){$roots+=$env:SCOOP_GLOBAL}; if($env:USERPROFILE){$roots+=(Join-Path $env:USERPROFILE 'scoop')}; if($env:ProgramData){$roots+=(Join-Path $env:ProgramData 'scoop')}
+                foreach($root in @($roots | Select-Object -Unique)){if(Test-Path -LiteralPath (Join-Path (Join-Path $root 'apps') ([string]$App.ScoopName)) -PathType Container){return $false}}
+                return $true
+            }
+            default { return $false }
+        }
+    } catch { return $false }
+}
+
+function Invoke-AMRInventoryExactUninstall {
+    param($App, [bool]$KeepData=$true, [bool]$Complete=$false)
+    $attempts = New-Object System.Collections.Generic.List[string]
+    switch ([string]$App.UninstallMethod) {
+        'MSI' {
+            $entry = $null
+            try { $entry = Get-ItemProperty -LiteralPath ([string]$App.RegistryKeyPath) -ErrorAction Stop } catch { return [pscustomobject]@{Success=$false;Detail='Exact MSI registry record could not be reopened.'} }
+            $quietProperty=$entry.PSObject.Properties['QuietUninstallString']; $uninstallProperty=$entry.PSObject.Properties['UninstallString']; $cmd=''; if($quietProperty){$cmd=[string]$quietProperty.Value}; if(-not $cmd -and $uninstallProperty){$cmd=[string]$uninstallProperty.Value}
+            $childNameProperty=$entry.PSObject.Properties['PSChildName']; $childName=''; if($childNameProperty){$childName=[string]$childNameProperty.Value}
+            $guid=$null; if($cmd -match '(?i)\{[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\}'){$guid=$Matches[0]}; if(-not $guid -and $childName -match '^\{[0-9a-fA-F-]{36}\}$'){$guid=$childName}
+            if(-not $guid){return [pscustomobject]@{Success=$false;Detail='Exact MSI ProductCode is unavailable.'}}
+            try{$args=@('/x',$guid,'/passive','/norestart');$proc=Start-Process -FilePath 'msiexec.exe' -ArgumentList $args -PassThru -ErrorAction Stop;$code=Wait-AMRUninstallProcess -Process $proc -AppName ([string]$App.Name);try{$proc.Dispose()}catch{};if($code -notin @(0,1641,3010)){return [pscustomobject]@{Success=$false;Detail=("Exact MSI ProductCode uninstall exit code: $code.")}}; Start-Sleep -Seconds 2; $verified=Test-AMRInventoryIdentityRemoved -App $App; return [pscustomobject]@{Success=$verified;Detail=$(if($verified){"Exact MSI registry identity disappeared after uninstall (exit $code)."}else{"MSI uninstaller exited $code, but the exact uninstall registry identity remains; success was not assumed."})}}catch{return [pscustomobject]@{Success=$false;Detail=$_.Exception.Message}}
+        }
+        'Registry' {
+            $entry=$null; try{$entry=Get-ItemProperty -LiteralPath ([string]$App.RegistryKeyPath) -ErrorAction Stop}catch{return [pscustomobject]@{Success=$false;Detail='Exact registry uninstall entry no longer exists.'}}
+            $displayNameProperty=$entry.PSObject.Properties['DisplayName']; if(-not $displayNameProperty -or ([string]$displayNameProperty.Value).Trim() -ine ([string]$App.Name).Trim()){return [pscustomobject]@{Success=$false;Detail='Exact registry identity changed; refusing uninstall.'}}
+            $quietProperty=$entry.PSObject.Properties['QuietUninstallString']; $uninstallProperty=$entry.PSObject.Properties['UninstallString']; $cmd=''; if($quietProperty){$cmd=[string]$quietProperty.Value}; if(-not $cmd -and $uninstallProperty){$cmd=[string]$uninstallProperty.Value}; if(-not $cmd){return [pscustomobject]@{Success=$false;Detail='No registered uninstall command.'}}
+            if($cmd -match '^\s*"(?<exe>[^"]+)"\s*(?<args>.*)$'){$exe=$Matches.exe;$argText=[string]$Matches.args}elseif($cmd -match '^\s*(?<exe>.+?\.exe)\s*(?<args>.*)$'){$exe=$Matches.exe.Trim('"');$argText=[string]$Matches.args}else{return [pscustomobject]@{Success=$false;Detail='Uninstall command could not be parsed safely.'}}
+            $exe=[Environment]::ExpandEnvironmentVariables($exe); $argText=[Environment]::ExpandEnvironmentVariables($argText)
+            if(-not(Test-Path -LiteralPath $exe -PathType Leaf)){return [pscustomobject]@{Success=$false;Detail='Registered uninstaller executable is missing.'}}
+            try {
+                if([IO.Path]::GetFileName($exe) -ieq 'msiexec.exe'){
+                    $productCode=$null; if($argText -match '(?i)\{[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\}'){$productCode=$Matches[0]}
+                    if(-not $productCode){return [pscustomobject]@{Success=$false;Detail='MSI command did not contain an exact ProductCode; refusing to run a possibly modifying command.'}}
+                    $exe='msiexec.exe'; $argText=('/x {0} /passive /norestart' -f $productCode)
+                } else {
+                    $isNsis=([IO.Path]::GetFileName($exe) -ieq 'uninst.exe')
+                    if(-not $isNsis){try{$probe=[IO.File]::ReadAllBytes($exe);$probeLength=[Math]::Min($probe.Length,2097152);if($probeLength -gt 0){$probeText=[Text.Encoding]::ASCII.GetString($probe,0,$probeLength);if($probeText -match '(?i)Nullsoft Install System'){$isNsis=$true}}}catch{}}
+                    if($isNsis -and $argText -notmatch '(?i)(^|\s)/S(\s|$)'){$argText=($argText+' /S').Trim()}
+                    $installDir=[string]$App.InstallLocation
+                    if($isNsis -and $installDir -and $argText -notmatch '(?i)_\?='){$argText+=(' _?="'+$installDir.TrimEnd('\')+'"')}
+                }
+                $proc=Start-Process -FilePath $exe -ArgumentList $argText -PassThru -ErrorAction Stop
+                $code=Wait-AMRUninstallProcess -Process $proc -AppName ([string]$App.Name); try{$proc.Dispose()}catch{}
+                if($code -notin @(0,1641,3010)){return [pscustomobject]@{Success=$false;Detail=("Exact registered uninstaller exit code: $code.")}}
+                Start-Sleep -Seconds 2; $verified=Test-AMRInventoryIdentityRemoved -App $App
+                return [pscustomobject]@{Success=$verified;Detail=$(if($verified){"Exact registry uninstall identity disappeared (exit $code)."}else{"Uninstaller exited $code, but the exact registry identity remains; success was not assumed."})}
+            } catch { return [pscustomobject]@{Success=$false;Detail=$_.Exception.Message} }
+        }
+        'Portable' {
+            try {
+                $root=[IO.Path]::GetFullPath([string]$App.PortableRootFolder).TrimEnd('\')
+                $exe=[IO.Path]::GetFullPath([string]$App.PortableExecutablePath)
+                $allowed=$false
+                $portableAllowedRoots=@(); if($env:USERPROFILE){$portableAllowedRoots+=(Join-Path $env:USERPROFILE 'PortableApps')}; if($env:ProgramData){$portableAllowedRoots+=(Join-Path $env:ProgramData 'PortableApps')}; $portableAllowedRoots+='C:\PortableApps'
+                foreach($allowedRoot in $portableAllowedRoots){try{$prefix=[IO.Path]::GetFullPath($allowedRoot).TrimEnd('\')+'\';if(($root+'\').StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)){$allowed=$true;break}}catch{}}
+                if(-not $allowed -or -not $root -or -not $exe.StartsWith(($root+'\'),[StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $exe -PathType Leaf)){return [pscustomobject]@{Success=$false;Detail='Portable app root failed exact path safety checks; no files were removed.'}}
+                $rootItem=Get-Item -LiteralPath $root -Force -ErrorAction Stop
+                if(($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){return [pscustomobject]@{Success=$false;Detail='Portable app folder is a reparse point/junction; deletion is blocked.'}}
+                $confirmPortable=Show-AMRMessage ("This portable app is stored in its own folder. AMR will permanently delete only this exact folder and its contents:`n`n$root`n`nShortcuts outside the folder and other user files will not be removed. Continue?") 'Confirm Portable App Removal' YesNo Warning
+                if($confirmPortable -ne [System.Windows.MessageBoxResult]::Yes){return [pscustomobject]@{Success=$false;Detail='Portable app removal was cancelled.'}}
+                Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop
+                Start-Sleep -Milliseconds 500
+                $verified=Test-AMRInventoryIdentityRemoved -App $App
+                return [pscustomobject]@{Success=$verified;Detail=$(if($verified){'Exact portable application folder was removed.'}else{'Portable folder still exists after the removal attempt.'})}
+            } catch { return [pscustomobject]@{Success=$false;Detail=$_.Exception.Message} }
+        }
+        'AppX' {
+            try{$pkg=Get-AppxPackage -PackageTypeFilter Main,Framework,Resource,Bundle -ErrorAction SilentlyContinue | Where-Object {$_.PackageFullName -ceq [string]$App.AppxPackageFullName} | Select-Object -First 1;if(-not $pkg){return [pscustomobject]@{Success=$false;Detail='Exact AppX package is no longer registered for the current user.'}};if($KeepData){$cmd=Get-Command Remove-AppxPackage -ErrorAction Stop;if($cmd.Parameters.ContainsKey('PreserveApplicationData')){Remove-AppxPackage -Package ([string]$pkg.PackageFullName) -PreserveApplicationData -ErrorAction Stop}else{return [pscustomobject]@{Success=$false;Detail='This Windows version cannot request AppX data preservation; no removal was performed.'}}}else{Remove-AppxPackage -Package ([string]$pkg.PackageFullName) -ErrorAction Stop};Start-Sleep -Seconds 2; $verified=Test-AMRInventoryIdentityRemoved -App $App; return [pscustomobject]@{Success=$verified;Detail=$(if($verified){'Exact current-user AppX package is no longer registered.'}else{'AppX removal command completed, but the exact package remains registered.'})}}catch{return [pscustomobject]@{Success=$false;Detail=$_.Exception.Message}}
+        }
+        'WinGet' {try{$wg=Get-Command winget.exe -ErrorAction Stop;$p=Start-Process -FilePath $wg.Source -ArgumentList @('uninstall','--id',[string]$App.WingetId,'--exact','--accept-source-agreements','--disable-interactivity') -PassThru -WindowStyle Hidden -ErrorAction Stop;$c=Wait-AMRUninstallProcess -Process $p -AppName ([string]$App.Name);try{$p.Dispose()}catch{};if($c -notin @(0,1641,3010)){return [pscustomobject]@{Success=$false;Detail=("WinGet exact-ID uninstall exit code: $c.")}}; Start-Sleep -Seconds 2; $verified=Test-AMRInventoryIdentityRemoved -App $App; return [pscustomobject]@{Success=$verified;Detail=$(if($verified){"WinGet exact ID no longer appears installed (exit $c)."}else{"WinGet exited $c, but the exact package ID is still listed; success was not assumed."})}}catch{return [pscustomobject]@{Success=$false;Detail=$_.Exception.Message}}}
+        'Chocolatey' {try{$ch=Get-Command choco.exe -ErrorAction Stop;$p=Start-Process -FilePath $ch.Source -ArgumentList @('uninstall',[string]$App.ChocoId,'-y','--no-progress') -PassThru -WindowStyle Hidden -ErrorAction Stop;$c=Wait-AMRUninstallProcess -Process $p -AppName ([string]$App.Name);try{$p.Dispose()}catch{};if($c -ne 0){return [pscustomobject]@{Success=$false;Detail=("Chocolatey exact-ID uninstall exit code: $c.")}}; Start-Sleep -Seconds 2; $verified=Test-AMRInventoryIdentityRemoved -App $App; return [pscustomobject]@{Success=$verified;Detail=$(if($verified){"Chocolatey exact package folder is gone (exit $c)."}else{"Chocolatey exited $c, but its exact package folder remains."})}}catch{return [pscustomobject]@{Success=$false;Detail=$_.Exception.Message}}}
+        'Scoop' {try{$sc=Get-Command scoop -ErrorAction Stop;& $sc.Source uninstall ([string]$App.ScoopName) 2>&1 | Out-Null;$c=$LASTEXITCODE;if($c -ne 0){return [pscustomobject]@{Success=$false;Detail=("Scoop exact-name uninstall exit code: $c.")}}; Start-Sleep -Seconds 2; $verified=Test-AMRInventoryIdentityRemoved -App $App; return [pscustomobject]@{Success=$verified;Detail=$(if($verified){"Scoop exact app folder is gone (exit $c)."}else{"Scoop exited $c, but its exact app folder remains."})}}catch{return [pscustomobject]@{Success=$false;Detail=$_.Exception.Message}}}
+        default {return [pscustomobject]@{Success=$false;Detail='No verified uninstall method is available.'}}
+    }
+}
+
 function Invoke-AMRSelectedUninstall {
     if ($script:InstallRunning) { Show-AMRMessage 'Another software operation is currently running.' 'AMR Uninstall' OK Warning | Out-Null; return }
     if (-not $script:ShowInstalledOnly) { Show-AMRMessage 'Switch to Show Installed before using Uninstall.' 'AMR Uninstall' OK Warning | Out-Null; return }
-    $selected = @($script:SoftwareCatalog | Where-Object { $_.IsSelected -eq $true -and $_.IsInstalled -eq $true })
+    $selected = @($script:InstalledAppsInventory | Where-Object { $_.IsSelected -eq $true -and $_.IsInstalled -eq $true })
     if ($selected.Count -eq 0) { Show-AMRMessage 'Select one or more detected installed applications first.' 'Selection Required' OK Warning | Out-Null; return }
+    $unsupported = @($selected | Where-Object { -not $_.CanUninstall })
+    if ($unsupported.Count -gt 0) {
+        $unsupportedNames = @($unsupported | ForEach-Object { '• ' + $_.Name + ': ' + $_.UninstallReason }) -join "`n"
+        Show-AMRMessage ("These selected items do not have a verified uninstall method and will be skipped:`n`n$unsupportedNames") 'Uninstall Not Available' OK Warning | Out-Null
+        $selected = @($selected | Where-Object { $_.CanUninstall })
+        if ($selected.Count -eq 0) { return }
+    }
+    $portableSelected = @($selected | Where-Object { $_.IsPortable -and $_.CanUninstall })
+    if ($portableSelected.Count -gt 0) {
+        $portableNames = @($portableSelected | ForEach-Object { '• ' + $_.Name + ' — ' + $_.PortableRootFolder }) -join "`n"
+        $portableAck = Show-AMRMessage ("Portable applications are files rather than registered installations. Removing them deletes their exact app folder even when Keep Data is selected. Each folder will be shown for a separate confirmation:`n`n$portableNames`n`nContinue?") 'Portable Apps Selected' YesNo Warning
+        if ($portableAck -ne [System.Windows.MessageBoxResult]::Yes) { return }
+    }
     $choice = Show-AMRUninstallChoice -ApplicationNames @($selected | ForEach-Object { [string]$_.Name })
     if ($choice -eq 'Cancel') { return }
 
-    $cleanupMap = @{}
     if ($choice -eq 'Complete') {
-        foreach ($app in $selected) { $cleanupMap[[string]$app.Name] = @(Get-AMRSafeCleanupCandidates -App $app) }
-        $previewLines = @()
-        foreach ($app in $selected) {
-            $paths = @($cleanupMap[[string]$app.Name])
-            $previewLines += if ($paths.Count) { "• $($app.Name)`n  " + ($paths -join "`n  ") } else { "• $($app.Name): no additional app-specific folders verified" }
-        }
-        $preview = "Complete uninstall will remove only these verified app-specific folders after the native uninstall succeeds:`n`n" + ($previewLines -join "`n`n") + "`n`nPersonal files and shared folders are excluded. Continue?"
+        $preview = "AMR will run the selected application's exact native uninstall method. In this build, AMR will not independently delete folders, user profiles, settings, shared data, or registry metadata. Any cleanup performed by the vendor's own uninstaller is controlled by that uninstaller. Continue?"
         $confirm = Show-AMRMessage $preview 'Confirm Complete Uninstall' YesNo Warning
         if ($confirm -ne [System.Windows.MessageBoxResult]::Yes) { return }
     } else {
-        $confirm = Show-AMRMessage ("Uninstall the following application(s) while keeping their user data and settings?`n`n" + (($selected | ForEach-Object { '• ' + $_.Name }) -join "`n")) 'Confirm Uninstall' YesNo Warning
+        $confirm = Show-AMRMessage ("Uninstall the following application(s)? Registered apps use their native uninstaller. Portable apps are removed by deleting only their confirmed PortableApps folder, even in this mode.`n`n" + (($selected | ForEach-Object { '• ' + $_.Name }) -join "`n")) 'Confirm Uninstall' YesNo Warning
         if ($confirm -ne [System.Windows.MessageBoxResult]::Yes) { return }
     }
 
@@ -12553,7 +13042,7 @@ function Invoke-AMRSelectedUninstall {
     $script:ProgressBar.IsIndeterminate = $false
     $script:ProgressBar.Value = 0
     $script:ProgressText.Text = "Uninstall queued: 0% (0/$($selected.Count) applications completed)."
-    $success = 0; $failed = 0; $removedFolders = 0
+    $success = 0; $failed = 0
     try {
         for ($i=0; $i -lt $selected.Count; $i++) {
             $app = $selected[$i]
@@ -12562,23 +13051,11 @@ function Invoke-AMRSelectedUninstall {
             $script:ProgressText.Text = "Uninstalling $($app.Name)... ($completedBefore% completed; current app in progress)"
             Write-AMRLog "Starting uninstall for '$($app.Name)' (mode: $choice)." INFO Software
             try {
-                $result = Invoke-AMRExactNativeUninstall -App $app -KeepData:($choice -eq 'UninstallOnly') -Complete:($choice -eq 'Complete')
+                $result = Invoke-AMRInventoryExactUninstall -App $app -KeepData:($choice -eq 'UninstallOnly') -Complete:($choice -eq 'Complete')
                 if ($result.Success) {
                     $success++
                     Write-AMRLog "Uninstall succeeded for '$($app.Name)': $($result.Detail)" SUCCESS Software
-                    if ($choice -eq 'Complete') {
-                        [void](Remove-AMRExactUninstallRegistryEntry -AppName ([string]$app.Name))
-                        foreach ($folderPath in @($cleanupMap[[string]$app.Name])) {
-                            try {
-                                $resolved = [IO.Path]::GetFullPath([string]$folderPath).TrimEnd('\')
-                                if ((Test-Path -LiteralPath $resolved -PathType Container) -and [IO.Path]::GetFileName($resolved)) {
-                                    Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction Stop
-                                    $removedFolders++
-                                    Write-AMRLog "Removed verified app-specific folder: $resolved" SUCCESS Software
-                                }
-                            } catch { Write-AMRLog "Could not remove '$folderPath': $($_.Exception.Message)" WARNING Software }
-                        }
-                    }
+                    if ($choice -eq 'Complete') { Write-AMRLog 'Complete mode delegated cleanup only to the vendor native uninstaller; AMR performed no additional file deletion.' INFO Software }
                 } else { $failed++; Write-AMRLog "Uninstall not completed for '$($app.Name)': $($result.Detail)" WARNING Software }
             } catch { $failed++; Write-AMRLog "Uninstall failed for '$($app.Name)': $($_.Exception.Message)" ERROR Software }
             $script:ProgressBar.IsIndeterminate = $false
@@ -12590,12 +13067,13 @@ function Invoke-AMRSelectedUninstall {
         Set-AMRInstallButtonsEnabled -Enabled $true
         try { Start-AMRInstalledCatalogScan -Refresh -ShowWhenReady:([bool]$script:ShowInstalledOnly) } catch { Write-AMRLog "Could not schedule the post-uninstall inventory refresh: $($_.Exception.Message)" WARNING Software }
         $script:AppsView.Refresh()
+        foreach ($app in $script:InstalledAppsInventory) { $app.IsSelected = $false }
         foreach ($app in $script:SoftwareCatalog) { $app.IsSelected = $false }
     }
     $script:ProgressBar.IsIndeterminate = $false
     $script:ProgressBar.Value = 100
     $script:ProgressText.Text = "Uninstall finished: $success succeeded, $failed failed."
-    Show-AMRMessage ("Uninstall summary`n`nSucceeded: $success`nFailed or unsupported: $failed`nApp-specific folders removed: $removedFolders`n`nSome uninstallers may request a restart.") 'AMR Uninstall Summary' OK Information | Out-Null
+    Show-AMRMessage ("Uninstall summary`n`nSucceeded: $success`nFailed or unsupported: $failed`nAMR extra folders removed: 0 (safety mode)`n`nSome uninstallers may request a restart.") 'AMR Uninstall Summary' OK Information | Out-Null
 }
 
 # BUTTON BINDINGS
@@ -15178,97 +15656,134 @@ function Start-AMRBackgroundIconRefresh {
     Write-AMRLog 'Icon refresh trigger received; preparing the background downloader.' INFO Software
 
     try {
-        $workerCode = {
-            param(
-                [object[]]$Apps,
-                [string]$IconDir,
-                [string]$DownloadDir,
-                [string]$ArchiveUrl,
-                [string]$ApiUrl,
-                [string]$ArchivePath,
-                [string]$ArchiveMarkerPath,
-                [string]$InitFunctionText,
-                [string]$LogFile
-            )
+        # Keep an explicit snapshot in script scope. WPF event handlers must not
+        # depend on a transient caller/local scope for the catalog array.
+        $script:IconRefreshApps = @($RawApps)
+        $script:IconRefreshStartedUtc = [DateTime]::UtcNow
+        $script:IconRefreshLastHeartbeatUtc = [DateTime]::MinValue
+        $script:IconRefreshLoadedIndexes = New-Object 'System.Collections.Generic.HashSet[int]'
+        $script:IconRefreshScanIndex = 0
+        $script:IconRefreshWorkerLogFile = $script:LogFile
 
-            # Recreate only the small set of paths/settings needed by the existing
-            # cache routines. This runspace has no WPF objects or UI callbacks.
-            $script:IconDir = $IconDir
-            $script:DownloadDir = $DownloadDir
-            $script:IconArchiveUrl = $ArchiveUrl
-            $script:IconArchiveApiUrl = $ApiUrl
-            $script:IconArchivePath = $ArchivePath
-            $script:IconArchiveMarkerPath = $ArchiveMarkerPath
-            $script:LogFile = $LogFile
+        Write-AMRLog ("Icon worker setup: Apps={0}; IconDir={1}; DownloadDir={2}; Log={3}" -f $script:IconRefreshApps.Count,$script:IconDir,$script:DownloadDir,$script:LogFile) INFO Software
+
+        # A single payload avoids positional argument/array-unrolling problems in
+        # PowerShell 5.1 AddArgument parameter binding.
+        $workerCode = {
+            param([hashtable]$Payload)
+
+            $script:IconDir = [string]$Payload.IconDir
+            $script:DownloadDir = [string]$Payload.DownloadDir
+            $script:IconArchiveUrl = [string]$Payload.ArchiveUrl
+            $script:IconArchiveApiUrl = [string]$Payload.ApiUrl
+            $script:IconArchivePath = [string]$Payload.ArchivePath
+            $script:BundledIconArchivePath = [string]$Payload.BundledIconArchivePath
+            $script:IconArchiveMarkerPath = [string]$Payload.ArchiveMarkerPath
+            $script:LogFile = [string]$Payload.LogFile
 
             function Write-AMRLog {
                 param([string]$Message,[string]$Level='INFO',[string]$Area='Software')
+                $line = '[{0}] [{1}] [{2}] {3}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'),$Level,$Area,$Message
+                $stream = $null
+                $writer = $null
                 try {
-                    $line = '[{0}] [{1}] [{2}] {3}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'),$Level,$Area,$Message
-                    Add-Content -LiteralPath $script:LogFile -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue
-                } catch {}
+                    $stream = [System.IO.File]::Open(
+                        $script:LogFile,
+                        [System.IO.FileMode]::Append,
+                        [System.IO.FileAccess]::Write,
+                        [System.IO.FileShare]::ReadWrite
+                    )
+                    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+                    $writer = [System.IO.StreamWriter]::new($stream, $utf8NoBom)
+                    $writer.WriteLine($line)
+                    $writer.Flush()
+                } catch {
+                    # Return the logging failure to the PowerShell error stream;
+                    # never silently discard it.
+                    Write-Error ("Icon worker could not write its log: {0}" -f $_.Exception.Message)
+                } finally {
+                    if ($writer) { $writer.Dispose() }
+                    elseif ($stream) { $stream.Dispose() }
+                }
             }
 
             try {
+                Write-AMRLog ("Icon worker entered. Apps={0}; IconDir={1}; Archive={2}; ArchiveExists={3}" -f @($Payload.Apps).Count,$script:IconDir,$script:IconArchivePath,(Test-Path -LiteralPath $script:IconArchivePath -PathType Leaf)) 'INFO' 'Software'
                 if (-not (Test-Path -LiteralPath $script:IconDir -PathType Container)) {
                     New-Item -ItemType Directory -Path $script:IconDir -Force -ErrorAction Stop | Out-Null
                 }
                 if (-not (Test-Path -LiteralPath $script:DownloadDir -PathType Container)) {
                     New-Item -ItemType Directory -Path $script:DownloadDir -Force -ErrorAction Stop | Out-Null
                 }
-                Write-AMRLog ("Icon worker entered. Apps={0}; IconDir={1}; Archive={2}; ArchiveExists={3}" -f $Apps.Count,$script:IconDir,$script:IconArchivePath,(Test-Path -LiteralPath $script:IconArchivePath -PathType Leaf)) 'INFO' 'Software'
-                Write-AMRLog ("Preparing icon initializer script. TextLength={0}" -f $InitFunctionText.Length) 'INFO' 'Software'
-                # The parent function's .ToString() is its BODY, not a complete
-                # function declaration. Rebuild the declaration and dot-source it
-                # into this worker's current scope instead of writing to Function:.
-                $initializerDefinition = "function Initialize-AMRSoftwareIcons {`r`n$InitFunctionText`r`n}"
+
+                $initText = [string]$Payload.InitFunctionText
+                if ([string]::IsNullOrWhiteSpace($initText)) { throw 'Initializer function text was empty.' }
+                Write-AMRLog ("Preparing icon initializer script. TextLength={0}" -f $initText.Length) 'INFO' 'Software'
+                $initializerDefinition = "function Initialize-AMRSoftwareIcons {`r`n$initText`r`n}"
                 $initializerBlock = [scriptblock]::Create($initializerDefinition)
                 . $initializerBlock
-                Write-AMRLog 'Icon initializer compiled and loaded; starting cache/download routine.' 'INFO' 'Software'
-                Initialize-AMRSoftwareIcons -Apps $Apps
+                if (-not (Get-Command Initialize-AMRSoftwareIcons -CommandType Function -ErrorAction SilentlyContinue)) {
+                    throw 'Initialize-AMRSoftwareIcons was not defined after compilation.'
+                }
+                Write-AMRLog 'Icon initializer compiled.' 'INFO' 'Software'
+                Write-AMRLog 'Icon initialization started.' 'INFO' 'Software'
+                $appsForWorker = @($Payload.Apps)
+                Initialize-AMRSoftwareIcons -Apps $appsForWorker
                 Write-AMRLog 'Icon initializer returned successfully.' 'INFO' 'Software'
                 return 'Completed'
-            }
-            catch {
-                Write-AMRLog ("Background icon refresh failed safely: {0}" -f $_.Exception.Message) 'WARNING' 'Software'
-                return 'Failed'
+            } catch {
+                $workerError = $_
+                $workerException = $workerError.Exception
+                $workerDetails = "Background icon refresh failed. Error=$($workerException.Message); ExceptionType=$($workerException.GetType().FullName); Function=$($workerError.InvocationInfo.MyCommand.Name); Line=$($workerError.InvocationInfo.ScriptLineNumber); Command=$($workerError.InvocationInfo.Line)"
+                if ($workerException.InnerException) {
+                    $workerDetails += "; InnerException=$($workerException.InnerException.GetType().FullName): $($workerException.InnerException.Message)"
+                }
+                try { Write-AMRLog $workerDetails 'ERROR' 'Software' } catch {}
+                throw
             }
         }
 
-        $script:IconRefreshRunspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+        Write-AMRLog 'Icon Runspace creation started.' INFO Software
+        $initialState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+        $script:IconRefreshRunspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace($initialState)
         $script:IconRefreshRunspace.ApartmentState = [System.Threading.ApartmentState]::MTA
         $script:IconRefreshRunspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
         $script:IconRefreshRunspace.Open()
+        Write-AMRLog 'Icon Runspace opened.' INFO Software
 
         $script:IconRefreshPowerShell = [PowerShell]::Create()
         $script:IconRefreshPowerShell.Runspace = $script:IconRefreshRunspace
-        $null = $script:IconRefreshPowerShell.AddScript($workerCode.ToString())
-        $null = $script:IconRefreshPowerShell.AddArgument(@($RawApps))
-        $null = $script:IconRefreshPowerShell.AddArgument($script:IconDir)
-        $null = $script:IconRefreshPowerShell.AddArgument($script:DownloadDir)
-        $null = $script:IconRefreshPowerShell.AddArgument($script:IconArchiveUrl)
-        $null = $script:IconRefreshPowerShell.AddArgument($script:IconArchiveApiUrl)
-        $null = $script:IconRefreshPowerShell.AddArgument($script:IconArchivePath)
-        $null = $script:IconRefreshPowerShell.AddArgument($script:IconArchiveMarkerPath)
-        $null = $script:IconRefreshPowerShell.AddArgument(${function:Initialize-AMRSoftwareIcons}.ToString())
-        $null = $script:IconRefreshPowerShell.AddArgument($script:LogFile)
-        $script:IconRefreshStartedUtc = [DateTime]::UtcNow
+        $null = $script:IconRefreshPowerShell.AddScript($workerCode.ToString(), $true)
+        $payload = @{
+            Apps = [object[]]$script:IconRefreshApps
+            IconDir = [string]$script:IconDir
+            DownloadDir = [string]$script:DownloadDir
+            ArchiveUrl = [string]$script:IconArchiveUrl
+            ApiUrl = [string]$script:IconArchiveApiUrl
+            ArchivePath = [string]$script:IconArchivePath
+            BundledIconArchivePath = [string]$script:BundledIconArchivePath
+            ArchiveMarkerPath = [string]$script:IconArchiveMarkerPath
+            InitFunctionText = [string]${function:Initialize-AMRSoftwareIcons}.ToString()
+            LogFile = [string]$script:LogFile
+        }
+        $null = $script:IconRefreshPowerShell.AddArgument($payload)
+        Write-AMRLog ("Icon worker payload prepared. Apps={0}; InitializerChars={1}; LogPathExists={2}" -f $payload.Apps.Count,$payload.InitFunctionText.Length,(Test-Path -LiteralPath $payload.LogFile -PathType Leaf)) INFO Software
+
         $script:IconRefreshAsync = $script:IconRefreshPowerShell.BeginInvoke()
-        $script:IconRefreshLoadedIndexes = New-Object 'System.Collections.Generic.HashSet[int]'
-        $script:IconRefreshScanIndex = 0
+        if ($null -eq $script:IconRefreshAsync) { throw 'BeginInvoke returned a null IAsyncResult.' }
+        Write-AMRLog ("Icon worker BeginInvoke accepted. IsCompleted={0}; AsyncState={1}" -f $script:IconRefreshAsync.IsCompleted,[string]$script:IconRefreshAsync.AsyncState) INFO Software
 
         $script:IconRefreshTimer = New-Object System.Windows.Threading.DispatcherTimer
-        $script:IconRefreshTimer.Interval = [TimeSpan]::FromMilliseconds(350)
+        $script:IconRefreshTimer.Interval = [TimeSpan]::FromMilliseconds(500)
         $script:IconRefreshTimer.Add_Tick({
             try {
-                # Progressive UI update: newly downloaded icons are picked up in small
-                # batches while the isolated worker continues preparing the rest.
+                $appsForUi = @($script:IconRefreshApps)
                 $progressiveUpdated = $false
-                $progressLimit = [Math]::Min($RawApps.Count, $script:IconRefreshScanIndex + 40)
+                $progressLimit = [Math]::Min($appsForUi.Count, $script:IconRefreshScanIndex + 40)
                 for ($progressIndex = $script:IconRefreshScanIndex; $progressIndex -lt $progressLimit -and $progressIndex -lt $script:SoftwareCatalog.Count; $progressIndex++) {
                     if ($null -ne $script:SoftwareCatalog[$progressIndex].Icon) { continue }
                     if ($script:IconRefreshLoadedIndexes.Contains([int]$progressIndex)) { continue }
-                    $progressRawApp = $RawApps[$progressIndex]
+                    $progressRawApp = $appsForUi[$progressIndex]
                     $progressIds = @([string]$progressRawApp.Id)
                     if ($progressRawApp.PSObject.Properties['IconAliases'] -and $progressRawApp.IconAliases) {
                         $progressIds += @($progressRawApp.IconAliases | ForEach-Object { [string]$_ })
@@ -15293,21 +15808,38 @@ function Start-AMRBackgroundIconRefresh {
                 $script:IconRefreshScanIndex = $progressLimit
                 if ($progressiveUpdated) { try { (C 'SoftwareGrid').Items.Refresh() } catch {} }
 
-                if (-not $script:IconRefreshAsync -or -not $script:IconRefreshAsync.IsCompleted) { return }
-                $workerResult = @($script:IconRefreshPowerShell.EndInvoke($script:IconRefreshAsync))
-                if ($script:IconRefreshPowerShell.Streams.Error.Count -gt 0) {
-                    foreach ($workerError in $script:IconRefreshPowerShell.Streams.Error) {
-                        Write-AMRLog ("Background icon worker: {0}" -f $workerError.ToString()) WARNING Software
+                if (-not $script:IconRefreshAsync) { throw 'Icon worker async handle is missing.' }
+                if (-not $script:IconRefreshAsync.IsCompleted) {
+                    $nowUtc = [DateTime]::UtcNow
+                    if (($nowUtc - $script:IconRefreshLastHeartbeatUtc).TotalSeconds -ge 5) {
+                        $state = [string]$script:IconRefreshPowerShell.InvocationStateInfo.State
+                        Write-AMRLog ("Icon worker heartbeat. State={0}; Completed={1}; UIIndex={2}/{3}; ElapsedSeconds={4}" -f $state,$script:IconRefreshAsync.IsCompleted,$script:IconRefreshScanIndex,$appsForUi.Count,[int]($nowUtc - $script:IconRefreshStartedUtc).TotalSeconds) INFO Software
+                        $script:IconRefreshLastHeartbeatUtc = $nowUtc
                     }
+                    return
                 }
-                Write-AMRLog 'Background icon cache check/update finished. Refreshing visible software icons from local files.' INFO Software
 
-                # Re-read the local cache on the UI thread; BitmapImage objects are
-                # frozen before assignment so WPF can safely render them.
+                Write-AMRLog 'Icon worker completed; collecting invocation output and error streams.' INFO Software
+                $workerResult = @()
+                $endInvokeException = $null
+                try { $workerResult = @($script:IconRefreshPowerShell.EndInvoke($script:IconRefreshAsync)) }
+                catch { $endInvokeException = $_; Write-AMRLog ("Icon EndInvoke exception: {0}; Type={1}; Line={2}" -f $_.Exception.Message,$_.Exception.GetType().FullName,$_.InvocationInfo.ScriptLineNumber) ERROR Software }
+                foreach ($workerError in $script:IconRefreshPowerShell.Streams.Error) {
+                    Write-AMRLog ("Icon worker error stream: {0}; Category={1}; Target={2}" -f $workerError.ToString(),$workerError.CategoryInfo.Category,$workerError.TargetObject) ERROR Software
+                }
+                Write-AMRLog ("Icon worker result: {0}; InvocationState={1}" -f ($workerResult -join ';'),$script:IconRefreshPowerShell.InvocationStateInfo.State) INFO Software
+                if ($endInvokeException) { throw $endInvokeException }
+                if ($script:IconRefreshPowerShell.InvocationStateInfo.State -eq [System.Management.Automation.PSInvocationState]::Failed) {
+                    throw 'Icon worker invocation ended in Failed state; inspect the preceding worker error stream.'
+                }
+
+                Write-AMRLog 'WPF image loading started.' INFO Software
                 $finalUpdated = $false
-                for ($i = 0; $i -lt $script:SoftwareCatalog.Count -and $i -lt $RawApps.Count; $i++) {
+                $uiIconFailures = New-Object 'System.Collections.Generic.List[string]'
+                $uiIconAttempts = 0
+                for ($i = 0; $i -lt $script:SoftwareCatalog.Count -and $i -lt $appsForUi.Count; $i++) {
                     if ($script:IconRefreshLoadedIndexes.Contains([int]$i)) { continue }
-                    $rawApp = $RawApps[$i]
+                    $rawApp = $appsForUi[$i]
                     $ids = @([string]$rawApp.Id)
                     if ($rawApp.PSObject.Properties['IconAliases'] -and $rawApp.IconAliases) {
                         $ids += @($rawApp.IconAliases | ForEach-Object { [string]$_ })
@@ -15317,6 +15849,7 @@ function Start-AMRBackgroundIconRefresh {
                         foreach ($extension in @('.png','.jpg','.jpeg')) {
                             $localIcon = Join-Path $script:IconDir ($candidateId + $extension)
                             if (Test-Path -LiteralPath $localIcon -PathType Leaf) {
+                                $uiIconAttempts++
                                 $iconInfo = Get-Item -LiteralPath $localIcon -ErrorAction SilentlyContinue
                                 if ($null -ne $iconInfo -and ($null -eq $script:SoftwareCatalog[$i].Icon -or $iconInfo.LastWriteTimeUtc -ge $script:IconRefreshStartedUtc)) {
                                     $newSource = Get-AMRIconImageSource -Path $localIcon
@@ -15328,29 +15861,44 @@ function Start-AMRBackgroundIconRefresh {
                     }
                     if ($null -ne $newSource) {
                         $script:SoftwareCatalog[$i].Icon = $newSource
+                        if ($script:InstalledAppsInventory -and $script:InstalledAppsInventory.Count -gt 0) {
+                            foreach ($installedRecord in $script:InstalledAppsInventory) {
+                                if ($installedRecord.IsCatalogApp -and [string]$installedRecord.CatalogId -ieq [string]$rawApp.Id) { $installedRecord.Icon = $newSource }
+                            }
+                            if ($script:InstalledAppsView) { try { $script:InstalledAppsView.Refresh() } catch {} }
+                        }
                         $finalUpdated = $true
+                    } elseif ($null -eq $script:SoftwareCatalog[$i].Icon) {
+                        $uiIconFailures.Add(("{0} [{1}]" -f $rawApp.Name,$rawApp.Id))
                     }
                 }
                 if ($finalUpdated) { try { (C 'SoftwareGrid').Items.Refresh() } catch {} }
-            }
-            catch {
-                Write-AMRLog ("Could not refresh software icons after background work: {0}" -f $_.Exception.Message) WARNING Software
-            }
-            finally {
-                try { $script:IconRefreshTimer.Stop() } catch {}
+                $visibleIconCount = @($script:SoftwareCatalog | Where-Object { $null -ne $_.Icon }).Count
+                Write-AMRLog ("WPF image loading completed. FileAttempts={0}; Updated={1}; TotalLoaded={2}/{3}; Failed={4}" -f $uiIconAttempts,$finalUpdated,$visibleIconCount,$script:SoftwareCatalog.Count,$uiIconFailures.Count) INFO Software
+                if ($uiIconFailures.Count -gt 0) {
+                    Write-AMRLog ("WPF icons not displayed for first {0} apps: {1}" -f [Math]::Min(40,$uiIconFailures.Count),(($uiIconFailures | Select-Object -First 40) -join '; ')) WARNING Software
+                }
+                $script:IconRefreshStarted = $true
+            } catch {
+                $script:IconRefreshStarted = $false
+                $record = $_
+                Write-AMRLog ("Icon refresh monitor failed. Error={0}; Type={1}; Line={2}; Command={3}" -f $record.Exception.Message,$record.Exception.GetType().FullName,$record.InvocationInfo.ScriptLineNumber,$record.InvocationInfo.Line) ERROR Software
+            } finally {
+                try { if ($script:IconRefreshTimer) { $script:IconRefreshTimer.Stop() } } catch {}
                 try { if ($script:IconRefreshPowerShell) { $script:IconRefreshPowerShell.Dispose() } } catch {}
                 try { if ($script:IconRefreshRunspace) { $script:IconRefreshRunspace.Close(); $script:IconRefreshRunspace.Dispose() } } catch {}
                 $script:IconRefreshPowerShell = $null
                 $script:IconRefreshRunspace = $null
                 $script:IconRefreshAsync = $null
+                $script:IconRefreshTimer = $null
             }
         })
         $script:IconRefreshTimer.Start()
         Write-AMRLog 'Software icon refresh started in an isolated background runspace; the main window remains independent.' INFO Software
-    }
-    catch {
+    } catch {
         $script:IconRefreshStarted = $false
-        Write-AMRLog ("Could not start the background icon worker; a later WPF event may retry: {0}" -f $_.Exception.Message) WARNING Software
+        $record = $_
+        Write-AMRLog ("Could not start the background icon worker. Error={0}; Type={1}; Line={2}; Command={3}" -f $record.Exception.Message,$record.Exception.GetType().FullName,$record.InvocationInfo.ScriptLineNumber,$record.InvocationInfo.Line) ERROR Software
         try { if ($script:IconRefreshPowerShell) { $script:IconRefreshPowerShell.Dispose() } } catch {}
         try { if ($script:IconRefreshRunspace) { $script:IconRefreshRunspace.Close(); $script:IconRefreshRunspace.Dispose() } } catch {}
         $script:IconRefreshPowerShell = $null
