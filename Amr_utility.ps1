@@ -2258,8 +2258,8 @@ $RawApps = @(
 # --- SOFTWARE ICONS: LOCAL-FIRST CACHE WITH FLEXIBLE ARCHIVE DISCOVERY ---
 # Download once on first use; reuse local icons afterward; refresh when the catalog has unmatched icons
 # or GitHub publishes a newer archive. Archive validation is based on actual contents, not a fixed count.
-$script:IconArchiveUrl = 'https://raw.githubusercontent.com/3mr10aa/Amr_tools/main/Icons.zip'
-$script:IconArchiveApiUrl = 'https://api.github.com/repos/3mr10aa/Amr_tools/commits?path=Icons.zip&per_page=1'
+$script:IconArchiveUrl = 'https://raw.githubusercontent.com/3mr10aa/Amr_tools/dd7a4529b9e7dc09a76b5e683025fc48d72ad3a0/Icons.zip'
+$script:IconArchiveApiUrl = 'https://api.github.com/repos/3mr10aa/Amr_tools/commits/dd7a4529b9e7dc09a76b5e683025fc48d72ad3a0'
 $script:IconArchivePath = Join-Path $script:DownloadDir 'amr-software-icons.zip'
 $script:IconArchiveMarkerPath = Join-Path $script:DownloadDir 'amr-software-icons.cache'
 
