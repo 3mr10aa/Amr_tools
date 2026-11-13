@@ -2272,7 +2272,14 @@ function Initialize-AMRSoftwareIcons {
     $missingIcons = 0
     $catalogIds = New-Object System.Collections.Generic.List[string]
 
-    # Build a stable catalog fingerprint and verify that every app already has a usable local icon.
+    Write-AMRLog ("Icon initialization started. Apps={0}; IconDir={1}" -f $Apps.Count,$script:IconDir) INFO Software
+    if (-not (Test-Path -LiteralPath $script:IconDir -PathType Container)) {
+        New-Item -ItemType Directory -Path $script:IconDir -Force -ErrorAction Stop | Out-Null
+    }
+    if (-not (Test-Path -LiteralPath $script:DownloadDir -PathType Container)) {
+        New-Item -ItemType Directory -Path $script:DownloadDir -Force -ErrorAction Stop | Out-Null
+    }
+
     foreach ($app in $Apps) {
         $candidateIds = @([string]$app.Id)
         if ($app.PSObject.Properties['IconAliases'] -and $app.IconAliases) {
@@ -2281,163 +2288,99 @@ function Initialize-AMRSoftwareIcons {
         foreach ($candidateId in $candidateIds) {
             if (-not [string]::IsNullOrWhiteSpace($candidateId)) { $catalogIds.Add($candidateId) }
         }
-
         $hasCachedIcon = $false
         foreach ($candidateId in $candidateIds) {
-            foreach ($extension in @('.png', '.jpg', '.jpeg')) {
+            foreach ($extension in @('.png','.jpg','.jpeg')) {
                 $candidatePath = Join-Path $script:IconDir ($candidateId + $extension)
-                if ((Test-Path -LiteralPath $candidatePath -PathType Leaf) -and (Get-Item -LiteralPath $candidatePath).Length -gt 128) {
-                    $hasCachedIcon = $true
-                    break
+                if (Test-Path -LiteralPath $candidatePath -PathType Leaf) {
+                    if ((Get-Item -LiteralPath $candidatePath -ErrorAction SilentlyContinue).Length -gt 128) { $hasCachedIcon = $true; break }
                 }
             }
             if ($hasCachedIcon) { break }
         }
-        if (-not $hasCachedIcon) { $missingIcons++ ; $cacheValid = $false }
+        if (-not $hasCachedIcon) { $missingIcons++; $cacheValid = $false }
     }
 
     $fingerprintText = (($catalogIds | Sort-Object -Unique) -join "`n")
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
-        $catalogFingerprint = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($fingerprintText)))).Replace('-', '').ToLowerInvariant()
-    }
-    finally { $sha.Dispose() }
+        $catalogFingerprint = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($fingerprintText)))).Replace('-','').ToLowerInvariant()
+    } finally { $sha.Dispose() }
 
-    $cachedCommit = ''
     $cachedFingerprint = ''
     if (Test-Path -LiteralPath $script:IconArchiveMarkerPath -PathType Leaf) {
         try {
             $markerLines = @(Get-Content -LiteralPath $script:IconArchiveMarkerPath -ErrorAction Stop)
-            if ($markerLines.Count -ge 2) {
-                $cachedCommit = [string]$markerLines[0]
-                $cachedFingerprint = [string]$markerLines[1]
-            }
-        }
-        catch { Write-AMRLog "Could not read the local icon-cache marker: $($_.Exception.Message)" WARNING Software }
+            if ($markerLines.Count -ge 2) { $cachedFingerprint = [string]$markerLines[1] }
+        } catch { Write-AMRLog ("Could not read icon marker: {0}" -f $_.Exception.Message) WARNING Software }
     }
 
-    # A tiny GitHub API request checks whether icons.zip has a newer published commit.
-    # If GitHub is unavailable, a complete local cache remains usable and startup continues offline.
-    $remoteCommit = ''
-    try {
-        try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
-        $commitInfo = Invoke-RestMethod -Uri $script:IconArchiveApiUrl -Headers @{ 'User-Agent' = 'AMR-Windows-Utility' } -TimeoutSec 3 -ErrorAction Stop
-        if ($commitInfo -and $commitInfo.Count -gt 0 -and $commitInfo[0].sha) {
-            $remoteCommit = [string]$commitInfo[0].sha
-        }
-    }
-    catch {
-        Write-AMRLog 'GitHub icon-version check unavailable; using the local icon cache when complete.' INFO Software
-    }
-
-    $sourceMatches = ($remoteCommit -and $cachedCommit -and ($remoteCommit -eq $cachedCommit))
+    # The archive URL is pinned to a specific Git commit. Avoid a separate GitHub API
+    # request here: it can stall the isolated worker and is unnecessary for this source.
     $catalogMatches = ($cachedFingerprint -eq $catalogFingerprint)
-    if ($cacheValid -and $catalogMatches -and (($sourceMatches) -or (-not $remoteCommit))) {
-        Write-AMRLog "All $($Apps.Count) software icons are cached locally and validated; no archive download or extraction is needed." SUCCESS Software
-        return
-    }
-
-    # Refresh if this is the first run, the published archive changed, the app catalog changed,
-    # or any catalog app has no matching local icon. This also retries previously unmatched apps.
-    $iconDirectoryMissing = -not (Test-Path -LiteralPath $script:IconDir -PathType Container)
-    $needsArchiveRefresh = $iconDirectoryMissing -or
-        (-not (Test-Path -LiteralPath $script:IconArchivePath -PathType Leaf)) -or
-        ($remoteCommit -and ($remoteCommit -ne $cachedCommit)) -or
-        (-not $catalogMatches) -or ($missingIcons -gt 0)
-    Write-AMRLog ("Icon cache decision: cacheValid={0}; missing={1}; catalogMatches={2}; remoteCommitKnown={3}; remoteCommitChanged={4}; iconDirectoryMissing={5}; downloadRequired={6}" -f $cacheValid,$missingIcons,$catalogMatches,[bool]$remoteCommit,[bool]($remoteCommit -and ($remoteCommit -ne $cachedCommit)),$iconDirectoryMissing,$needsArchiveRefresh) INFO Software
+    $archiveExists = Test-Path -LiteralPath $script:IconArchivePath -PathType Leaf
+    $needsArchiveRefresh = (-not $cacheValid) -or (-not $catalogMatches) -or (-not $archiveExists)
+    Write-AMRLog ("Icon cache decision: cacheValid={0}; missing={1}; catalogMatches={2}; archiveExists={3}; downloadRequired={4}" -f $cacheValid,$missingIcons,$catalogMatches,$archiveExists,$needsArchiveRefresh) INFO Software
 
     try {
         if ($needsArchiveRefresh) {
-            Write-AMRLog "Downloading the software icon pack ($missingIcons catalog icons missing or source updated)..." INFO Software
+            Write-AMRLog ("Downloading pinned icon archive from GitHub. Missing icons={0}" -f $missingIcons) INFO Software
             Remove-Item -LiteralPath $downloadTemp -Force -ErrorAction SilentlyContinue
-            $archiveUrl = $script:IconArchiveUrl
-            if ($remoteCommit) { $archiveUrl = '{0}?v={1}' -f $script:IconArchiveUrl,$remoteCommit }
-            Invoke-WebRequest -Uri $archiveUrl -OutFile $downloadTemp -UseBasicParsing -TimeoutSec 90 -ErrorAction Stop
-            if (-not (Test-Path -LiteralPath $downloadTemp -PathType Leaf) -or (Get-Item -LiteralPath $downloadTemp).Length -lt 1024) {
-                throw 'The downloaded icon archive is empty or too small.'
-            }
+            try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+            Invoke-WebRequest -Uri $script:IconArchiveUrl -OutFile $downloadTemp -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
+            if (-not (Test-Path -LiteralPath $downloadTemp -PathType Leaf)) { throw 'GitHub download did not create the ZIP file.' }
+            $downloadedLength = (Get-Item -LiteralPath $downloadTemp).Length
+            if ($downloadedLength -lt 1024) { throw ("Downloaded icon ZIP is too small ({0} bytes)." -f $downloadedLength) }
+            Write-AMRLog ("Icon ZIP downloaded successfully: {0} bytes" -f $downloadedLength) INFO Software
 
-            Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+            Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
             $zipCheck = [System.IO.Compression.ZipFile]::OpenRead($downloadTemp)
             try {
                 $zipImages = @($zipCheck.Entries | Where-Object { $_.FullName -match '(?i)\.(png|jpe?g)$' })
-                $zipUniqueNames = @($zipImages | ForEach-Object { [System.IO.Path]::GetFileNameWithoutExtension($_.Name).ToLowerInvariant() } | Sort-Object -Unique)
-                # Accept any non-empty image pack. Do not couple archive validity to catalog size.
-                if ($zipImages.Count -eq 0 -or $zipUniqueNames.Count -eq 0) {
-                    throw 'The icon ZIP contains no PNG/JPG image files.'
-                }
-            }
-            finally { $zipCheck.Dispose() }
-            Move-Item -LiteralPath $downloadTemp -Destination $script:IconArchivePath -Force
-        }
-        elseif (-not (Test-Path -LiteralPath $script:IconArchivePath -PathType Leaf)) {
-            throw 'No local icon archive is available and GitHub could not be reached.'
+                if ($zipImages.Count -lt 1) { throw 'Downloaded ZIP contains no PNG/JPG images.' }
+                Write-AMRLog ("ZIP integrity verified: {0} image entries" -f $zipImages.Count) INFO Software
+            } finally { $zipCheck.Dispose() }
+            Move-Item -LiteralPath $downloadTemp -Destination $script:IconArchivePath -Force -ErrorAction Stop
         }
 
-        if (Test-Path -LiteralPath $stagingDir) {
-            Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
-        }
-        New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
+        if (Test-Path -LiteralPath $stagingDir) { Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Path $stagingDir -Force -ErrorAction Stop | Out-Null
+        Write-AMRLog 'Extracting icon ZIP into staging folder...' INFO Software
         Expand-Archive -LiteralPath $script:IconArchivePath -DestinationPath $stagingDir -Force -ErrorAction Stop
-
-        $imageFiles = @(Get-ChildItem -LiteralPath $stagingDir -Recurse -File -ErrorAction Stop | Where-Object {
-            $_.Extension -match '(?i)^\.(png|jpe?g)$'
-        })
-        if ($imageFiles.Count -eq 0) { throw 'The cached icon archive contains no PNG/JPG image files.' }
+        $imageFiles = @(Get-ChildItem -LiteralPath $stagingDir -Recurse -File -ErrorAction Stop | Where-Object { $_.Extension -match '(?i)^\.(png|jpe?g)$' })
+        if ($imageFiles.Count -lt 1) { throw 'Extracted ZIP contains no PNG/JPG images.' }
+        Write-AMRLog ("Extraction completed: {0} image files found" -f $imageFiles.Count) INFO Software
 
         $byBaseName = @{}
+        $byNormalizedName = @{}
         foreach ($file in $imageFiles) {
-            $key = [System.IO.Path]::GetFileNameWithoutExtension($file.Name).ToLowerInvariant()
+            $base = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
+            $key = $base.ToLowerInvariant()
             if (-not $byBaseName.ContainsKey($key)) { $byBaseName[$key] = $file }
+            $normalized = ($base -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
+            if (-not $byNormalizedName.ContainsKey($normalized)) { $byNormalizedName[$normalized] = $file }
         }
-
-        Write-AMRLog ("Icon archive accepted: {0} image files ({1} unique names); no fixed minimum required." -f $imageFiles.Count,$byBaseName.Count) INFO Software
 
         $copied = 0
         foreach ($app in $Apps) {
             $appId = [string]$app.Id
-            $sourceIcon = $null
+            if ([string]::IsNullOrWhiteSpace($appId)) { continue }
             $candidateIds = @($appId)
-            if ($app.PSObject.Properties['IconAliases'] -and $app.IconAliases) {
-                $candidateIds += @($app.IconAliases | ForEach-Object { [string]$_ })
-            }
-
+            if ($app.PSObject.Properties['IconAliases'] -and $app.IconAliases) { $candidateIds += @($app.IconAliases | ForEach-Object { [string]$_ }) }
+            $sourceIcon = $null
             foreach ($candidateId in $candidateIds) {
-                $exactKey = $candidateId.ToLowerInvariant()
-                if ($byBaseName.ContainsKey($exactKey)) { $sourceIcon = $byBaseName[$exactKey]; break }
+                $key = $candidateId.ToLowerInvariant()
+                if ($byBaseName.ContainsKey($key)) { $sourceIcon = $byBaseName[$key]; break }
+                $normalized = ($candidateId -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
+                if ($byNormalizedName.ContainsKey($normalized)) { $sourceIcon = $byNormalizedName[$normalized]; break }
             }
-            if ($null -eq $sourceIcon) {
-                foreach ($candidateId in $candidateIds) {
-                    $normalizedId = ($candidateId -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
-                    foreach ($file in $imageFiles) {
-                        $normalizedBase = ([System.IO.Path]::GetFileNameWithoutExtension($file.Name) -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
-                        if ($normalizedBase -eq $normalizedId) { $sourceIcon = $file; break }
-                    }
-                    if ($null -ne $sourceIcon) { break }
-                }
-            }
-
             if ($null -ne $sourceIcon) {
                 $targetExtension = if ($sourceIcon.Extension -ieq '.jpeg') { '.jpg' } else { $sourceIcon.Extension.ToLowerInvariant() }
-                $targetPath = Join-Path $script:IconDir ($appId + $targetExtension)
-                Copy-Item -LiteralPath $sourceIcon.FullName -Destination $targetPath -Force -ErrorAction Stop
+                Copy-Item -LiteralPath $sourceIcon.FullName -Destination (Join-Path $script:IconDir ($appId + $targetExtension)) -Force -ErrorAction Stop
                 $copied++
-            }
-            elseif ($app.PSObject.Properties['IconUrl'] -and -not [string]::IsNullOrWhiteSpace([string]$app.IconUrl)) {
-                $fallbackPath = Join-Path $stagingDir (([Guid]::NewGuid().ToString('N')) + '.png')
-                try {
-                    Invoke-WebRequest -Uri ([string]$app.IconUrl) -OutFile $fallbackPath -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
-                    if ((Test-Path -LiteralPath $fallbackPath -PathType Leaf) -and (Get-Item -LiteralPath $fallbackPath).Length -gt 128) {
-                        Copy-Item -LiteralPath $fallbackPath -Destination (Join-Path $script:IconDir ($appId + '.png')) -Force -ErrorAction Stop
-                        $copied++
-                    }
-                }
-                catch { Write-AMRLog "Dedicated icon fallback failed for $($app.Name): $($_.Exception.Message)" WARNING Software }
-                finally { if (Test-Path -LiteralPath $fallbackPath) { Remove-Item -LiteralPath $fallbackPath -Force -ErrorAction SilentlyContinue } }
             }
         }
 
-        # Save the marker only after the catalog is fully populated, so failed updates retry next launch.
         $remainingMissing = 0
         foreach ($app in $Apps) {
             $found = $false
@@ -2446,7 +2389,7 @@ function Initialize-AMRSoftwareIcons {
             foreach ($idToCheck in $idsToCheck) {
                 foreach ($ext in @('.png','.jpg','.jpeg')) {
                     $localPath = Join-Path $script:IconDir ($idToCheck + $ext)
-                    if ((Test-Path -LiteralPath $localPath -PathType Leaf) -and (Get-Item -LiteralPath $localPath).Length -gt 128) { $found = $true; break }
+                    if ((Test-Path -LiteralPath $localPath -PathType Leaf) -and (Get-Item -LiteralPath $localPath -ErrorAction SilentlyContinue).Length -gt 128) { $found = $true; break }
                 }
                 if ($found) { break }
             }
@@ -2454,30 +2397,21 @@ function Initialize-AMRSoftwareIcons {
         }
 
         if ($remainingMissing -eq 0) {
-            $commitToSave = if ($remoteCommit) { $remoteCommit } elseif ($cachedCommit) { $cachedCommit } else { 'offline-local-archive' }
-            @($commitToSave,$catalogFingerprint,$imageFiles.Count,(Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK')) |
+            @('pinned-dd7a4529b9e7dc09a76b5e683025fc48d72ad3a0',$catalogFingerprint,$imageFiles.Count,(Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK')) |
                 Set-Content -LiteralPath $script:IconArchiveMarkerPath -Encoding UTF8 -Force -ErrorAction Stop
-            Write-AMRLog "Software icon cache is ready: $copied icons copied/updated; all $($Apps.Count) catalog entries now have local icons." SUCCESS Software
-        }
-        else {
-            Write-AMRLog "Software icon cache remains incomplete: $remainingMissing catalog icons are missing. The next launch will retry downloading the latest archive." WARNING Software
+            Write-AMRLog ("Software icon cache ready: {0} copied/updated; all {1} catalog entries have icons." -f $copied,$Apps.Count) SUCCESS Software
+        } else {
+            Write-AMRLog ("Icon cache incomplete: {0} catalog entries still have no matching image; next launch will retry." -f $remainingMissing) WARNING Software
         }
     }
     catch {
-        Write-AMRLog "Could not refresh the software icon cache: $($_.Exception.Message). Existing local icons will still be used." WARNING Software
+        Write-AMRLog ("Could not refresh software icon cache: {0}" -f $_.Exception.Message) WARNING Software
         if (Test-Path -LiteralPath $downloadTemp) { Remove-Item -LiteralPath $downloadTemp -Force -ErrorAction SilentlyContinue }
     }
     finally {
-        if (Test-Path -LiteralPath $stagingDir) {
-            Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
-        }
+        if (Test-Path -LiteralPath $stagingDir) { Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }
-# IMPORTANT: Icon archive checks/downloads are intentionally deferred until AFTER
-# the main WPF window has rendered. Startup must never wait for GitHub or ZIP work.
-
-# The icon cache is now populated exclusively from the single Icons.zip archive.
-# No individual icon URLs or special-case per-app downloads are used.
 
 # Convert icon files to frozen WPF ImageSource objects.
 # WPF Image.Source expects an ImageSource, not a plain filesystem path string.
@@ -15284,6 +15218,7 @@ function Start-AMRBackgroundIconRefresh {
                 }
                 Write-AMRLog ("Icon worker entered. Apps={0}; IconDir={1}; Archive={2}; ArchiveExists={3}" -f $Apps.Count,$script:IconDir,$script:IconArchivePath,(Test-Path -LiteralPath $script:IconArchivePath -PathType Leaf)) 'INFO' 'Software'
                 Set-Item -Path Function:\Initialize-AMRSoftwareIcons -Value ([scriptblock]::Create($InitFunctionText)) -Force
+                Write-AMRLog 'Icon initializer loaded into worker runspace; starting cache/download routine.' 'INFO' 'Software'
                 Initialize-AMRSoftwareIcons -Apps $Apps
                 return 'Completed'
             }
