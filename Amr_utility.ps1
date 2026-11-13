@@ -2255,10 +2255,11 @@ $RawApps = @(
     [pscustomobject]@{ Name='KStars Planetarium'; Category='34. Data Science & Scientific Tools'; Id='KDE.KStars'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='KDE' }
 )
 
-# --- SOFTWARE ICONS: LOCAL-FIRST CACHE WITH GITHUB VERSION CHECK ---
-# Icons are downloaded/extracted only on first use or when the published archive changes.
-$script:IconArchiveUrl = 'https://raw.githubusercontent.com/3mr10aa/Amr_tools/main/icons.zip'
-$script:IconArchiveApiUrl = 'https://api.github.com/repos/3mr10aa/Amr_tools/commits?path=icons.zip&per_page=1'
+# --- SOFTWARE ICONS: LOCAL-FIRST CACHE WITH FLEXIBLE ARCHIVE DISCOVERY ---
+# Download once on first use; reuse local icons afterward; refresh when the catalog has unmatched icons
+# or GitHub publishes a newer archive. Archive validation is based on actual contents, not a fixed count.
+$script:IconArchiveUrl = 'https://raw.githubusercontent.com/3mr10aa/Amr_tools/main/Icons.zip'
+$script:IconArchiveApiUrl = 'https://api.github.com/repos/3mr10aa/Amr_tools/commits?path=Icons.zip&per_page=1'
 $script:IconArchivePath = Join-Path $script:DownloadDir 'amr-software-icons.zip'
 $script:IconArchiveMarkerPath = Join-Path $script:DownloadDir 'amr-software-icons.cache'
 
@@ -2336,8 +2337,14 @@ function Initialize-AMRSoftwareIcons {
         return
     }
 
-    $needsArchiveRefresh = (-not (Test-Path -LiteralPath $script:IconArchivePath -PathType Leaf)) -or
-        ($remoteCommit -and ($remoteCommit -ne $cachedCommit))
+    # Refresh if this is the first run, the published archive changed, the app catalog changed,
+    # or any catalog app has no matching local icon. This also retries previously unmatched apps.
+    $iconDirectoryMissing = -not (Test-Path -LiteralPath $script:IconDir -PathType Container)
+    $needsArchiveRefresh = $iconDirectoryMissing -or
+        (-not (Test-Path -LiteralPath $script:IconArchivePath -PathType Leaf)) -or
+        ($remoteCommit -and ($remoteCommit -ne $cachedCommit)) -or
+        (-not $catalogMatches) -or ($missingIcons -gt 0)
+    Write-AMRLog ("Icon cache decision: cacheValid={0}; missing={1}; catalogMatches={2}; remoteCommitKnown={3}; remoteCommitChanged={4}; iconDirectoryMissing={5}; downloadRequired={6}" -f $cacheValid,$missingIcons,$catalogMatches,[bool]$remoteCommit,[bool]($remoteCommit -and ($remoteCommit -ne $cachedCommit)),$iconDirectoryMissing,$needsArchiveRefresh) INFO Software
 
     try {
         if ($needsArchiveRefresh) {
@@ -2355,8 +2362,9 @@ function Initialize-AMRSoftwareIcons {
             try {
                 $zipImages = @($zipCheck.Entries | Where-Object { $_.FullName -match '(?i)\.(png|jpe?g)$' })
                 $zipUniqueNames = @($zipImages | ForEach-Object { [System.IO.Path]::GetFileNameWithoutExtension($_.Name).ToLowerInvariant() } | Sort-Object -Unique)
-                if ($zipImages.Count -lt 1000 -or $zipUniqueNames.Count -lt 1000) {
-                    throw ("The icon ZIP failed validation: found {0} images and {1} unique names; expected at least 1000 of each." -f $zipImages.Count,$zipUniqueNames.Count)
+                # Accept any non-empty image pack. Do not couple archive validity to catalog size.
+                if ($zipImages.Count -eq 0 -or $zipUniqueNames.Count -eq 0) {
+                    throw 'The icon ZIP contains no PNG/JPG image files.'
                 }
             }
             finally { $zipCheck.Dispose() }
@@ -2375,13 +2383,15 @@ function Initialize-AMRSoftwareIcons {
         $imageFiles = @(Get-ChildItem -LiteralPath $stagingDir -Recurse -File -ErrorAction Stop | Where-Object {
             $_.Extension -match '(?i)^\.(png|jpe?g)$'
         })
-        if ($imageFiles.Count -lt 1000) { throw ("The cached icon archive contains only {0} image files; expected at least 1000." -f $imageFiles.Count) }
+        if ($imageFiles.Count -eq 0) { throw 'The cached icon archive contains no PNG/JPG image files.' }
 
         $byBaseName = @{}
         foreach ($file in $imageFiles) {
             $key = [System.IO.Path]::GetFileNameWithoutExtension($file.Name).ToLowerInvariant()
             if (-not $byBaseName.ContainsKey($key)) { $byBaseName[$key] = $file }
         }
+
+        Write-AMRLog ("Icon archive accepted: {0} image files ({1} unique names); no fixed minimum required." -f $imageFiles.Count,$byBaseName.Count) INFO Software
 
         $copied = 0
         foreach ($app in $Apps) {
@@ -2450,7 +2460,7 @@ function Initialize-AMRSoftwareIcons {
             Write-AMRLog "Software icon cache is ready: $copied icons copied/updated; all $($Apps.Count) catalog entries now have local icons." SUCCESS Software
         }
         else {
-            Write-AMRLog "Software icon cache remains incomplete: $remainingMissing catalog icons are missing; another refresh will be attempted next launch." WARNING Software
+            Write-AMRLog "Software icon cache remains incomplete: $remainingMissing catalog icons are missing. The next launch will retry downloading the latest archive." WARNING Software
         }
     }
     catch {
@@ -2466,114 +2476,8 @@ function Initialize-AMRSoftwareIcons {
 # IMPORTANT: Icon archive checks/downloads are intentionally deferred until AFTER
 # the main WPF window has rendered. Startup must never wait for GitHub or ZIP work.
 
-# --- TARGETED ICON HOTFIX: REFRESH ONLY THE THREE REPLACED FILES FROM GITHUB ---
-# The general 1,000-icon archive remains unchanged. These three files are published
-# individually in the repository's Icons folder and must override any stale local
-# cache copies (and any older copies contained in the general archive).
-$script:IconFixBaseUrl = 'https://raw.githubusercontent.com/3mr10aa/Amr_tools/main/Icons'
-$script:IconFixVersion = '20261104-v1'
-$script:IconFixMarkerPath = Join-Path $script:DownloadDir ("AMR_IconFix_{0}.stamp" -f $script:IconFixVersion)
-$script:IconFixFiles = @(
-    [pscustomobject]@{ Id='MiniTool.PartitionWizard'; FileName='MiniTool.PartitionWizard.png' },
-    [pscustomobject]@{ Id='KoodoReader.KoodoReader'; FileName='KoodoReader.KoodoReader.png' },
-    [pscustomobject]@{ Id='ventoy.ventoy'; FileName='ventoy.ventoy.png' }
-)
-
-function Test-AMRPNGFile {
-    param([Parameter(Mandatory = $true)][string]$Path)
-
-    $stream = $null
-    try {
-        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
-        $stream = [System.IO.File]::OpenRead($Path)
-        if ($stream.Length -lt 128) { return $false }
-
-        # Check the PNG signature and IHDR chunk before accepting a downloaded file.
-        $header = New-Object byte[] 24
-        if ($stream.Read($header, 0, $header.Length) -ne $header.Length) { return $false }
-        $signature = [byte[]](137,80,78,71,13,10,26,10)
-        for ($i = 0; $i -lt $signature.Length; $i++) {
-            if ($header[$i] -ne $signature[$i]) { return $false }
-        }
-        if ($header[12] -ne 73 -or $header[13] -ne 72 -or $header[14] -ne 68 -or $header[15] -ne 82) {
-            return $false
-        }
-
-        $width = [System.Net.IPAddress]::NetworkToHostOrder([BitConverter]::ToInt32($header, 16))
-        $height = [System.Net.IPAddress]::NetworkToHostOrder([BitConverter]::ToInt32($header, 20))
-        return ($width -gt 0 -and $height -gt 0)
-    }
-    catch { return $false }
-    finally { if ($null -ne $stream) { $stream.Dispose() } }
-}
-
-function Update-AMRFixedSoftwareIcons {
-    # Skip the network request only when this patch version succeeded previously
-    # AND all three resulting cache files are still valid PNG files.
-    $allCachedAndValid = $true
-    foreach ($icon in $script:IconFixFiles) {
-        $cachedPath = Join-Path $script:IconDir ($icon.Id + '.png')
-        if (-not (Test-AMRPNGFile -Path $cachedPath)) {
-            $allCachedAndValid = $false
-            break
-        }
-    }
-    if ((Test-Path -LiteralPath $script:IconFixMarkerPath -PathType Leaf) -and $allCachedAndValid) {
-        Write-AMRLog 'The three targeted software icons are already refreshed and validated.' INFO Software
-        return
-    }
-
-    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
-    $updated = 0
-    foreach ($icon in $script:IconFixFiles) {
-        $targetPath = Join-Path $script:IconDir ($icon.Id + '.png')
-        $tempPath = Join-Path $script:DownloadDir ("AMR_{0}_{1}.download" -f $icon.Id,$script:IconFixVersion)
-        try {
-            Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
-            $iconUrl = '{0}/{1}?v={2}' -f $script:IconFixBaseUrl,$icon.FileName,$script:IconFixVersion
-            Invoke-WebRequest -Uri $iconUrl -OutFile $tempPath -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
-
-            if (-not (Test-AMRPNGFile -Path $tempPath)) {
-                throw ("The downloaded file failed PNG validation: {0}" -f $icon.FileName)
-            }
-
-            # Replace the existing cache file only after the temporary download validates.
-            Move-Item -LiteralPath $tempPath -Destination $targetPath -Force -ErrorAction Stop
-            if (-not (Test-AMRPNGFile -Path $targetPath)) {
-                throw ("The refreshed cache file failed validation: {0}" -f $icon.FileName)
-            }
-            $updated++
-            Write-AMRLog ("Refreshed software icon cache: {0}." -f $icon.Id) SUCCESS Software
-        }
-        catch {
-            Write-AMRLog ("Could not refresh software icon {0}: {1}" -f $icon.Id,$_.Exception.Message) WARNING Software
-        }
-        finally {
-            if (Test-Path -LiteralPath $tempPath) {
-                Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
-            }
-        }
-    }
-
-    if ($updated -eq $script:IconFixFiles.Count) {
-        try {
-            Set-Content -LiteralPath $script:IconFixMarkerPath -Value $script:IconFixVersion -Encoding ASCII -Force -ErrorAction Stop
-            Write-AMRLog 'All three targeted software icons were downloaded, validated, and cached successfully.' SUCCESS Software
-        }
-        catch {
-            # Marker failure must not prevent the utility from starting; the icons are already refreshed.
-            Write-AMRLog ("Icons were refreshed, but the update marker could not be saved: {0}" -f $_.Exception.Message) WARNING Software
-        }
-    }
-    else {
-        # No success marker: a later launch will retry any failed refreshes.
-        Remove-Item -LiteralPath $script:IconFixMarkerPath -Force -ErrorAction SilentlyContinue
-        Write-AMRLog ("Targeted icon refresh incomplete ({0}/{1}); it will retry on the next launch." -f $updated,$script:IconFixFiles.Count) WARNING Software
-    }
-}
-
-# The three targeted icon fixes are also refreshed by the isolated background worker
-# after the main window is visible. No network request is allowed in this startup path.
+# The icon cache is now populated exclusively from the single Icons.zip archive.
+# No individual icon URLs or special-case per-app downloads are used.
 
 # Convert icon files to frozen WPF ImageSource objects.
 # WPF Image.Source expects an ImageSource, not a plain filesystem path string.
@@ -3697,16 +3601,19 @@ Write-AMRLog "Loaded $loadedIconCount app icons out of $($script:SoftwareCatalog
          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
          <Grid Grid.Row="0" Margin="0,0,0,10">
           <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-          <TextBlock Text="SAFE CLEANUP" FontSize="14" FontWeight="SemiBold" Foreground="#E4E4E7" VerticalAlignment="Center"/>
-          <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-           <Button Name="CleanupSelectAllBtn" Content="Select All" Height="30" MinWidth="78" Margin="0,0,5,0" Padding="8,3" Background="#244B3B" Foreground="#D1FAE5" BorderBrush="#3F8B68" FontSize="10" FontWeight="SemiBold"/>
-           <Button Name="CleanupCancelSelectionBtn" Content="Clear Selection" Height="30" MinWidth="100" Margin="0,0,5,0" Padding="8,3" Background="#49313A" Foreground="#FFE4E6" BorderBrush="#8B5363" FontSize="10" FontWeight="SemiBold"/>
-           <Button Name="CleanupScanBtn" Content="Scan Now" Width="95" Height="32" Background="#263B36" Foreground="#A7F3D0" BorderBrush="#36594D"/>
+          <StackPanel>
+           <TextBlock Text="SAFE CLEANUP" FontSize="14" FontWeight="SemiBold" Foreground="#E4E4E7"/>
+           <TextBlock Name="CleanupScanSummary" Text="No scan performed yet." Foreground="#D1D5DB" FontSize="11" Margin="0,3,0,0" TextWrapping="Wrap"/>
           </StackPanel>
-          <TextBlock Name="CleanupScanSummary" Text="No scan performed yet." Visibility="Collapsed"/>
+          <Button Name="CleanupScanBtn" Grid.Column="1" Content="Scan Now" Width="105" Height="32" Background="#263B36" Foreground="#A7F3D0" BorderBrush="#36594D"/>
          </Grid>
          <Grid Grid.Row="1" Margin="0,0,0,8">
-          <TextBlock Text="Select the categories you want to review" FontSize="12" Foreground="#CBD5E1" VerticalAlignment="Center"/>
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+          <TextBlock Grid.Column="0" Text="Select the categories you want to review" FontSize="12" Foreground="#CBD5E1" VerticalAlignment="Center"/>
+          <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
+           <Button Name="CleanupSelectAllBtn" Content="Select All" Height="28" MinWidth="88" Margin="0,0,6,0" Padding="10,3" Background="#244B3B" Foreground="#D1FAE5" BorderBrush="#3F8B68" FontSize="10" FontWeight="SemiBold"/>
+           <Button Name="CleanupCancelSelectionBtn" Content="Cancel Selection" Height="28" MinWidth="112" Padding="10,3" Background="#49313A" Foreground="#FFE4E6" BorderBrush="#8B5363" FontSize="10" FontWeight="SemiBold"/>
+          </StackPanel>
          </Grid>
          <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
           <StackPanel>
@@ -15334,6 +15241,7 @@ $script:IconRefreshTimer = $null
 function Start-AMRBackgroundIconRefresh {
     if ($script:IconRefreshStarted) { return }
     $script:IconRefreshStarted = $true
+    Write-AMRLog 'Icon refresh trigger received; preparing the background downloader.' INFO Software
 
     try {
         $workerCode = {
@@ -15345,13 +15253,7 @@ function Start-AMRBackgroundIconRefresh {
                 [string]$ApiUrl,
                 [string]$ArchivePath,
                 [string]$ArchiveMarkerPath,
-                [string]$IconFixBaseUrl,
-                [string]$IconFixVersion,
-                [string]$IconFixMarkerPath,
-                [object[]]$IconFixFiles,
                 [string]$InitFunctionText,
-                [string]$PngFunctionText,
-                [string]$FixFunctionText,
                 [string]$LogFile
             )
 
@@ -15363,10 +15265,6 @@ function Start-AMRBackgroundIconRefresh {
             $script:IconArchiveApiUrl = $ApiUrl
             $script:IconArchivePath = $ArchivePath
             $script:IconArchiveMarkerPath = $ArchiveMarkerPath
-            $script:IconFixBaseUrl = $IconFixBaseUrl
-            $script:IconFixVersion = $IconFixVersion
-            $script:IconFixMarkerPath = $IconFixMarkerPath
-            $script:IconFixFiles = $IconFixFiles
             $script:LogFile = $LogFile
 
             function Write-AMRLog {
@@ -15378,11 +15276,15 @@ function Start-AMRBackgroundIconRefresh {
             }
 
             try {
+                if (-not (Test-Path -LiteralPath $script:IconDir -PathType Container)) {
+                    New-Item -ItemType Directory -Path $script:IconDir -Force -ErrorAction Stop | Out-Null
+                }
+                if (-not (Test-Path -LiteralPath $script:DownloadDir -PathType Container)) {
+                    New-Item -ItemType Directory -Path $script:DownloadDir -Force -ErrorAction Stop | Out-Null
+                }
+                Write-AMRLog ("Icon worker entered. Apps={0}; IconDir={1}; Archive={2}; ArchiveExists={3}" -f $Apps.Count,$script:IconDir,$script:IconArchivePath,(Test-Path -LiteralPath $script:IconArchivePath -PathType Leaf)) 'INFO' 'Software'
                 Set-Item -Path Function:\Initialize-AMRSoftwareIcons -Value ([scriptblock]::Create($InitFunctionText)) -Force
-                Set-Item -Path Function:\Test-AMRPNGFile -Value ([scriptblock]::Create($PngFunctionText)) -Force
-                Set-Item -Path Function:\Update-AMRFixedSoftwareIcons -Value ([scriptblock]::Create($FixFunctionText)) -Force
                 Initialize-AMRSoftwareIcons -Apps $Apps
-                Update-AMRFixedSoftwareIcons
                 return 'Completed'
             }
             catch {
@@ -15406,13 +15308,7 @@ function Start-AMRBackgroundIconRefresh {
         $null = $script:IconRefreshPowerShell.AddArgument($script:IconArchiveApiUrl)
         $null = $script:IconRefreshPowerShell.AddArgument($script:IconArchivePath)
         $null = $script:IconRefreshPowerShell.AddArgument($script:IconArchiveMarkerPath)
-        $null = $script:IconRefreshPowerShell.AddArgument($script:IconFixBaseUrl)
-        $null = $script:IconRefreshPowerShell.AddArgument($script:IconFixVersion)
-        $null = $script:IconRefreshPowerShell.AddArgument($script:IconFixMarkerPath)
-        $null = $script:IconRefreshPowerShell.AddArgument(@($script:IconFixFiles))
         $null = $script:IconRefreshPowerShell.AddArgument(${function:Initialize-AMRSoftwareIcons}.ToString())
-        $null = $script:IconRefreshPowerShell.AddArgument(${function:Test-AMRPNGFile}.ToString())
-        $null = $script:IconRefreshPowerShell.AddArgument(${function:Update-AMRFixedSoftwareIcons}.ToString())
         $null = $script:IconRefreshPowerShell.AddArgument($script:LogFile)
         $script:IconRefreshStartedUtc = [DateTime]::UtcNow
         $script:IconRefreshAsync = $script:IconRefreshPowerShell.BeginInvoke()
@@ -15511,7 +15407,8 @@ function Start-AMRBackgroundIconRefresh {
         Write-AMRLog 'Software icon refresh started in an isolated background runspace; the main window remains independent.' INFO Software
     }
     catch {
-        Write-AMRLog ("Could not start the background icon worker; existing local icons remain available: {0}" -f $_.Exception.Message) WARNING Software
+        $script:IconRefreshStarted = $false
+        Write-AMRLog ("Could not start the background icon worker; a later WPF event may retry: {0}" -f $_.Exception.Message) WARNING Software
         try { if ($script:IconRefreshPowerShell) { $script:IconRefreshPowerShell.Dispose() } } catch {}
         try { if ($script:IconRefreshRunspace) { $script:IconRefreshRunspace.Close(); $script:IconRefreshRunspace.Dispose() } } catch {}
         $script:IconRefreshPowerShell = $null
@@ -15519,7 +15416,9 @@ function Start-AMRBackgroundIconRefresh {
     }
 }
 
-# ContentRendered guarantees the user sees the application before any icon work starts.
+# Start from Loaded; ContentRendered is a guarded fallback for hosts with unusual WPF event timing.
+# Start-AMRBackgroundIconRefresh is idempotent, so the worker can only start once.
+$script:Window.Add_Loaded({ Start-AMRBackgroundIconRefresh })
 $script:Window.Add_ContentRendered({ Start-AMRBackgroundIconRefresh })
 
 # Warm the installed-app inventory before the user opens Show Installed.
