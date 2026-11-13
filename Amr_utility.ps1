@@ -15217,9 +15217,16 @@ function Start-AMRBackgroundIconRefresh {
                     New-Item -ItemType Directory -Path $script:DownloadDir -Force -ErrorAction Stop | Out-Null
                 }
                 Write-AMRLog ("Icon worker entered. Apps={0}; IconDir={1}; Archive={2}; ArchiveExists={3}" -f $Apps.Count,$script:IconDir,$script:IconArchivePath,(Test-Path -LiteralPath $script:IconArchivePath -PathType Leaf)) 'INFO' 'Software'
-                Set-Item -Path Function:\Initialize-AMRSoftwareIcons -Value ([scriptblock]::Create($InitFunctionText)) -Force
-                Write-AMRLog 'Icon initializer loaded into worker runspace; starting cache/download routine.' 'INFO' 'Software'
+                Write-AMRLog ("Preparing icon initializer script. TextLength={0}" -f $InitFunctionText.Length) 'INFO' 'Software'
+                # The parent function's .ToString() is its BODY, not a complete
+                # function declaration. Rebuild the declaration and dot-source it
+                # into this worker's current scope instead of writing to Function:.
+                $initializerDefinition = "function Initialize-AMRSoftwareIcons {`r`n$InitFunctionText`r`n}"
+                $initializerBlock = [scriptblock]::Create($initializerDefinition)
+                . $initializerBlock
+                Write-AMRLog 'Icon initializer compiled and loaded; starting cache/download routine.' 'INFO' 'Software'
                 Initialize-AMRSoftwareIcons -Apps $Apps
+                Write-AMRLog 'Icon initializer returned successfully.' 'INFO' 'Software'
                 return 'Completed'
             }
             catch {
