@@ -15858,8 +15858,8 @@ function Start-AMRBackgroundIconRefresh {
                     $bitmap.UriSource = New-Object System.Uri([System.IO.Path]::GetFullPath($Path),[System.UriKind]::Absolute)
                     $bitmap.EndInit()
                     if ($bitmap.CanFreeze) { $bitmap.Freeze() }
-                    # Keep a larger prepared buffer so local-cache startup is not throttled by tiny UI batches.
-                    while ($ReadyIconQueue.Count -ge 96) { Start-Sleep -Milliseconds 10 }
+                    # Do not throttle archive extraction/image preparation on UI delivery speed.
+                    # The DispatcherTimer drains this queue independently in small UI-safe batches.
                     $ReadyIconQueue.Enqueue([pscustomobject]@{ Index=$Index; Source=$bitmap })
                     return $true
                 } catch { return $false }
