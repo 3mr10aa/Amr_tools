@@ -3103,15 +3103,19 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
         </DockPanel>
        </Border>
 
-       <ScrollViewer x:Name="SoftwareScrollViewer" Grid.Column="0" FlowDirection="RightToLeft" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+       <!-- Reserve the vertical scrollbar gutter permanently: Auto can change the viewport width
+             when a filtered/short page crosses the scroll threshold, which changes card widths. -->
+        <ScrollViewer x:Name="SoftwareScrollViewer" Grid.Column="0" FlowDirection="RightToLeft" VerticalScrollBarVisibility="Visible" HorizontalScrollBarVisibility="Disabled" CanContentScroll="False">
         <ItemsControl Name="SoftwareGrid" FlowDirection="LeftToRight" Margin="0,5,0,0">
          <ItemsControl.ItemsPanel>
           <ItemsPanelTemplate><UniformGrid Columns="3"/></ItemsPanelTemplate>
          </ItemsControl.ItemsPanel>
         <ItemsControl.ItemTemplate>
          <DataTemplate>
-          <Grid HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
-           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+          <!-- Fixed item-slot geometry prevents category-header visibility and progressive
+               page appends from changing UniformGrid's measured row height. -->
+          <Grid Height="100" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+           <Grid.RowDefinitions><RowDefinition Height="23"/><RowDefinition Height="77"/></Grid.RowDefinitions>
            <Grid.Style>
             <Style TargetType="Grid">
              <Style.Triggers>
@@ -3133,41 +3137,41 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
             <Border Width="12" Height="2" CornerRadius="1" Background="#3B82F6" VerticalAlignment="Center" Margin="0,0,5,0"/>
             <TextBlock Text="{Binding CategoryNumber}" Foreground="#8DBBFA" FontSize="10.5" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,0,0"/>
            </StackPanel>
-          <Border Grid.Row="1" Background="#27272A" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="9" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+          <Border Grid.Row="1" Background="#27272A" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="9" HorizontalAlignment="Stretch" VerticalAlignment="Bottom">
            <Border.Style>
             <Style TargetType="Border">
-             <Setter Property="Height" Value="88"/>
-             <Setter Property="Padding" Value="10"/>
-             <Setter Property="Margin" Value="2"/>
+             <Setter Property="Height" Value="68"/>
+             <Setter Property="Padding" Value="6,4"/>
+             <Setter Property="Margin" Value="5,3"/>
              <Style.Triggers>
               <DataTrigger Binding="{Binding IsUniversalInventory}" Value="True">
-               <Setter Property="Padding" Value="7,6"/>
-               <Setter Property="Margin" Value="2"/>
-               <Setter Property="Height" Value="88"/>
+               <Setter Property="Padding" Value="5,4"/>
+               <Setter Property="Margin" Value="5,3"/>
+               <Setter Property="Height" Value="68"/>
               </DataTrigger>
              </Style.Triggers>
             </Style>
            </Border.Style>
            <Grid>
-            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-            <Grid Grid.Row="0">
+            <Grid.RowDefinitions><RowDefinition Height="*"/></Grid.RowDefinitions>
+            <Grid Grid.Row="0" VerticalAlignment="Center">
              <Grid.ColumnDefinitions>
               <ColumnDefinition Width="Auto"/>
               <ColumnDefinition Width="Auto"/>
               <ColumnDefinition Width="*"/>
               <ColumnDefinition Width="Auto"/>
              </Grid.ColumnDefinitions>
-             <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" VerticalAlignment="Center" HorizontalAlignment="Center" Margin="0,0,15,0" ToolTip="Select this application for uninstall or other available actions.">
+             <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" VerticalAlignment="Center" HorizontalAlignment="Center" Margin="0,0,12,0" ToolTip="Select this application for uninstall or other available actions.">
               <CheckBox.LayoutTransform><ScaleTransform ScaleX="1.2" ScaleY="1.2"/></CheckBox.LayoutTransform>
              </CheckBox>
-             <Grid Grid.Column="1" Width="40" Height="40" Margin="0,0,10,0">
+             <Grid Grid.Column="1" Width="36" Height="36" Margin="0,0,8,0">
               <Grid.Style>
                <Style TargetType="Grid">
                 <Setter Property="Visibility" Value="Visible"/>
                </Style>
               </Grid.Style>
               <Border Background="#3F3F46" CornerRadius="9"/>
-              <TextBlock x:Name="SoftwareIconInitials" Text="{Binding Initials}" Foreground="#A1A1AA" FontSize="17" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center">
+              <TextBlock x:Name="SoftwareIconInitials" Text="{Binding Initials}" Foreground="#A1A1AA" FontSize="16" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center">
                <TextBlock.Style>
                 <Style TargetType="TextBlock">
                  <Setter Property="Visibility" Value="Collapsed"/>
@@ -3177,7 +3181,7 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
                 </Style>
                </TextBlock.Style>
               </TextBlock>
-              <Image x:Name="SoftwareIconImage" Source="{Binding Icon, Mode=OneWay, TargetNullValue={x:Null}, FallbackValue={x:Null}}" Width="32" Height="32" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center" SnapsToDevicePixels="True" RenderOptions.BitmapScalingMode="LowQuality"/>
+              <Image x:Name="SoftwareIconImage" Source="{Binding Icon, Mode=OneWay, TargetNullValue={x:Null}, FallbackValue={x:Null}}" Width="30" Height="30" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center" SnapsToDevicePixels="True" RenderOptions.BitmapScalingMode="LowQuality"/>
              </Grid>
              <StackPanel Grid.Column="2" VerticalAlignment="Center">
               <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold" Foreground="#FFFFFF" TextWrapping="Wrap">
@@ -3239,6 +3243,9 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
                <Style.Triggers>
                 <DataTrigger Binding="{Binding IsInstalled}" Value="True">
                  <Setter Property="Visibility" Value="Visible"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsUniversalInventory}" Value="True">
+                 <Setter Property="Visibility" Value="Collapsed"/>
                 </DataTrigger>
                </Style.Triggers>
               </Style>
@@ -11184,7 +11191,7 @@ function Reset-AMRSoftwareGridPages {
     # together, preserving their original order inside that category. This
     # prevents separators from jumping backwards (e.g. 2, 1, 3, 2).
     $viewItems = @($View)
-    $columns = if ($script:Window.WindowState -eq [System.Windows.WindowState]::Maximized) { 4 } else { 3 }
+    $columns = 3 # Preserve the catalog's three-column order in normal and maximized states.
     $orderedItems = New-Object 'System.Collections.Generic.List[object]'
     $categoryOrdinals = @{}
     for ($categoryIndex = 0; $categoryIndex -lt $script:SoftwareCategoryNames.Count; $categoryIndex++) {
@@ -11251,10 +11258,8 @@ function Reset-AMRSoftwareGridPages {
     # Keep the visual tree deliberately small on every launch. A UniformGrid
     # inside a regular ScrollViewer is NOT virtualized, so add a small first batch.
     $script:SoftwareGridPageSize = 12
-    # In maximized mode the 4-column category alignment inserts four spacer cells
-    # after the 16-item Web Browsers group. Loading only 18 items therefore leaves
-    # the grid showing that first category (plus spacers) with no scroll event to
-    # request the next page. Prefill enough items to include the next categories.
+    # Keep the first page large enough to include the next category while retaining
+    # the same three-column order in both normal and maximized window states. Prefill enough items to include the next categories.
     $initialCount = if ($script:ShowInstalledOnly) { if ($script:Window.WindowState -eq [System.Windows.WindowState]::Maximized) { 48 } else { 24 } } elseif ($script:Window.WindowState -eq [System.Windows.WindowState]::Maximized) { 48 } else { 18 }
     $initialEnd = [Math]::Min($initialCount, $script:SoftwareGridPageSource.Count)
     while ($script:SoftwareGridPageIndex -lt $initialEnd) {
@@ -11516,7 +11521,7 @@ try {
 $script:UpdateSoftwareGridColumns = {
     $uniformGrid = Find-AMRVisualChildByType -Parent (C 'SoftwareGrid') -ChildType ([System.Windows.Controls.Primitives.UniformGrid])
     if ($null -ne $uniformGrid) {
-        $newColumnCount = if ($script:Window.WindowState -eq [System.Windows.WindowState]::Maximized) { 4 } else { 3 }
+        $newColumnCount = 3 # Fixed column count prevents maximize/restore from reflowing the catalog.
         if ($uniformGrid.Columns -ne $newColumnCount) {
             $uniformGrid.Columns = $newColumnCount
             if ($script:AppsView) {
