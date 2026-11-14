@@ -2264,313 +2264,31 @@ $RawApps = @(
     [pscustomobject]@{ Name='KStars Planetarium'; Category='34. Data Science & Scientific Tools'; Id='KDE.KStars'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='KDE' }
 )
 
-# --- SOFTWARE ICONS: LOCAL-FIRST CACHE WITH FLEXIBLE ARCHIVE DISCOVERY ---
-# Download once on first use; reuse local icons afterward; refresh when the catalog has unmatched icons
-# or GitHub publishes a newer archive. Archive validation is based on actual contents, not a fixed count.
-$script:IconArchiveUrl = 'https://raw.githubusercontent.com/3mr10aa/Amr_tools/dd7a4529b9e7dc09a76b5e683025fc48d72ad3a0/Icons.zip'
-$script:IconArchiveApiUrl = ''
-$script:IconArchivePath = Join-Path $script:DownloadDir 'amr-software-icons.zip'
-$script:IconArchiveMarkerPath = Join-Path $script:DownloadDir 'amr-software-icons.cache'
+# --- SOFTWARE ICONS: SMART ICONS ENGINE (V7 - CASE-CORRECT GITHUB ARCHIVE URL) ---
+# 1. If icon cache folder has >=100 valid images, use it immediately.
+# 2. Otherwise download Icons.zip (bundled -> pinned commit -> main branch) with 30s timeout.
+# 3. Extract progressively, surface icons to UI as they become available.
+# 4. A missing icon for one app never invalidates the whole cache.
+$script:IconArchiveUrl = 'https://raw.githubusercontent.com/3mr10aa/Amr_tools/main/Icons.zip'
+$script:IconArchiveUrlFallback = 'https://github.com/3mr10aa/Amr_tools/raw/refs/heads/main/Icons.zip'
+$script:IconArchiveApiUrl = 'https://api.github.com/repos/3mr10aa/Amr_tools/contents/Icons.zip?ref=main'
+# Keep the source ZIP and extracted images together in ProgramData\AMR-Utility\Icons.
+$script:IconArchivePath = Join-Path $script:IconDir 'icons.zip'
+$script:IconArchiveMarkerPath = Join-Path $script:IconDir 'icons.cache.json'
+$script:IconMinFileCount = 100
+$script:IconDownloadTimeoutSec = 45 # retained for worker compatibility; individual requests now use explicit bounded timeouts
 
-function Initialize-AMRSoftwareIcons {
-    param([Parameter(Mandatory = $true)][object[]]$Apps)
-
-    # Pinned, immutable archive: avoids GitHub API discovery, which can stall in
-    # Windows PowerShell 5.1 even when raw.githubusercontent.com is reachable.
-    $owner = '3mr10aa'
-    $repo = 'Amr_tools'
-    $commitSha = 'dd7a4529b9e7dc09a76b5e683025fc48d72ad3a0'
-    $branch = 'pinned-' + $commitSha.Substring(0,12)
-    $archiveUrl = "https://raw.githubusercontent.com/$owner/$repo/$commitSha/Icons.zip"
-    $manifestPath = Join-Path $script:DownloadDir 'amr-icons-manifest.json'
-    $stageRoot = Join-Path $script:DownloadDir ('AMR_Icons_Stage_' + [guid]::NewGuid().ToString('N'))
-    $backupRoot = Join-Path $script:DownloadDir ('AMR_Icons_Backup_' + [guid]::NewGuid().ToString('N'))
-    $tempRoot = Join-Path $script:DownloadDir ('AMR_Icons_Download_' + [guid]::NewGuid().ToString('N'))
-    $archiveTemp = Join-Path $tempRoot 'amr-software-icons.zip'
-    $archiveCache = [string]$script:IconArchivePath
-    if ([string]::IsNullOrWhiteSpace($archiveCache)) {
-        $archiveCache = Join-Path $script:DownloadDir 'amr-software-icons.zip'
-    }
-    $remoteFiles = @()
-    $missingIds = New-Object 'System.Collections.Generic.List[string]'
-    $promoted = $false
-    $backupMoved = $false
-
-    function Get-AMRFileSha256 {
-        param([Parameter(Mandatory=$true)][string]$Path)
-        $stream = [System.IO.File]::OpenRead($Path)
-        $sha = [System.Security.Cryptography.SHA256]::Create()
-        try {
-            return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-','').ToLowerInvariant()
-        } finally {
-            $sha.Dispose()
-            $stream.Dispose()
-        }
-    }
-
-    function Test-AMRImageFile {
-        param([Parameter(Mandatory=$true)][string]$Path)
-        $stream = [System.IO.File]::OpenRead($Path)
-        try {
-            if ($stream.Length -le 128) { return $false }
-            $head = New-Object byte[] 8
-            $read = $stream.Read($head,0,8)
-            if ($read -lt 3) { return $false }
-            $isPng = ($read -eq 8 -and
-                $head[0] -eq 137 -and $head[1] -eq 80 -and
-                $head[2] -eq 78 -and $head[3] -eq 71 -and
-                $head[4] -eq 13 -and $head[5] -eq 10 -and
-                $head[6] -eq 26 -and $head[7] -eq 10)
-            $isJpeg = ($head[0] -eq 255 -and $head[1] -eq 216 -and $head[2] -eq 255)
-            return ($isPng -or $isJpeg)
-        } finally {
-            $stream.Dispose()
-        }
-    }
-
+function Test-AMRIconCacheUsable {
+    param([int]$Minimum = 100)
     try {
-        foreach ($dir in @($script:IconDir,$script:DownloadDir)) {
-            if (-not (Test-Path -LiteralPath $dir -PathType Container)) {
-                New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null
-            }
-        }
-        try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
-        Write-AMRLog ("Pinned icon sync started. Repo={0}/{1}; Commit={2}; Apps={3}" -f $owner,$repo,$commitSha.Substring(0,12),$Apps.Count) INFO Software
-
-        # A schema-3 manifest is trusted only when every cached image still matches
-        # its recorded SHA-256. Older manifests force a clean archive refresh.
-        $oldManifest = $null
-        if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
-            try {
-                $oldManifest = Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop |
-                    ConvertFrom-Json -ErrorAction Stop
-            } catch {
-                Write-AMRLog 'Existing icon manifest is unreadable; a clean archive refresh will be performed.' WARNING Software
-            }
-        }
-
-        $cacheHealthy = $false
-        if ($oldManifest -and [int]$oldManifest.schema -eq 3 -and
-            [string]$oldManifest.commit -eq $commitSha -and
-            @($oldManifest.files).Count -gt 0 -and
-            (Test-Path -LiteralPath $script:IconDir -PathType Container)) {
-            $cacheHealthy = $true
-            foreach ($entry in @($oldManifest.files)) {
-                $entryPath = [string]$entry.path
-                $leaf = [IO.Path]::GetFileName($entryPath)
-                if ([string]::IsNullOrWhiteSpace($leaf) -or $entryPath -ne ('Icons/' + $leaf)) {
-                    $cacheHealthy = $false
-                    break
-                }
-                $cached = Join-Path $script:IconDir $leaf
-                if (-not (Test-Path -LiteralPath $cached -PathType Leaf)) {
-                    $cacheHealthy = $false
-                    break
-                }
-                try {
-                    if ((Get-AMRFileSha256 -Path $cached) -ne [string]$entry.sha256) {
-                        $cacheHealthy = $false
-                        break
-                    }
-                } catch {
-                    $cacheHealthy = $false
-                    break
-                }
-            }
-            if ($cacheHealthy) {
-                foreach ($app in $Apps) {
-                    $requiredId = [string]$app.Id
-                    if ([string]::IsNullOrWhiteSpace($requiredId)) { continue }
-                    $requiredFound = $false
-                    foreach ($requiredExt in @('.png','.jpg','.jpeg')) {
-                        if (Test-Path -LiteralPath (Join-Path $script:IconDir ($requiredId + $requiredExt)) -PathType Leaf) {
-                            $requiredFound = $true
-                            break
-                        }
-                    }
-                    if (-not $requiredFound -and $app.PSObject.Properties['IconAliases'] -and $app.IconAliases) {
-                        foreach ($requiredAlias in @($app.IconAliases)) {
-                            foreach ($requiredExt in @('.png','.jpg','.jpeg')) {
-                                if (Test-Path -LiteralPath (Join-Path $script:IconDir ([string]$requiredAlias + $requiredExt)) -PathType Leaf) {
-                                    $requiredFound = $true
-                                    break
-                                }
-                            }
-                            if ($requiredFound) { break }
-                        }
-                    }
-                    if (-not $requiredFound) {
-                        $cacheHealthy = $false
-                        Write-AMRLog ("Cached icon manifest is incomplete for App.Id='{0}'; archive repair required." -f $requiredId) WARNING Software
-                        break
-                    }
-                }
-            }
-        }
-
-        if ($cacheHealthy) {
-            $remoteFiles = @($oldManifest.files)
-            Write-AMRLog ("Pinned icon cache verified. Commit={0}; Images={1}; download skipped." -f $commitSha.Substring(0,12),$remoteFiles.Count) SUCCESS Software
-        } else {
-            New-Item -ItemType Directory -Path $stageRoot,$tempRoot -Force -ErrorAction Stop | Out-Null
-            $usedBundledArchive = $false
-            if (-not [string]::IsNullOrWhiteSpace($script:BundledIconArchivePath) -and
-                (Test-Path -LiteralPath $script:BundledIconArchivePath -PathType Leaf)) {
-                Write-AMRLog ("Using bundled local icon archive: {0}" -f $script:BundledIconArchivePath) INFO Software
-                Copy-Item -LiteralPath $script:BundledIconArchivePath -Destination $archiveTemp -Force -ErrorAction Stop
-                $usedBundledArchive = $true
-            } else {
-                Write-AMRLog ("Bundled archive unavailable; downloading pinned archive. URL={0}" -f $archiveUrl) INFO Software
-                Invoke-WebRequest -Uri $archiveUrl -OutFile $archiveTemp -UseBasicParsing -TimeoutSec 180 -ErrorAction Stop
-            }
-            if (-not (Test-Path -LiteralPath $archiveTemp -PathType Leaf)) {
-                throw 'Icon archive source did not create a file.'
-            }
-            $archiveItem = Get-Item -LiteralPath $archiveTemp -ErrorAction Stop
-            if ($archiveItem.Length -lt 1024) {
-                throw ("Icon archive is unexpectedly small: {0} bytes." -f $archiveItem.Length)
-            }
-            Write-AMRLog ("Archive ready. Source={0}; Bytes={1}; SHA256={2}" -f $(if ($usedBundledArchive) { 'BundledLocal' } else { 'PinnedRemote' }),$archiveItem.Length,(Get-AMRFileSha256 -Path $archiveTemp)) INFO Software
-
-            Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
-            $zip = [IO.Compression.ZipFile]::OpenRead($archiveTemp)
-            try {
-                $entries = @($zip.Entries | Where-Object {
-                    $_.FullName -match '(?i)^Icons/[^/]+\.(png|jpe?g)$' -and
-                    $_.FullName -notmatch '(^/|^[a-zA-Z]:|(^|/)\.\.(/|$))'
-                })
-                if ($entries.Count -lt 100) {
-                    throw ("Icon archive contains too few image files ({0}); refusing to replace the cache." -f $entries.Count)
-                }
-
-                $seenNames = @{}
-                Write-AMRLog ("Archive extraction started. ImageEntries={0}" -f $entries.Count) INFO Software
-                foreach ($entry in $entries) {
-                    $leaf = [IO.Path]::GetFileName($entry.FullName)
-                    $key = $leaf.ToLowerInvariant()
-                    if ($seenNames.ContainsKey($key)) {
-                        throw ("Archive contains duplicate icon filename: {0}" -f $leaf)
-                    }
-                    $seenNames[$key] = $true
-                    $dest = Join-Path $stageRoot $leaf
-                    $inputStream = $entry.Open()
-                    try {
-                        $outputStream = [IO.File]::Create($dest)
-                        try {
-                            $inputStream.CopyTo($outputStream)
-                        } finally {
-                            $outputStream.Dispose()
-                        }
-                    } finally {
-                        $inputStream.Dispose()
-                    }
-                    if (-not (Test-AMRImageFile -Path $dest)) {
-                        throw ("Extracted file is not a valid PNG/JPEG image: {0}" -f $leaf)
-                    }
-                    $remoteFiles += [pscustomobject]@{
-                        path = ('Icons/' + $leaf)
-                        size = [long](Get-Item -LiteralPath $dest).Length
-                        sha256 = (Get-AMRFileSha256 -Path $dest)
-                    }
-                }
-            } finally {
-                $zip.Dispose()
-            }
-
-            if ($remoteFiles.Count -lt 100) {
-                throw 'Icon archive extraction did not produce a usable image inventory.'
-            }
-
-            $newManifest = [pscustomobject]@{
-                schema = 3
-                repository = "$owner/$repo"
-                branch = $branch
-                commit = $commitSha
-                archiveUrl = $archiveUrl
-                updated = (Get-Date).ToString('o')
-                files = @($remoteFiles)
-            }
-            $manifestTemp = "$manifestPath.tmp"
-            $newManifest | ConvertTo-Json -Depth 6 |
-                Set-Content -LiteralPath $manifestTemp -Encoding UTF8 -Force -ErrorAction Stop
-
-            # Keep the previous cache untouched until the complete new archive has
-            # been extracted and validated. Promote with rollback on any failure.
-            if (Test-Path -LiteralPath $script:IconDir -PathType Container) {
-                Move-Item -LiteralPath $script:IconDir -Destination $backupRoot -Force -ErrorAction Stop
-                $backupMoved = $true
-            }
-            try {
-                Move-Item -LiteralPath $stageRoot -Destination $script:IconDir -Force -ErrorAction Stop
-                $promoted = $true
-                Move-Item -LiteralPath $manifestTemp -Destination $manifestPath -Force -ErrorAction Stop
-                if ($backupMoved -and (Test-Path -LiteralPath $backupRoot -PathType Container)) {
-                    Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue
-                    $backupMoved = $false
-                }
-            } catch {
-                if ($promoted -and (Test-Path -LiteralPath $script:IconDir -PathType Container)) {
-                    Remove-Item -LiteralPath $script:IconDir -Recurse -Force -ErrorAction SilentlyContinue
-                }
-                if ($backupMoved -and (Test-Path -LiteralPath $backupRoot -PathType Container)) {
-                    Move-Item -LiteralPath $backupRoot -Destination $script:IconDir -Force -ErrorAction SilentlyContinue
-                    $backupMoved = $false
-                }
-                throw
-            }
-
-            # Retain the validated archive for diagnostics/recovery; it is not used
-            # as the source of truth once the cache has been promoted.
-            try {
-                Move-Item -LiteralPath $archiveTemp -Destination $archiveCache -Force -ErrorAction SilentlyContinue
-            } catch {}
-            Write-AMRLog ("Icon cache synchronized from pinned archive. Commit={0}; Images={1}; FirstInstallOrRepair=True" -f $commitSha.Substring(0,12),$remoteFiles.Count) SUCCESS Software
-        }
-
-        foreach ($app in $Apps) {
-            $id = [string]$app.Id
-            if ([string]::IsNullOrWhiteSpace($id)) { continue }
-            $found = $false
-            foreach ($ext in @('.png','.jpg','.jpeg')) {
-                $candidate = Join-Path $script:IconDir ($id + $ext)
-                if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-                    if ((Get-Item -LiteralPath $candidate -ErrorAction Stop).Length -gt 128) {
-                        $found = $true
-                        break
-                    }
-                }
-            }
-            if (-not $found) { $missingIds.Add($id) }
-        }
-        $matchedIdCount = $Apps.Count - $missingIds.Count
-        Write-AMRLog ("Icon mapping diagnostics. CatalogApps={0}; ArchiveImages={1}; ExactOrAliasMatches={2}; Missing={3}; CacheDir={4}" -f $Apps.Count,$remoteFiles.Count,$matchedIdCount,$missingIds.Count,$script:IconDir) INFO Software
-        if ($missingIds.Count -gt 0) {
-            Write-AMRLog ("Icon sync completed, but exact-ID images are absent for {0} apps: {1}" -f $missingIds.Count,(($missingIds | Select-Object -First 60) -join ', ')) WARNING Software
-        } else {
-            Write-AMRLog ("Icon cache ready. Apps={0}; RepositoryImages={1}; AllCatalogIdsMatched=True" -f $Apps.Count,$remoteFiles.Count) SUCCESS Software
-        }
-    } catch {
-        $record = $_
-        Write-AMRLog ("Pinned icon sync failed; existing cache was retained where possible. Error={0}; Line={1}; Command={2}" -f $record.Exception.Message,$record.InvocationInfo.ScriptLineNumber,$record.InvocationInfo.Line) WARNING Software
-        if ($backupMoved -and (Test-Path -LiteralPath $backupRoot -PathType Container) -and
-            -not (Test-Path -LiteralPath $script:IconDir -PathType Container)) {
-            Move-Item -LiteralPath $backupRoot -Destination $script:IconDir -Force -ErrorAction SilentlyContinue
-            $backupMoved = $false
-        }
-        throw
-    } finally {
-        if (Test-Path -LiteralPath $tempRoot -PathType Container) {
-            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
-        }
-        if (Test-Path -LiteralPath $stageRoot -PathType Container) {
-            Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
-        }
-        # Never delete a backup that could be the only remaining good cache.
-        if (-not $backupMoved -and (Test-Path -LiteralPath $backupRoot -PathType Container)) {
-            Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue
-        }
-    }
+        if (-not (Test-Path -LiteralPath $script:IconDir -PathType Container)) { return $false }
+        $count = @(Get-ChildItem -LiteralPath $script:IconDir -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -match '^\.(png|jpe?g)$' -and $_.Length -gt 128 }).Count
+        return ($count -ge $Minimum)
+    } catch { return $false }
 }
+
+# Icon synchronization is implemented only inside Start-AMRBackgroundIconRefresh worker runspace.
 
 # Convert icon files to frozen WPF ImageSource objects.
 # WPF Image.Source expects an ImageSource, not a plain filesystem path string.
@@ -2607,29 +2325,31 @@ function Get-AMRIconImageSource {
 }
 
 $script:SoftwareCatalog = New-Object 'System.Collections.ObjectModel.ObservableCollection[object]'
+$script:IconCacheUsableAtStartup = Test-AMRIconCacheUsable -Minimum $script:IconMinFileCount
 
 $RawApps | ForEach-Object {
     $initial  = if ($_.Name.Length -gt 0) { $_.Name.Substring(0,1).ToUpper() } else { 'A' }
+
+    # A complete local cache is the runtime source of truth. Resolve each catalog
+    # icon before the WPF view is created, so scrolling/recycling never waits for
+    # a background worker to publish an image into the bound item.
     $iconSource = $null
-    $iconCandidateIds = @([string]$_.Id)
-    if ($_.PSObject.Properties['IconAliases'] -and $_.IconAliases) {
-        $iconCandidateIds += @($_.IconAliases | ForEach-Object { [string]$_ })
-    }
-
-    # Prefer the current catalog ID, but retain compatibility with cached legacy icon filenames.
-    foreach ($iconCandidateId in $iconCandidateIds) {
-        foreach ($extension in @('.png', '.jpg', '.jpeg')) {
-            $candidateIconPath = Join-Path $script:IconDir ($iconCandidateId + $extension)
-            if (Test-Path -LiteralPath $candidateIconPath -PathType Leaf) {
-                $iconSource = Get-AMRIconImageSource -Path $candidateIconPath
-                if ($null -ne $iconSource) { break }
-            }
+    if ($script:IconCacheUsableAtStartup) {
+        $localIconIds = @([string]$_.Id)
+        if ($_.PSObject.Properties['IconAliases'] -and $_.IconAliases) {
+            $localIconIds += @($_.IconAliases | ForEach-Object { [string]$_ })
         }
-        if ($null -ne $iconSource) { break }
+        foreach ($localIconId in $localIconIds) {
+            foreach ($localIconExtension in @('.png','.jpg','.jpeg')) {
+                $localIconPath = Join-Path $script:IconDir ($localIconId + $localIconExtension)
+                if (Test-Path -LiteralPath $localIconPath -PathType Leaf) {
+                    $iconSource = Get-AMRIconImageSource -Path $localIconPath
+                    if ($null -ne $iconSource) { break }
+                }
+            }
+            if ($null -ne $iconSource) { break }
+        }
     }
-
-    # Startup is local-only: if an icon is not cached yet, show the existing
-    # initials placeholder. The background refresh will populate it after render.
 
     $script:SoftwareCatalog.Add([pscustomobject]@{
         IsSelected    = $false
@@ -2655,7 +2375,7 @@ $RawApps | ForEach-Object {
 }
 
 $loadedIconCount = @($script:SoftwareCatalog | Where-Object { $null -ne $_.Icon }).Count
-Write-AMRLog ("Startup local-cache icons loaded: {0}/{1} from '{2}'. Background archive synchronization will report the final UI count separately." -f $loadedIconCount,$script:SoftwareCatalog.Count,$script:IconDir) INFO Software
+Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cache='{1}'." -f $loadedIconCount,$script:IconDir) INFO Software
 
 # --- 4. FULL WPF XAML INTERFACE WITH PROGRESS BAR & 27 CUSTOMIZE TOOLS ---
 [xml]$xaml = @'
@@ -2913,23 +2633,12 @@ Write-AMRLog ("Startup local-cache icons loaded: {0}/{1} from '{2}'. Background 
  </Window.Resources>
  
  <Grid>
-  <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+  <Grid.RowDefinitions><RowDefinition Height="*"/></Grid.RowDefinitions>
+  <TextBlock Name="WingetHeader" Visibility="Collapsed"/>
+  <TextBlock Name="StatusText" Visibility="Collapsed"/>
   
-  <!-- Header -->
-  <Border Background="#18181B" BorderBrush="#27272A" BorderThickness="0,0,0,1" Padding="20">
-   <Grid>
-    <StackPanel>
-     <TextBlock Text="Amr | windows_utility" FontSize="26" FontWeight="Bold" Foreground="#3B82F6"/>
-     <TextBlock Text="V0.1" Foreground="#A1A1AA" FontSize="13" Margin="0,2,0,0" FontWeight="SemiBold"/>
-    </StackPanel>
-    <StackPanel HorizontalAlignment="Right" VerticalAlignment="Center" Orientation="Horizontal">
-     <TextBlock Text="ADMINISTRATOR" Foreground="#10B981" FontWeight="Bold" FontSize="14" Margin="0,0,20,0"/>
-     <TextBlock Name="WingetHeader" Text="Checking Winget..." Foreground="#A1A1AA" FontSize="13" VerticalAlignment="Center"/>
-    </StackPanel>
-   </Grid>
-  </Border>
-  
-  <TabControl Grid.Row="1" Margin="15,15,15,0">
+  <!-- Main navigation moved to the top; the decorative brand/status header is removed. -->
+  <TabControl Grid.Row="0" Margin="10,22,10,0">
    
    <!-- 1. OVERVIEW -->
    <TabItem Header="Overview">
@@ -3297,7 +3006,7 @@ Write-AMRLog ("Startup local-cache icons loaded: {0}/{1} from '{2}'. Background 
 
    <!-- 2. SOFTWARE WITH INTEGRATED PROGRESS BAR -->
    <TabItem Header="Software" IsSelected="True">
-    <Border Padding="10,0,10,20">
+    <Border Padding="10,0,10,4">
      <Grid>
       <Grid.RowDefinitions>
        <RowDefinition Height="Auto"/>
@@ -3360,8 +3069,8 @@ Write-AMRLog ("Startup local-cache icons loaded: {0}/{1} from '{2}'. Background 
            <Style TargetType="ListBoxItem">
             <Setter Property="Foreground" Value="#C9D8EA"/>
             <Setter Property="Background" Value="#26364B"/>
-            <Setter Property="Padding" Value="8,7"/>
-            <Setter Property="Margin" Value="0,0,0,7"/>
+            <Setter Property="Padding" Value="7,6"/>
+            <Setter Property="Margin" Value="0,0,0,8"/>
             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
             <Setter Property="FontSize" Value="12"/>
             <Setter Property="Template">
@@ -3393,50 +3102,166 @@ Write-AMRLog ("Startup local-cache icons loaded: {0}/{1} from '{2}'. Background 
         </DockPanel>
        </Border>
 
-       <ScrollViewer Grid.Column="0" FlowDirection="RightToLeft" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-        
-       <ItemsControl Name="SoftwareGrid" FlowDirection="LeftToRight" Margin="0,5,0,0">
-        <ItemsControl.ItemsPanel>
-         <ItemsPanelTemplate><UniformGrid Columns="3"/></ItemsPanelTemplate>
-        </ItemsControl.ItemsPanel>
-        
+       <ScrollViewer x:Name="SoftwareScrollViewer" Grid.Column="0" FlowDirection="RightToLeft" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <ItemsControl Name="SoftwareGrid" FlowDirection="LeftToRight" Margin="0,5,0,0">
+         <ItemsControl.ItemsPanel>
+          <ItemsPanelTemplate><UniformGrid Columns="3"/></ItemsPanelTemplate>
+         </ItemsControl.ItemsPanel>
         <ItemsControl.ItemTemplate>
          <DataTemplate>
-          <Border Background="#27272A" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="9" Padding="10" Margin="6" MaxWidth="260" HorizontalAlignment="Stretch" VerticalAlignment="Center">
+          <Grid HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+           <Grid.Style>
+            <Style TargetType="Grid">
+             <Style.Triggers>
+              <DataTrigger Binding="{Binding IsCategorySpacer}" Value="True"><Setter Property="Visibility" Value="Hidden"/></DataTrigger>
+             </Style.Triggers>
+            </Style>
+           </Grid.Style>
+           <StackPanel Grid.Row="0" Orientation="Horizontal" HorizontalAlignment="Left" Width="34" Height="20" FlowDirection="LeftToRight" Margin="3,0,0,3">
+            <StackPanel.Style>
+             <Style TargetType="StackPanel">
+              <Setter Property="Visibility" Value="Collapsed"/>
+              <Style.Triggers>
+               <!-- Reserve the same header-row height across all columns so cards stay aligned. -->
+               <DataTrigger Binding="{Binding IsCategoryHeaderRow}" Value="True"><Setter Property="Visibility" Value="Hidden"/></DataTrigger>
+               <DataTrigger Binding="{Binding IsCategoryStart}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
+              </Style.Triggers>
+             </Style>
+            </StackPanel.Style>
+            <Border Width="12" Height="2" CornerRadius="1" Background="#3B82F6" VerticalAlignment="Center" Margin="0,0,5,0"/>
+            <TextBlock Text="{Binding CategoryNumber}" Foreground="#8DBBFA" FontSize="10.5" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,0,0"/>
+           </StackPanel>
+          <Border Grid.Row="1" Background="#27272A" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="9" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+           <Border.Style>
+            <Style TargetType="Border">
+             <Setter Property="Padding" Value="10"/>
+             <Setter Property="Margin" Value="2"/>
+             <Style.Triggers>
+              <DataTrigger Binding="{Binding IsUniversalInventory}" Value="True">
+               <Setter Property="Padding" Value="7,6"/>
+               <Setter Property="Margin" Value="2"/>
+               <Setter Property="Height" Value="68"/>
+              </DataTrigger>
+             </Style.Triggers>
+            </Style>
+           </Border.Style>
            <Grid>
-            <Grid.ColumnDefinitions>
-             <ColumnDefinition Width="Auto"/>
-             <ColumnDefinition Width="Auto"/>
-             <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
-            <CheckBox IsChecked="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" VerticalAlignment="Center" Margin="0,0,15,0">
-             <CheckBox.LayoutTransform><ScaleTransform ScaleX="1.2" ScaleY="1.2"/></CheckBox.LayoutTransform>
-            </CheckBox>
-            <Grid Grid.Column="1" Width="40" Height="40" Margin="0,0,10,0">
-             <Border Background="#3F3F46" CornerRadius="10"/>
-             <TextBlock Text="{Binding Initials}" Foreground="#A1A1AA" FontSize="17" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center">
-              <TextBlock.Style>
-               <Style TargetType="TextBlock">
-                <Setter Property="Visibility" Value="Collapsed"/>
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+            <Grid Grid.Row="0">
+             <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="Auto"/>
+             </Grid.ColumnDefinitions>
+             <CheckBox IsChecked="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" VerticalAlignment="Center" Margin="0,0,15,0">
+              <CheckBox.LayoutTransform><ScaleTransform ScaleX="1.2" ScaleY="1.2"/></CheckBox.LayoutTransform>
+              <CheckBox.Style>
+               <Style TargetType="CheckBox">
                 <Style.Triggers>
-                 <DataTrigger Binding="{Binding Icon}" Value="{x:Null}">
-                  <Setter Property="Visibility" Value="Visible"/>
-                 </DataTrigger>
+                 <DataTrigger Binding="{Binding IsUniversalInventory}" Value="True"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
                 </Style.Triggers>
                </Style>
-              </TextBlock.Style>
-             </TextBlock>
-             <Image Source="{Binding Icon, Mode=OneWay, TargetNullValue={x:Null}, FallbackValue={x:Null}}" Width="32" Height="32" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center" SnapsToDevicePixels="True" RenderOptions.BitmapScalingMode="HighQuality"/>
+              </CheckBox.Style>
+             </CheckBox>
+             <Grid Grid.Column="1" Width="40" Height="40" Margin="0,0,10,0">
+              <Grid.Style>
+               <Style TargetType="Grid">
+                <Setter Property="Visibility" Value="Visible"/>
+               </Style>
+              </Grid.Style>
+              <Border Background="#3F3F46" CornerRadius="9"/>
+              <TextBlock x:Name="SoftwareIconInitials" Text="{Binding Initials}" Foreground="#A1A1AA" FontSize="17" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center">
+               <TextBlock.Style>
+                <Style TargetType="TextBlock">
+                 <Setter Property="Visibility" Value="Collapsed"/>
+                 <Style.Triggers>
+                  <DataTrigger Binding="{Binding Icon}" Value="{x:Null}"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
+                 </Style.Triggers>
+                </Style>
+               </TextBlock.Style>
+              </TextBlock>
+              <Image x:Name="SoftwareIconImage" Source="{Binding Icon, Mode=OneWay, TargetNullValue={x:Null}, FallbackValue={x:Null}}" Width="32" Height="32" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center" SnapsToDevicePixels="True" RenderOptions.BitmapScalingMode="LowQuality"/>
+             </Grid>
+             <StackPanel Grid.Column="2" VerticalAlignment="Center">
+              <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold" Foreground="#FFFFFF" TextWrapping="Wrap">
+               <TextBlock.Style>
+                <Style TargetType="TextBlock">
+                 <Style.Triggers>
+                  <DataTrigger Binding="{Binding IsUniversalInventory}" Value="True">
+                   <Setter Property="TextWrapping" Value="NoWrap"/>
+                   <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                  </DataTrigger>
+                  <DataTrigger Binding="{Binding DetailsExpanded}" Value="True">
+                   <Setter Property="TextWrapping" Value="Wrap"/>
+                   <Setter Property="TextTrimming" Value="None"/>
+                  </DataTrigger>
+                 </Style.Triggers>
+                </Style>
+               </TextBlock.Style>
+              </TextBlock>
+              <TextBlock Text="{Binding Id}" FontSize="10" Foreground="#71717A" TextWrapping="Wrap" Margin="0,3,0,0">
+               <TextBlock.Style>
+                <Style TargetType="TextBlock">
+                 <Style.Triggers>
+                  <DataTrigger Binding="{Binding IsUniversalInventory}" Value="True"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
+                 </Style.Triggers>
+                </Style>
+               </TextBlock.Style>
+              </TextBlock>
+             </StackPanel>
+             <ToggleButton x:Name="InstalledDetailsToggle" Grid.Column="3" IsChecked="{Binding DetailsExpanded, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="25" Height="25" Margin="8,0,3,0" FontSize="15" FontWeight="Bold" Foreground="#FFFFFF" Background="#52525B" BorderBrush="#71717A" BorderThickness="1" Cursor="Hand" FocusVisualStyle="{x:Null}" VerticalAlignment="Center" HorizontalAlignment="Right" ToolTip="Show installation details">
+              <ToggleButton.Template>
+               <ControlTemplate TargetType="ToggleButton">
+                <Border x:Name="ArrowSurface" Background="#52525B" BorderBrush="#71717A" BorderThickness="1" CornerRadius="5" SnapsToDevicePixels="True">
+                 <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True"/>
+                </Border>
+                <ControlTemplate.Triggers>
+                 <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ArrowSurface" Property="Background" Value="#52525B"/><Setter TargetName="ArrowSurface" Property="BorderBrush" Value="#71717A"/></Trigger>
+                 <Trigger Property="IsPressed" Value="True"><Setter TargetName="ArrowSurface" Property="Background" Value="#52525B"/><Setter TargetName="ArrowSurface" Property="BorderBrush" Value="#71717A"/></Trigger>
+                 <Trigger Property="IsChecked" Value="True"><Setter Property="Content" Value="⌃"/></Trigger>
+                </ControlTemplate.Triggers>
+               </ControlTemplate>
+              </ToggleButton.Template>
+              <ToggleButton.Style>
+               <Style TargetType="ToggleButton">
+                <Setter Property="Visibility" Value="Collapsed"/>
+                <Setter Property="Content" Value="⌄"/>
+                <Style.Triggers>
+                 <DataTrigger Binding="{Binding IsUniversalInventory}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
+                </Style.Triggers>
+               </Style>
+              </ToggleButton.Style>
+             </ToggleButton>
             </Grid>
-            <StackPanel Grid.Column="2" VerticalAlignment="Center">
-             <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold" Foreground="#FFFFFF" TextWrapping="Wrap"/>
-             <TextBlock Text="{Binding Id}" FontSize="10" Foreground="#71717A" TextWrapping="Wrap" Margin="0,3,0,0"/>
-            </StackPanel>
+            <Popup x:Name="InstalledDetailsPopup" PlacementTarget="{Binding ElementName=InstalledDetailsToggle}" Placement="Bottom" HorizontalOffset="-225" VerticalOffset="5" AllowsTransparency="True" StaysOpen="False" PopupAnimation="Fade" IsOpen="{Binding IsChecked, ElementName=InstalledDetailsToggle, Mode=OneWay}">
+             <Border x:Name="InstalledDetailsPanel" Width="250" Margin="0" Padding="8" Background="#202B3B" BorderBrush="#527AA8" BorderThickness="1" CornerRadius="7" SnapsToDevicePixels="True">
+             <StackPanel>
+              <TextBlock Text="Installation details" Foreground="#8FB8E8" FontSize="10" FontWeight="Bold" Margin="0,0,0,5"/>
+              <TextBlock Text="Application ID" Foreground="#94A3B8" FontSize="9"/>
+              <TextBlock Text="{Binding Id}" Foreground="#E2E8F0" FontSize="10" TextWrapping="Wrap" Margin="0,1,0,5"/>
+              <TextBlock Text="Install path" Foreground="#94A3B8" FontSize="9"/>
+              <DockPanel LastChildFill="True" Margin="0,1,0,5">
+               <Button x:Name="InstalledCopyPathBtn" DockPanel.Dock="Right" Content="⧉" Tag="{Binding DisplayInstallPath}" Width="24" Height="22" Margin="6,0,0,0" Padding="0" FontSize="13" Foreground="#FFFFFF" Background="#465569" BorderBrush="#718096" BorderThickness="1" Cursor="Hand" FocusVisualStyle="{x:Null}" ToolTip="Copy installation path">
+                <Button.Style><Style TargetType="Button"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding HasCopyableInstallPath}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></Button.Style>
+               </Button>
+               <TextBlock Text="{Binding DisplayInstallPath, TargetNullValue='Not recorded by Windows', FallbackValue='Not recorded by Windows'}" Foreground="#E2E8F0" FontSize="10" TextWrapping="Wrap" VerticalAlignment="Center"/>
+              </DockPanel>
+              <TextBlock Text="Version" Foreground="#94A3B8" FontSize="9"/>
+              <TextBlock Text="{Binding DisplayVersion, TargetNullValue='Not recorded', FallbackValue='Not recorded'}" Foreground="#E2E8F0" FontSize="10" Margin="0,1,0,5"/>
+              <TextBlock Text="Publisher / Source" Foreground="#94A3B8" FontSize="9"/>
+              <TextBlock Text="{Binding Publisher}" Foreground="#E2E8F0" FontSize="10" TextWrapping="Wrap"/>
+              <TextBlock Text="{Binding Source}" Foreground="#94A3B8" FontSize="9" TextWrapping="Wrap" Margin="0,4,0,0"/>
+             </StackPanel>
+            </Border>
+            </Popup>
            </Grid>
           </Border>
+          </Grid>
          </DataTemplate>
         </ItemsControl.ItemTemplate>
-       </ItemsControl>
+        </ItemsControl>
        </ScrollViewer>
       </Grid>      
       <!-- App Console Bottom Bar & Progress Bar -->
@@ -4526,9 +4351,6 @@ Write-AMRLog ("Startup local-cache icons loaded: {0}/{1} from '{2}'. Background 
 
   </TabControl>
   
-  <Border Grid.Row="2" Background="#18181B" BorderBrush="#27272A" BorderThickness="0,1,0,0" Padding="15">
-   <TextBlock Name="StatusText" Text="Ready" Foreground="#A1A1AA" FontSize="13"/>
-  </Border>
  </Grid>
 </Window>
 '@
@@ -10274,18 +10096,21 @@ $script:SoftwareCategoryNames = @(
         Sort-Object -Unique
 )
 $script:SoftwareCategories = @(
-    [pscustomobject]@{ Name = 'All Applications'; DisplayText = 'All Applications (0)' }
+    [pscustomobject]@{ Name = 'All Applications'; DisplayText = 'All Applications'; CategoryNumber = '' }
 ) + @(
-    foreach ($categoryName in $script:SoftwareCategoryNames) {
-        [pscustomobject]@{ Name = [string]$categoryName; DisplayText = [string]$categoryName }
+    for ($categoryIndex = 0; $categoryIndex -lt $script:SoftwareCategoryNames.Count; $categoryIndex++) {
+        $categoryName = [string]$script:SoftwareCategoryNames[$categoryIndex]
+        [pscustomobject]@{ Name = $categoryName; DisplayText = $categoryName; CategoryNumber = ('{0}' -f ($categoryIndex + 1)) }
     }
 )
+# Compact category navigation: keep category tiles plain and small.
 $categoryTextFactory = New-Object System.Windows.FrameworkElementFactory([System.Windows.Controls.TextBlock])
 $categoryTextFactory.SetBinding([System.Windows.Controls.TextBlock]::TextProperty, [System.Windows.Data.Binding]::new('DisplayText'))
 $categoryTextFactory.SetValue([System.Windows.Controls.TextBlock]::TextWrappingProperty, [System.Windows.TextWrapping]::Wrap)
 $categoryTextFactory.SetValue([System.Windows.Controls.TextBlock]::TextTrimmingProperty, [System.Windows.TextTrimming]::None)
-$categoryTextFactory.SetValue([System.Windows.Controls.TextBlock]::FontSizeProperty, 11.5)
-$categoryTextFactory.SetValue([System.Windows.Controls.TextBlock]::MaxWidthProperty, 175.0)
+$categoryTextFactory.SetValue([System.Windows.Controls.TextBlock]::FontSizeProperty, [double]12.0)
+$categoryTextFactory.SetValue([System.Windows.Controls.TextBlock]::MaxWidthProperty, 160.0)
+$categoryTextFactory.SetValue([System.Windows.Controls.TextBlock]::VerticalAlignmentProperty, [System.Windows.VerticalAlignment]::Center)
 $categoryTemplate = [System.Windows.DataTemplate]::new()
 $categoryTemplate.VisualTree = $categoryTextFactory
 (C 'SoftwareCategoryList').ItemTemplate = $categoryTemplate
@@ -10293,32 +10118,26 @@ $categoryTemplate.VisualTree = $categoryTextFactory
 (C 'SoftwareCategoryList').SelectedIndex = 0
 
 function Update-AMRSoftwareCategoryCounts {
-    $catalogItems = @($script:SoftwareCatalog)
-    $visibleItems = if ($script:ShowInstalledOnly) {
-        @($catalogItems | Where-Object { $_.IsInstalled -eq $true })
+    $counts = @{}
+    foreach ($entry in $script:SoftwareCategories) { $counts[[string]$entry.Name] = 0 }
+    if ($script:ShowInstalledOnly) {
+        foreach ($item in $script:InstalledAppsInventory) {
+            $category = [string]$item.Category
+            if ($category -and $counts.ContainsKey($category)) { $counts[$category] = [int]$counts[$category] + 1 }
+        }
+        $allCount = $script:InstalledAppsInventory.Count
     } else {
-        $catalogItems
-    }
-
-    foreach ($categoryEntry in $script:SoftwareCategories) {
-        if ($categoryEntry.Name -eq 'All Applications') {
-            $count = $visibleItems.Count
-        } else {
-            $count = @($visibleItems | Where-Object { [string]$_.Category -eq [string]$categoryEntry.Name }).Count
+        foreach ($item in $script:SoftwareCatalog) {
+            $category = [string]$item.Category
+            if ($category -and $counts.ContainsKey($category)) { $counts[$category] = [int]$counts[$category] + 1 }
         }
-        $categoryEntry.DisplayText = '{0} ({1})' -f $categoryEntry.Name, $count
+        $allCount = $script:SoftwareCatalog.Count
     }
-
-    # Refresh the ListBox display without changing the selected category.
-    $list = C 'SoftwareCategoryList'
-    $selectedName = $script:SelectedSoftwareCategory
-    $list.Items.Refresh()
-    for ($i = 0; $i -lt $script:SoftwareCategories.Count; $i++) {
-        if ($script:SoftwareCategories[$i].Name -eq $selectedName) {
-            $list.SelectedIndex = $i
-            break
-        }
+    foreach ($entry in $script:SoftwareCategories) {
+        $count = if ($entry.Name -eq 'All Applications') { $allCount } else { [int]$counts[[string]$entry.Name] }
+        $entry.DisplayText = '{0} ({1})' -f $entry.Name, $count
     }
+    try { (C 'SoftwareCategoryList').Items.Refresh() } catch {}
 }
 
 Update-AMRSoftwareCategoryCounts
@@ -10353,7 +10172,7 @@ function New-AMRInstalledInventoryRecord {
     $initials = (($Name -split '\s+' | Where-Object { $_ } | Select-Object -First 2 | ForEach-Object { $_.Substring(0,1) }) -join '').ToUpperInvariant()
     return [pscustomobject][ordered]@{
         Name=$Name; Publisher=$Publisher; DisplayVersion=$DisplayVersion; InstallDate=$InstallDate
-        InstallLocation=$InstallLocation; UninstallString=$UninstallString; QuietUninstallString=$QuietUninstallString
+        Category=''; IsUniversalInventory=$false; DetailsExpanded=$false; DisplayInstallPath=''; HasCopyableInstallPath=$false; InstallLocation=$InstallLocation; UninstallString=$UninstallString; QuietUninstallString=$QuietUninstallString
         WindowsInstaller=$WindowsInstaller; RegistryKeyPath=$RegistryKeyPath; RegistryHive=$RegistryHive; RegistryView=$RegistryView
         AppxPackageFullName=$AppxPackageFullName; PackageFamilyName=$PackageFamilyName; WingetId=$WingetId
         ChocoId=$ChocoId; ScoopName=$ScoopName; Source=$Source; IsCatalogApp=$IsCatalogApp; CatalogId=$CatalogId
@@ -10777,34 +10596,59 @@ $script:InstalledScanState = @{
     RescanRequested = $false
 }
 
+# V14: preserve the original catalog categories in Show Installed, map installed
+# records to catalog categories in O(n), and keep installed cards compact/expandable.
 function Set-AMRInstalledViewVisible {
     param([int]$InstalledCount)
 
     $script:ShowInstalledOnly = $true
     $InstalledCount = @($script:InstalledScanState.Inventory).Count
     $script:InstalledAppsInventory.Clear()
+
+    # Build lookup tables once. The previous nested catalog scan was O(installed x catalog)
+    # on the UI thread and caused a long pause when Show Installed contained many records.
+    $catalogById = @{}
+    $catalogByName = @{}
+    foreach ($catalogApp in $script:SoftwareCatalog) {
+        $catalogId = [string]$catalogApp.Id
+        if ($catalogId) { $catalogById[$catalogId.ToLowerInvariant()] = $catalogApp }
+        $catalogName = ([string]$catalogApp.Name -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
+        if ($catalogName -and -not $catalogByName.ContainsKey($catalogName)) { $catalogByName[$catalogName] = $catalogApp }
+    }
     foreach ($record in @($script:InstalledScanState.Inventory)) {
+        $record.IsUniversalInventory = $true
+        $record.DetailsExpanded = $false
+        $record.Category = ''
+        $copyablePath = if (-not [string]::IsNullOrWhiteSpace([string]$record.InstallLocation)) { [string]$record.InstallLocation } elseif (-not [string]::IsNullOrWhiteSpace([string]$record.PortableRootFolder)) { [string]$record.PortableRootFolder } elseif (-not [string]::IsNullOrWhiteSpace([string]$record.PortableExecutablePath)) { [string]$record.PortableExecutablePath } elseif (-not [string]::IsNullOrWhiteSpace([string]$record.PackageFamilyName)) { [string]$record.PackageFamilyName } else { '' }
+        $record.HasCopyableInstallPath = -not [string]::IsNullOrWhiteSpace($copyablePath)
+        $record.DisplayInstallPath = if ($record.HasCopyableInstallPath) { $copyablePath } else { 'Not recorded by Windows' }
         $recordNorm = ([string]$record.Name -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
-        foreach ($catalogApp in $script:SoftwareCatalog) {
-            $catalogNorm = ([string]$catalogApp.Name -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
-            if (([string]$record.Id -ieq [string]$catalogApp.Id) -or ($recordNorm -and $recordNorm -eq $catalogNorm)) {
-                $record.IsCatalogApp = $true; $record.CatalogId = [string]$catalogApp.Id
-                if ($record.Icon -eq $null) { $record.Icon = $catalogApp.Icon }
-                break
-            }
+        $match = $null
+        $recordId = [string]$record.Id
+        if ($recordId -and $catalogById.ContainsKey($recordId.ToLowerInvariant())) { $match = $catalogById[$recordId.ToLowerInvariant()] }
+        elseif ($recordNorm -and $catalogByName.ContainsKey($recordNorm)) { $match = $catalogByName[$recordNorm] }
+        if ($null -ne $match) {
+            $record.IsCatalogApp = $true
+            $record.CatalogId = [string]$match.Id
+            $record.Category = [string]$match.Category
+            if ($null -eq $record.Icon) { $record.Icon = $match.Icon }
         }
         [void]$script:InstalledAppsInventory.Add($record)
     }
     $script:InstalledAppsView = [System.Windows.Data.CollectionViewSource]::GetDefaultView($script:InstalledAppsInventory)
+    $script:SelectedSoftwareCategory = 'All Applications'
     $script:InstalledAppsView.Filter = [System.Predicate[object]]{ param($item)
+        $selectedCategory = [string]$script:SelectedSoftwareCategory
+        if ($selectedCategory -and $selectedCategory -ne 'All Applications' -and [string]$item.Category -ne $selectedCategory) { return $false }
         $searchText = (C 'SearchBox').Text
         if ([string]::IsNullOrWhiteSpace($searchText)) { return $true }
         $escaped = [regex]::Escape($searchText)
         return ([string]$item.Name -match "(?i)$escaped") -or ([string]$item.Id -match "(?i)$escaped") -or ([string]$item.Publisher -match "(?i)$escaped")
     }
-    (C 'SoftwareGrid').ItemsSource = $script:InstalledAppsView
-    (C 'SoftwareCategoryList').ItemsSource = @([pscustomobject]@{Name='All Applications';DisplayText=('All Installed (' + $script:InstalledAppsInventory.Count + ')')})
+    (C 'SoftwareCategoryList').ItemsSource = $script:SoftwareCategories
     (C 'SoftwareCategoryList').SelectedIndex = 0
+    Update-AMRSoftwareCategoryCounts
+    Reset-AMRSoftwareGridPages -View $script:InstalledAppsView
     (C 'ShowInstalledBtn').Content = "Show All ($InstalledCount)"
     (C 'ShowInstalledBtn').ToolTip = 'Return to the full software catalog.'
     (C 'ShowInstalledBtn').IsEnabled = $true
@@ -11030,15 +10874,146 @@ $script:AppsView.Filter = [System.Predicate[object]]{
     return ($item.Name -match "(?i)$escaped") -or ($item.Id -match "(?i)$escaped")
 }
 
+# Keep the existing 3/4-column UniformGrid and card template, but realize only a
+# small page of cards at a time. This avoids creating 1,000 WPF visual trees when
+# Software opens and prevents the first-open layout pass from monopolizing UI.
+$script:SoftwareGridPageItems = New-Object 'System.Collections.ObjectModel.ObservableCollection[object]'
+$script:SoftwareGridPageSource = @()
+$script:SoftwareGridPageIndex = 0
+$script:SoftwareGridPageSize = 30
+$script:SoftwareGridPageBusy = $false
+$script:SoftwareGridPageDispatchPending = $false
+
+function Add-AMRSoftwareGridPage {
+    if ($script:SoftwareGridPageBusy) { return }
+    $script:SoftwareGridPageBusy = $true
+    try {
+        $end = [Math]::Min($script:SoftwareGridPageIndex + $script:SoftwareGridPageSize, $script:SoftwareGridPageSource.Count)
+        while ($script:SoftwareGridPageIndex -lt $end) {
+            [void]$script:SoftwareGridPageItems.Add($script:SoftwareGridPageSource[$script:SoftwareGridPageIndex])
+            $script:SoftwareGridPageIndex++
+        }
+    } finally {
+        $script:SoftwareGridPageBusy = $false
+    }
+}
+
+function Reset-AMRSoftwareGridPages {
+    param([Parameter(Mandatory=$true)]$View)
+    $script:SoftwareGridPageItems.Clear()
+    $script:SoftwareGridPageIndex = 0
+
+    # Build a stable category sequence: all applications from one category stay
+    # together, preserving their original order inside that category. This
+    # prevents separators from jumping backwards (e.g. 2, 1, 3, 2).
+    $viewItems = @($View)
+    $columns = if ($script:Window.WindowState -eq [System.Windows.WindowState]::Maximized) { 4 } else { 3 }
+    $orderedItems = New-Object 'System.Collections.Generic.List[object]'
+    $categoryOrdinals = @{}
+    for ($categoryIndex = 0; $categoryIndex -lt $script:SoftwareCategoryNames.Count; $categoryIndex++) {
+        $categoryName = [string]$script:SoftwareCategoryNames[$categoryIndex]
+        $categoryOrdinals[$categoryName] = [int]($categoryIndex + 1)
+    }
+
+    $groupIndex = 0
+    foreach ($categoryName in $script:SoftwareCategoryNames) {
+        $groupItems = @($viewItems | Where-Object { [string]$_.Category -eq [string]$categoryName })
+        if ($groupItems.Count -eq 0) { continue }
+
+        # Pad to the first column before each new category. The hidden cells
+        # reserve UniformGrid positions so every blue separator shares one X axis.
+        if ($groupIndex -gt 0) {
+            $remainder = $orderedItems.Count % $columns
+            if ($remainder -ne 0) {
+                $padCount = $columns - $remainder
+                for ($pad = 0; $pad -lt $padCount; $pad++) {
+                    $spacer = [pscustomobject]@{ IsCategorySpacer = $true; IsCategoryStart = $false; IsCategoryHeaderRow = $false; CategoryNumber = ''; Category = ''; Icon = $null; Initials = '' }
+                    [void]$orderedItems.Add($spacer)
+                }
+            }
+        }
+
+        $ordinal = [int]$categoryOrdinals[[string]$categoryName]
+        $firstInGroup = $true
+        $appIndexInGroup = 0
+        foreach ($app in $groupItems) {
+            foreach ($propertyName in @('IsCategorySpacer','IsCategoryStart','IsCategoryHeaderRow','CategoryNumber')) {
+                if (-not $app.PSObject.Properties[$propertyName]) {
+                    $app | Add-Member -NotePropertyName $propertyName -NotePropertyValue $null
+                }
+            }
+            # Category 1 is the initial All Applications section: deliberately
+            # no numbered marker is shown before it.
+            $app.IsCategorySpacer = $false
+            $app.IsCategoryStart = [bool]($firstInGroup -and $ordinal -gt 1)
+            # All cards in the category's first grid row reserve the same header gap.
+            # This keeps the separator spacing continuous across columns without shifting later rows.
+            $app.IsCategoryHeaderRow = [bool]($ordinal -gt 1 -and $appIndexInGroup -lt $columns)
+            $app.CategoryNumber = if ($ordinal -gt 1) { [string]$ordinal } else { '' }
+            [void]$orderedItems.Add($app)
+            $firstInGroup = $false
+            $appIndexInGroup++
+        }
+        $groupIndex++
+    }
+
+    # Keep any uncategorized entries at the end without introducing fake numbers.
+    $uncategorized = @($viewItems | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.Category) })
+    foreach ($app in $uncategorized) {
+        foreach ($propertyName in @('IsCategorySpacer','IsCategoryStart','IsCategoryHeaderRow','CategoryNumber')) {
+            if (-not $app.PSObject.Properties[$propertyName]) { $app | Add-Member -NotePropertyName $propertyName -NotePropertyValue $null }
+        }
+        $app.IsCategorySpacer = $false
+        $app.IsCategoryStart = $false
+        $app.IsCategoryHeaderRow = $false
+        $app.CategoryNumber = ''
+        [void]$orderedItems.Add($app)
+    }
+
+    $script:SoftwareGridPageSource = $orderedItems.ToArray()
+    # Keep the visual tree deliberately small on every launch. A UniformGrid
+    # inside a regular ScrollViewer is NOT virtualized, so add a small first batch.
+    $script:SoftwareGridPageSize = 12
+    # In maximized mode the 4-column category alignment inserts four spacer cells
+    # after the 16-item Web Browsers group. Loading only 18 items therefore leaves
+    # the grid showing that first category (plus spacers) with no scroll event to
+    # request the next page. Prefill enough items to include the next categories.
+    $initialCount = if ($script:ShowInstalledOnly) { 12 } elseif ($script:Window.WindowState -eq [System.Windows.WindowState]::Maximized) { 30 } else { 18 }
+    $initialEnd = [Math]::Min($initialCount, $script:SoftwareGridPageSource.Count)
+    while ($script:SoftwareGridPageIndex -lt $initialEnd) {
+        [void]$script:SoftwareGridPageItems.Add($script:SoftwareGridPageSource[$script:SoftwareGridPageIndex])
+        $script:SoftwareGridPageIndex++
+    }
+    try {
+        $null = $script:Window.Dispatcher.BeginInvoke([Action]{ Sync-AMRRealizedSoftwareIcons }, [System.Windows.Threading.DispatcherPriority]::Loaded)
+        (C 'SoftwareScrollViewer').ScrollToTop()
+    } catch {}
+}
+
+
 (C 'SoftwareCategoryList').Add_SelectionChanged({
     $selected = (C 'SoftwareCategoryList').SelectedItem
     if ($null -ne $selected) {
         $script:SelectedSoftwareCategory = [string]$selected.Name
-        if ($script:ShowInstalledOnly -and $script:InstalledAppsView) { $script:InstalledAppsView.Refresh() } else { $script:AppsView.Refresh() }
+        if ($script:ShowInstalledOnly -and $script:InstalledAppsView) {
+            $script:InstalledAppsView.Refresh()
+            Reset-AMRSoftwareGridPages -View $script:InstalledAppsView
+        } else {
+            $script:AppsView.Refresh()
+            Reset-AMRSoftwareGridPages -View $script:AppsView
+        }
     }
 })
 
-(C 'SearchBox').Add_TextChanged({ if ($script:ShowInstalledOnly -and $script:InstalledAppsView) { $script:InstalledAppsView.Refresh() } else { $script:AppsView.Refresh() } })
+(C 'SearchBox').Add_TextChanged({
+    if ($script:ShowInstalledOnly -and $script:InstalledAppsView) {
+        $script:InstalledAppsView.Refresh()
+        Reset-AMRSoftwareGridPages -View $script:InstalledAppsView
+    } else {
+        $script:AppsView.Refresh()
+        Reset-AMRSoftwareGridPages -View $script:AppsView
+    }
+})
 (C 'ShowInstalledBtn').Add_Click({
     if (-not $script:ShowInstalledOnly) {
         if ($script:InstalledScanState.Ready) {
@@ -11051,7 +11026,7 @@ $script:AppsView.Filter = [System.Predicate[object]]{
         }
     } else {
         $script:ShowInstalledOnly = $false
-        (C 'SoftwareGrid').ItemsSource = $script:AppsView
+        Reset-AMRSoftwareGridPages -View $script:AppsView
         (C 'SoftwareCategoryList').ItemsSource = $script:SoftwareCategories
         Update-AMRSoftwareCategoryCounts
         (C 'ShowInstalledBtn').Content = 'Show Installed'
@@ -11063,9 +11038,56 @@ $script:AppsView.Filter = [System.Predicate[object]]{
         Write-AMRLog 'Installed-app filter disabled; showing the full software catalog.' INFO Software
     }
 })
-(C 'SoftwareGrid').ItemsSource = $script:AppsView
+(C 'SoftwareGrid').ItemsSource = $script:SoftwareGridPageItems
+# Copy button lives inside the installed-card DataTemplate; handle its routed click once at the grid.
+(C 'SoftwareGrid').AddHandler([System.Windows.Controls.Button]::ClickEvent, [System.Windows.RoutedEventHandler]{
+    param($sender, $e)
+    $copyButton = $e.OriginalSource
+    if ($null -eq $copyButton -or [string]$copyButton.Name -ne 'InstalledCopyPathBtn') { return }
+    $pathToCopy = [string]$copyButton.Tag
+    if ([string]::IsNullOrWhiteSpace($pathToCopy) -or $pathToCopy -eq 'Not recorded by Windows') { return }
+    try { [System.Windows.Clipboard]::SetText($pathToCopy) } catch { Show-AMRMessage ('Could not copy installation path: ' + [string]$_.Exception.Message) 'Copy Install Path' OK Warning | Out-Null }
+}, $true)
+# Explicitly control the installed details panel on the UI thread. PSCustomObject
+# inventory rows do not implement INotifyPropertyChanged, so XAML-only triggers
+# can fail to refresh after the arrow is clicked.
+(C 'SoftwareGrid').AddHandler([System.Windows.Controls.Primitives.ToggleButton]::ClickEvent, [System.Windows.RoutedEventHandler]{
+    param($sender, $e)
+    $toggle = $e.OriginalSource
+    if ($null -eq $toggle -or [string]$toggle.Name -ne 'InstalledDetailsToggle') { return }
+    try {
+        $node = [System.Windows.DependencyObject]$toggle
+        $card = $null
+        while ($null -ne $node) {
+            if ($node -is [System.Windows.Controls.Border] -and $node.Child -is [System.Windows.Controls.Grid]) { $card = $node; break }
+            $node = [System.Windows.Media.VisualTreeHelper]::GetParent($node)
+        }
+        if ($null -eq $card) { return }
+        $popup = $toggle.FindName('InstalledDetailsPopup')
+        if ($null -eq $popup) { return }
+        $isExpanded = [bool]$toggle.IsChecked
+        # Popup is hosted in its own WPF window, so it renders above every
+        # neighboring item container without changing the card/grid layout.
+        $popup.IsOpen = $isExpanded
+        $copyButton = Find-AMRNamedVisualChild -Parent $popup.Child -Name 'InstalledCopyPathBtn'
+        if ($null -ne $copyButton -and $copyButton.Uid -ne 'AMR_COPY_HANDLER_ATTACHED') {
+            $copyButton.Uid = 'AMR_COPY_HANDLER_ATTACHED'
+            $copyButton.AddHandler([System.Windows.Controls.Button]::ClickEvent, [System.Windows.RoutedEventHandler]{
+                param($copySender, $copyEvent)
+                $pathToCopy = [string]$copySender.Tag
+                if ([string]::IsNullOrWhiteSpace($pathToCopy) -or $pathToCopy -eq 'Not recorded by Windows') { return }
+                try { [System.Windows.Clipboard]::SetText($pathToCopy) } catch { Show-AMRMessage ('Could not copy installation path: ' + [string]$_.Exception.Message) 'Copy Install Path' OK Warning | Out-Null }
+            }, $true)
+        }
+        $toggle.Content = if ($isExpanded) { '⌃' } else { '⌄' }
+        $toggle.ToolTip = if ($isExpanded) { 'Hide installation details' } else { 'Show installation details' }
+        $item = $toggle.DataContext
+        if ($null -ne $item -and $item.PSObject.Properties['DetailsExpanded']) { $item.DetailsExpanded = $isExpanded }
+    } catch { Write-AMRLog ("Could not toggle installed application details: $($_.Exception.Message)") WARNING Software }
+}, $true)
+Reset-AMRSoftwareGridPages -View $script:AppsView
 
-# Keep the software catalog responsive: 3 cards in the normal window and 4 when maximized.
+# Preserve the original Software card layout: 3 columns normally, 4 when maximized.
 function Find-AMRVisualChildByType {
     param(
         [System.Windows.DependencyObject]$Parent,
@@ -11082,10 +11104,103 @@ function Find-AMRVisualChildByType {
     return $null
 }
 
+# Re-apply icon state to realized cards. The catalog uses PSCustomObject models,
+# which do not raise PropertyChanged when Icon is assigned by the background worker.
+# WPF can therefore recycle a card while retaining a stale/empty visual state.
+function Find-AMRNamedVisualChild {
+    param([System.Windows.DependencyObject]$Parent,[string]$Name)
+    if ($null -eq $Parent) { return $null }
+    if ($Parent -is [System.Windows.FrameworkElement] -and $Parent.Name -eq $Name) { return $Parent }
+    try {
+        $count = [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($Parent)
+        for ($i = 0; $i -lt $count; $i++) {
+            $found = Find-AMRNamedVisualChild -Parent ([System.Windows.Media.VisualTreeHelper]::GetChild($Parent,$i)) -Name $Name
+            if ($null -ne $found) { return $found }
+        }
+    } catch {}
+    return $null
+}
+
+function Sync-AMRRealizedSoftwareIcons {
+    try {
+        $grid = C 'SoftwareGrid'
+        if ($null -eq $grid) { return }
+        $generator = $grid.ItemContainerGenerator
+        for ($i = 0; $i -lt $grid.Items.Count; $i++) {
+            $container = $generator.ContainerFromIndex($i)
+            if ($null -eq $container) { continue }
+            $item = $grid.Items[$i]
+            $image = Find-AMRNamedVisualChild -Parent $container -Name 'SoftwareIconImage'
+            $initials = Find-AMRNamedVisualChild -Parent $container -Name 'SoftwareIconInitials'
+            if ($null -ne $image) { $image.Source = $item.Icon }
+            if ($null -ne $initials) {
+                $initials.Visibility = if ($null -eq $item.Icon) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
+            }
+        }
+    } catch {}
+}
+
+# Update only the realized card whose model changed; do not walk every card for
+# each decoded icon. This keeps the dispatcher work proportional to one card.
+function Sync-AMRRealizedSoftwareIconItem {
+    param([object]$Item)
+    if ($null -eq $Item) { return }
+    try {
+        $grid = C 'SoftwareGrid'
+        if ($null -eq $grid) { return }
+        $generator = $grid.ItemContainerGenerator
+        for ($i = 0; $i -lt $grid.Items.Count; $i++) {
+            $current = $grid.Items[$i]
+            if (-not [object]::ReferenceEquals($current,$Item)) { continue }
+            $container = $generator.ContainerFromIndex($i)
+            if ($null -eq $container) { return }
+            $image = Find-AMRNamedVisualChild -Parent $container -Name 'SoftwareIconImage'
+            $initials = Find-AMRNamedVisualChild -Parent $container -Name 'SoftwareIconInitials'
+            if ($null -ne $image) { $image.Source = $Item.Icon }
+            if ($null -ne $initials) {
+                $initials.Visibility = if ($null -eq $Item.Icon) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
+            }
+            return
+        }
+    } catch {}
+}
+
+$script:SoftwareIconScrollSyncPending = $false
+
+try {
+    $softwareScroll = C 'SoftwareScrollViewer'
+    $softwareScroll.Add_ScrollChanged({
+        param($sender, $eventArgs)
+        # Do not walk the whole ItemsControl on every scroll event. In this
+        # non-virtualized UniformGrid that would repeatedly inspect every card.
+        # Icons are synchronized after a page is created and when an individual
+        # icon is delivered; scrolling only schedules the next small page.
+        if ($eventArgs.VerticalChange -gt 0 -and $sender.VerticalOffset -gt 0 -and $sender.VerticalOffset -ge ($sender.ScrollableHeight - 900) -and -not $script:SoftwareGridPageDispatchPending) {
+            # Queue at most one page append; avoid a burst of duplicate dispatcher work.
+            $script:SoftwareGridPageDispatchPending = $true
+            $null = $script:Window.Dispatcher.BeginInvoke([Action]{
+                try { Add-AMRSoftwareGridPage }
+                finally { $script:SoftwareGridPageDispatchPending = $false }
+            }, [System.Windows.Threading.DispatcherPriority]::Background)
+        }
+    })
+} catch { Write-AMRLog ("Could not attach progressive Software paging: $($_.Exception.Message)") WARNING Software }
+
 $script:UpdateSoftwareGridColumns = {
     $uniformGrid = Find-AMRVisualChildByType -Parent (C 'SoftwareGrid') -ChildType ([System.Windows.Controls.Primitives.UniformGrid])
     if ($null -ne $uniformGrid) {
-        $uniformGrid.Columns = if ($script:Window.WindowState -eq [System.Windows.WindowState]::Maximized) { 4 } else { 3 }
+        $newColumnCount = if ($script:Window.WindowState -eq [System.Windows.WindowState]::Maximized) { 4 } else { 3 }
+        if ($uniformGrid.Columns -ne $newColumnCount) {
+            $uniformGrid.Columns = $newColumnCount
+            if ($script:AppsView) {
+                $savedOffset = 0.0
+                try { $savedOffset = (C 'SoftwareScrollViewer').VerticalOffset } catch {}
+                Reset-AMRSoftwareGridPages -View $script:AppsView
+                try {
+                    $null = $script:Window.Dispatcher.BeginInvoke([Action]{ (C 'SoftwareScrollViewer').ScrollToVerticalOffset($savedOffset) }, [System.Windows.Threading.DispatcherPriority]::Loaded)
+                } catch {}
+            }
+        }
     }
 }
 $script:Window.Add_Loaded({ & $script:UpdateSoftwareGridColumns })
@@ -15641,273 +15756,504 @@ Update-AMRUtilitiesView
 Write-AMRLog ('Amr | windows_utility initialized. ' + $script:AMRReliabilityPhase) INFO System
 Refresh-AMROverview
 Write-AMRLog 'Utility Ready.' SUCCESS System
-# --- ISOLATED PROGRESSIVE SOFTWARE-ICON REFRESH ---
-# This worker starts only after WPF has rendered the first frame. Network, ZIP
-# extraction and file copying run in a dedicated MTA runspace, never on the UI thread.
+# --- ISOLATED PROGRESSIVE SOFTWARE-ICON REFRESH (V6 - CACHE-FIRST + FASTER LOCAL DELIVERY) ---
+# Preserve layout/cache; local cache is delivered in faster bounded batches; GitHub version checks remain isolated in the background worker.
+
 $script:IconRefreshStarted = $false
+$script:IconRefreshApps = @()
 $script:IconRefreshRunspace = $null
 $script:IconRefreshPowerShell = $null
 $script:IconRefreshAsync = $null
 $script:IconRefreshTimer = $null
+$script:IconRefreshWorkerResult = $null
+
+function Get-AMRCatalogIconFromDisk {
+    param([object]$RawApp)
+    $ids = @([string]$RawApp.Id)
+    if ($RawApp.PSObject.Properties['IconAliases'] -and $RawApp.IconAliases) {
+        $ids += @($RawApp.IconAliases | ForEach-Object { [string]$_ })
+    }
+    foreach ($id in $ids) {
+        foreach ($ext in @('.png','.jpg','.jpeg')) {
+            $path = Join-Path $script:IconDir ($id + $ext)
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+                $source = Get-AMRIconImageSource -Path $path
+                if ($null -ne $source) { return $source }
+            }
+        }
+    }
+    return $null
+}
 
 function Start-AMRBackgroundIconRefresh {
     if ($script:IconRefreshStarted) { return }
     $script:IconRefreshStarted = $true
-    Write-AMRLog 'Icon refresh trigger received; preparing the background downloader.' INFO Software
 
+    # Existing cache: icons have already been assigned directly to catalog items
+    # before the window was built. Do not create a runspace, timer, queue, archive
+    # check, network request, or icon refresh worker on subsequent launches.
+    if ($script:IconCacheUsableAtStartup) {
+        $cachedCount = @($script:SoftwareCatalog | Where-Object { $null -ne $_.Icon }).Count
+        Write-AMRLog (("Local icon cache loaded synchronously: {0}/{1}. Background icon worker skipped." -f $cachedCount,$script:SoftwareCatalog.Count)) INFO Software
+        return
+    }
+
+    # First install only: no usable local cache exists, so the original isolated
+    # download/extract worker remains responsible for acquiring the icon package.
     try {
-        # Keep an explicit snapshot in script scope. WPF event handlers must not
-        # depend on a transient caller/local scope for the catalog array.
         $script:IconRefreshApps = @($RawApps)
         $script:IconRefreshStartedUtc = [DateTime]::UtcNow
         $script:IconRefreshLastHeartbeatUtc = [DateTime]::MinValue
-        $script:IconRefreshLoadedIndexes = New-Object 'System.Collections.Generic.HashSet[int]'
         $script:IconRefreshScanIndex = 0
-        $script:IconRefreshWorkerLogFile = $script:LogFile
+        $script:IconRefreshWorkerResult = $null
+        $script:IconRefreshReadyQueue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
+        $catalogRequests = @()
+        for ($requestIndex = 0; $requestIndex -lt $script:IconRefreshApps.Count; $requestIndex++) {
+            $raw = $script:IconRefreshApps[$requestIndex]
+            $ids = @([string]$raw.Id)
+            if ($raw.PSObject.Properties['IconAliases'] -and $raw.IconAliases) { $ids += @($raw.IconAliases | ForEach-Object { [string]$_ }) }
+            $catalogRequests += [pscustomobject]@{ Index=$requestIndex; Ids=$ids }
+        }
 
-        Write-AMRLog ("Icon worker setup: Apps={0}; IconDir={1}; DownloadDir={2}; Log={3}" -f $script:IconRefreshApps.Count,$script:IconDir,$script:DownloadDir,$script:LogFile) INFO Software
+        # Worker script: archive sync AND image decoding run away from the UI thread.
+        $workerScript = {
+            param(
+                [string]$IconDir,
+                [string]$DownloadDir,
+                [string]$BundledArchivePath,
+                [string]$ArchiveUrl,
+                [string]$ArchiveUrlFallback,
+                [string]$ArchiveApiUrl,
+                [string]$ArchivePath,
+                [string]$MarkerPath,
+                [int]$MinFileCount,
+                [int]$DownloadTimeoutSec,
+                [object[]]$CatalogIconRequests,
+                [object]$ReadyIconQueue
+            )
 
-        # A single payload avoids positional argument/array-unrolling problems in
-        # PowerShell 5.1 AddArgument parameter binding.
-        $workerCode = {
-            param([hashtable]$Payload)
+            # Keep background icon work below the UI thread's scheduling priority.
+            try { [System.Threading.Thread]::CurrentThread.Priority = [System.Threading.ThreadPriority]::BelowNormal } catch {}
 
-            $script:IconDir = [string]$Payload.IconDir
-            $script:DownloadDir = [string]$Payload.DownloadDir
-            $script:IconArchiveUrl = [string]$Payload.ArchiveUrl
-            $script:IconArchiveApiUrl = [string]$Payload.ApiUrl
-            $script:IconArchivePath = [string]$Payload.ArchivePath
-            $script:BundledIconArchivePath = [string]$Payload.BundledIconArchivePath
-            $script:IconArchiveMarkerPath = [string]$Payload.ArchiveMarkerPath
-            $script:LogFile = [string]$Payload.LogFile
-
-            function Write-AMRLog {
-                param([string]$Message,[string]$Level='INFO',[string]$Area='Software')
-                $line = '[{0}] [{1}] [{2}] {3}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'),$Level,$Area,$Message
-                $stream = $null
-                $writer = $null
+            function Test-AMRIconCacheUsable {
+                param([string]$IconDir,[int]$Minimum)
                 try {
-                    $stream = [System.IO.File]::Open(
-                        $script:LogFile,
-                        [System.IO.FileMode]::Append,
-                        [System.IO.FileAccess]::Write,
-                        [System.IO.FileShare]::ReadWrite
-                    )
-                    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-                    $writer = [System.IO.StreamWriter]::new($stream, $utf8NoBom)
-                    $writer.WriteLine($line)
-                    $writer.Flush()
-                } catch {
-                    # Return the logging failure to the PowerShell error stream;
-                    # never silently discard it.
-                    Write-Error ("Icon worker could not write its log: {0}" -f $_.Exception.Message)
-                } finally {
-                    if ($writer) { $writer.Dispose() }
-                    elseif ($stream) { $stream.Dispose() }
-                }
+                    if (-not (Test-Path -LiteralPath $IconDir -PathType Container)) { return $false }
+                    $count = @(Get-ChildItem -LiteralPath $IconDir -File -ErrorAction SilentlyContinue |
+                        Where-Object { $_.Extension -match '^\.(png|jpe?g)$' -and $_.Length -gt 128 }).Count
+                    return ($count -ge $Minimum)
+                } catch { return $false }
             }
 
-            try {
-                Write-AMRLog ("Icon worker entered. Apps={0}; IconDir={1}; Archive={2}; ArchiveExists={3}" -f @($Payload.Apps).Count,$script:IconDir,$script:IconArchivePath,(Test-Path -LiteralPath $script:IconArchivePath -PathType Leaf)) 'INFO' 'Software'
-                if (-not (Test-Path -LiteralPath $script:IconDir -PathType Container)) {
-                    New-Item -ItemType Directory -Path $script:IconDir -Force -ErrorAction Stop | Out-Null
-                }
-                if (-not (Test-Path -LiteralPath $script:DownloadDir -PathType Container)) {
-                    New-Item -ItemType Directory -Path $script:DownloadDir -Force -ErrorAction Stop | Out-Null
-                }
-
-                $initText = [string]$Payload.InitFunctionText
-                if ([string]::IsNullOrWhiteSpace($initText)) { throw 'Initializer function text was empty.' }
-                Write-AMRLog ("Preparing icon initializer script. TextLength={0}" -f $initText.Length) 'INFO' 'Software'
-                $initializerDefinition = "function Initialize-AMRSoftwareIcons {`r`n$initText`r`n}"
-                $initializerBlock = [scriptblock]::Create($initializerDefinition)
-                . $initializerBlock
-                if (-not (Get-Command Initialize-AMRSoftwareIcons -CommandType Function -ErrorAction SilentlyContinue)) {
-                    throw 'Initialize-AMRSoftwareIcons was not defined after compilation.'
-                }
-                Write-AMRLog 'Icon initializer compiled.' 'INFO' 'Software'
-                Write-AMRLog 'Icon initialization started.' 'INFO' 'Software'
-                $appsForWorker = @($Payload.Apps)
-                Initialize-AMRSoftwareIcons -Apps $appsForWorker
-                Write-AMRLog 'Icon initializer returned successfully.' 'INFO' 'Software'
-                return 'Completed'
-            } catch {
-                $workerError = $_
-                $workerException = $workerError.Exception
-                $workerDetails = "Background icon refresh failed. Error=$($workerException.Message); ExceptionType=$($workerException.GetType().FullName); Function=$($workerError.InvocationInfo.MyCommand.Name); Line=$($workerError.InvocationInfo.ScriptLineNumber); Command=$($workerError.InvocationInfo.Line)"
-                if ($workerException.InnerException) {
-                    $workerDetails += "; InnerException=$($workerException.InnerException.GetType().FullName): $($workerException.InnerException.Message)"
-                }
-                try { Write-AMRLog $workerDetails 'ERROR' 'Software' } catch {}
-                throw
+            # Decode one local file on the isolated worker and publish only a frozen
+            # ImageSource. The dispatcher never opens files or decodes bitmaps.
+            function Publish-AMRIconFile {
+                param([int]$Index,[string]$Path,[object]$ReadyIconQueue)
+                if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+                try {
+                    $bitmap = New-Object System.Windows.Media.Imaging.BitmapImage
+                    $bitmap.BeginInit()
+                    $bitmap.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+                    $bitmap.CreateOptions = [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache
+                    $bitmap.UriSource = New-Object System.Uri([System.IO.Path]::GetFullPath($Path),[System.UriKind]::Absolute)
+                    $bitmap.EndInit()
+                    if ($bitmap.CanFreeze) { $bitmap.Freeze() }
+                    # Keep a larger prepared buffer so local-cache startup is not throttled by tiny UI batches.
+                    while ($ReadyIconQueue.Count -ge 96) { Start-Sleep -Milliseconds 10 }
+                    $ReadyIconQueue.Enqueue([pscustomobject]@{ Index=$Index; Source=$bitmap })
+                    return $true
+                } catch { return $false }
             }
-        }
 
-        Write-AMRLog 'Icon Runspace creation started.' INFO Software
-        $initialState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-        $script:IconRefreshRunspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace($initialState)
-        $script:IconRefreshRunspace.ApartmentState = [System.Threading.ApartmentState]::MTA
-        $script:IconRefreshRunspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
-        $script:IconRefreshRunspace.Open()
-        Write-AMRLog 'Icon Runspace opened.' INFO Software
-
-        $script:IconRefreshPowerShell = [PowerShell]::Create()
-        $script:IconRefreshPowerShell.Runspace = $script:IconRefreshRunspace
-        $null = $script:IconRefreshPowerShell.AddScript($workerCode.ToString(), $true)
-        $payload = @{
-            Apps = [object[]]$script:IconRefreshApps
-            IconDir = [string]$script:IconDir
-            DownloadDir = [string]$script:DownloadDir
-            ArchiveUrl = [string]$script:IconArchiveUrl
-            ApiUrl = [string]$script:IconArchiveApiUrl
-            ArchivePath = [string]$script:IconArchivePath
-            BundledIconArchivePath = [string]$script:BundledIconArchivePath
-            ArchiveMarkerPath = [string]$script:IconArchiveMarkerPath
-            InitFunctionText = [string]${function:Initialize-AMRSoftwareIcons}.ToString()
-            LogFile = [string]$script:LogFile
-        }
-        $null = $script:IconRefreshPowerShell.AddArgument($payload)
-        Write-AMRLog ("Icon worker payload prepared. Apps={0}; InitializerChars={1}; LogPathExists={2}" -f $payload.Apps.Count,$payload.InitFunctionText.Length,(Test-Path -LiteralPath $payload.LogFile -PathType Leaf)) INFO Software
-
-        $script:IconRefreshAsync = $script:IconRefreshPowerShell.BeginInvoke()
-        if ($null -eq $script:IconRefreshAsync) { throw 'BeginInvoke returned a null IAsyncResult.' }
-        Write-AMRLog ("Icon worker BeginInvoke accepted. IsCompleted={0}; AsyncState={1}" -f $script:IconRefreshAsync.IsCompleted,[string]$script:IconRefreshAsync.AsyncState) INFO Software
-
-        $script:IconRefreshTimer = New-Object System.Windows.Threading.DispatcherTimer
-        $script:IconRefreshTimer.Interval = [TimeSpan]::FromMilliseconds(500)
-        $script:IconRefreshTimer.Add_Tick({
-            try {
-                $appsForUi = @($script:IconRefreshApps)
-                $progressiveUpdated = $false
-                $progressLimit = [Math]::Min($appsForUi.Count, $script:IconRefreshScanIndex + 40)
-                for ($progressIndex = $script:IconRefreshScanIndex; $progressIndex -lt $progressLimit -and $progressIndex -lt $script:SoftwareCatalog.Count; $progressIndex++) {
-                    if ($null -ne $script:SoftwareCatalog[$progressIndex].Icon) { continue }
-                    if ($script:IconRefreshLoadedIndexes.Contains([int]$progressIndex)) { continue }
-                    $progressRawApp = $appsForUi[$progressIndex]
-                    $progressIds = @([string]$progressRawApp.Id)
-                    if ($progressRawApp.PSObject.Properties['IconAliases'] -and $progressRawApp.IconAliases) {
-                        $progressIds += @($progressRawApp.IconAliases | ForEach-Object { [string]$_ })
-                    }
-                    $progressSource = $null
-                    foreach ($progressId in $progressIds) {
-                        foreach ($progressExt in @('.png','.jpg','.jpeg')) {
-                            $progressPath = Join-Path $script:IconDir ($progressId + $progressExt)
-                            if (Test-Path -LiteralPath $progressPath -PathType Leaf) {
-                                $progressSource = Get-AMRIconImageSource -Path $progressPath
-                                if ($null -ne $progressSource) { break }
+            function Publish-AMRIconsFromLocalCache {
+                param([object[]]$CatalogIconRequests,[string]$IconDir,[object]$ReadyIconQueue)
+                $prepared = 0
+                foreach ($request in $CatalogIconRequests) {
+                    $found = $false
+                    foreach ($candidateId in @($request.Ids)) {
+                        foreach ($extension in @('.png','.jpg','.jpeg')) {
+                            $imagePath = Join-Path $IconDir ([string]$candidateId + $extension)
+                            if (Publish-AMRIconFile -Index ([int]$request.Index) -Path $imagePath -ReadyIconQueue $ReadyIconQueue) {
+                                $prepared++; $found = $true; break
                             }
                         }
-                        if ($null -ne $progressSource) { break }
-                    }
-                    if ($null -ne $progressSource) {
-                        $script:SoftwareCatalog[$progressIndex].Icon = $progressSource
-                        [void]$script:IconRefreshLoadedIndexes.Add([int]$progressIndex)
-                        $progressiveUpdated = $true
+                        if ($found) { break }
                     }
                 }
-                $script:IconRefreshScanIndex = $progressLimit
-                if ($progressiveUpdated) { try { (C 'SoftwareGrid').Items.Refresh() } catch {} }
+                return $prepared
+            }
 
-                if (-not $script:IconRefreshAsync) { throw 'Icon worker async handle is missing.' }
-                if (-not $script:IconRefreshAsync.IsCompleted) {
+            function Initialize-AMRSoftwareIcons {
+                param(
+                    [string]$IconDir,[string]$DownloadDir,[string]$BundledArchivePath,
+                    [string]$ArchiveUrl,[string]$ArchiveUrlFallback,[string]$ArchiveApiUrl,[string]$ArchivePath,
+                    [string]$MarkerPath,[int]$MinFileCount,[int]$DownloadTimeoutSec,
+                    [object[]]$CatalogIconRequests,[object]$CatalogIconIndexById,[object]$ReadyIconQueue
+                )
+                $ErrorActionPreference = 'Stop'
+                try {
+                    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+                    [Net.ServicePointManager]::Expect100Continue = $false
+                } catch {}
+                try {
+                    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+                    New-Item -ItemType Directory -Path $IconDir -Force -ErrorAction Stop | Out-Null
+                    $localArchive = Join-Path $IconDir 'icons.zip'
+                    $partArchive = Join-Path $IconDir 'icons.zip.download'
+                    $metaFile = Join-Path $IconDir 'icons.cache.json'
+                    $remoteSize = -1L; $remoteSha = ''; $downloadUrl = $ArchiveUrl
+                    # Metadata is optional: never let a slow API lookup block the icon engine.
+                    try {
+                        $metaRequest = [System.Net.HttpWebRequest]::Create($ArchiveApiUrl)
+                        $metaRequest.Method = 'GET'
+                        $metaRequest.UserAgent = 'AMR-DriverCenter-Icons/6.0'
+                        $metaRequest.Accept = 'application/vnd.github+json'
+                        $metaRequest.Timeout = 12000
+                        $metaRequest.ReadWriteTimeout = 12000
+                        $metaRequest.AllowAutoRedirect = $true
+                        $metaRequest.KeepAlive = $false
+                        $metaProxy = [Net.WebRequest]::DefaultWebProxy
+                        if ($null -ne $metaProxy) { $metaProxy.Credentials = [Net.CredentialCache]::DefaultCredentials; $metaRequest.Proxy = $metaProxy }
+                        $metaResponse = $metaRequest.GetResponse()
+                        try {
+                            $metaReader = New-Object -TypeName System.IO.StreamReader -ArgumentList @($metaResponse.GetResponseStream())
+                            try { $metaText = $metaReader.ReadToEnd() } finally { $metaReader.Dispose() }
+                            $meta = ConvertFrom-Json -InputObject $metaText
+                            if ($meta.size) { $remoteSize = [long]$meta.size }
+                            if ($meta.sha) { $remoteSha = [string]$meta.sha }
+                            if ($meta.download_url) { $downloadUrl = [string]$meta.download_url }
+                        } finally { $metaResponse.Close() }
+                    } catch {
+                        # Continue with the canonical raw URLs when GitHub API/proxy metadata is unavailable.
+                        $remoteSize = -1L; $remoteSha = ''; $downloadUrl = $ArchiveUrl
+                    }
+                    # If the API is unavailable, HEAD the raw file to compare Content-Length.
+                    if ($remoteSize -le 0) {
+                        try {
+                            $headRequest = [System.Net.HttpWebRequest]::Create($ArchiveUrl)
+                            $headRequest.Method = 'HEAD'; $headRequest.UserAgent = 'AMR-DriverCenter-Icons/6.0'
+                            $headRequest.Timeout = 10000; $headRequest.ReadWriteTimeout = 10000
+                            $headRequest.AllowAutoRedirect = $true; $headRequest.KeepAlive = $false
+                            $headProxy = [Net.WebRequest]::DefaultWebProxy
+                            if ($null -ne $headProxy) { $headProxy.Credentials = [Net.CredentialCache]::DefaultCredentials; $headRequest.Proxy = $headProxy }
+                            $headResponse = $headRequest.GetResponse()
+                            try { if ($headResponse.ContentLength -gt 0) { $remoteSize = [long]$headResponse.ContentLength } } finally { $headResponse.Close() }
+                        } catch { $remoteSize = -1L }
+                    }
+
+                    $localValid = $false
+                    if (Test-Path -LiteralPath $localArchive -PathType Leaf) {
+                        try {
+                            $localLength = (Get-Item -LiteralPath $localArchive).Length
+                            if ($localLength -ge 262144 -and ($remoteSize -lt 0 -or $localLength -eq $remoteSize)) {
+                                Add-Type -AssemblyName System.IO.Compression -ErrorAction SilentlyContinue
+                                $testZip = [IO.Compression.ZipFile]::OpenRead($localArchive)
+                                $imageEntries = @($testZip.Entries | Where-Object { $_.FullName -match '(?i)\.(png|jpe?g)$' })
+                                $testZip.Dispose()
+                                $localValid = ($imageEntries.Count -ge $MinFileCount)
+                            }
+                        } catch { $localValid = $false }
+                    }
+                    $oldMeta = $null
+                    if (Test-Path -LiteralPath $metaFile -PathType Leaf) {
+                        try { $oldMeta = Get-Content -LiteralPath $metaFile -Raw | ConvertFrom-Json } catch {}
+                    }
+                    $sameVersion = $localValid -and $oldMeta -and (
+                        (($remoteSha -and [string]$oldMeta.sha -eq $remoteSha)) -or
+                        (-not $remoteSha -and $remoteSize -gt 0 -and [long]$oldMeta.size -eq $remoteSize)
+                    )
+
+                    if ($sameVersion) {
+                        $cachedImages = @(Get-ChildItem -LiteralPath $IconDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -match '^\.(png|jpe?g)$' -and $_.Length -gt 128 }).Count
+                        $expectedImages = 0
+                        try { $expectedImages = [int]$oldMeta.imageCount } catch {}
+                        if ($expectedImages -gt 0 -and $cachedImages -ge $expectedImages) {
+                            return "CacheUnchanged:Size=$remoteSize;Images=$cachedImages;Zip=$localArchive"
+                        }
+                    }
+
+                    if (-not $sameVersion) {
+                        # Prefer the canonical raw URL; keep only independent mirrors.
+                        $mediaArchiveUrl = 'https://media.githubusercontent.com/media/3mr10aa/Amr_tools/refs/heads/main/icons.zip'
+                        $sources = @($downloadUrl,$ArchiveUrl,$mediaArchiveUrl,$ArchiveUrlFallback) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+                        $downloaded = $false; $lastError = ''; $attempt = 0
+                        $downloadClock = [Diagnostics.Stopwatch]::StartNew()
+                        foreach ($source in $sources) {
+                            if ($downloaded -or $downloadClock.Elapsed.TotalSeconds -ge 150) { break }
+                            for ($retry=1; $retry -le 2 -and -not $downloaded; $retry++) {
+                                if ($downloadClock.Elapsed.TotalSeconds -ge 150) { break }
+                                $attempt++
+                                $response = $null; $inputStream = $null; $outputStream = $null; $request = $null
+                                try {
+                                    if (Test-Path -LiteralPath $partArchive) { Remove-Item -LiteralPath $partArchive -Force -ErrorAction SilentlyContinue }
+                                    $curlPath = Join-Path $env:SystemRoot 'System32\curl.exe'
+                                    # V6: use Windows curl/Schannel for every retry. Mixing curl and
+                                    # .NET HttpWebRequest caused the final retry to fail with a closed
+                                    # connection on some Windows proxy/TLS configurations.
+                                    if (-not (Test-Path -LiteralPath $curlPath -PathType Leaf)) {
+                                        throw 'Windows curl.exe was not found; HTTPS download cannot use the configured transport.'
+                                    }
+                                    $curlOutput = @(& $curlPath '--location' '--fail' '--silent' '--show-error' '--connect-timeout' '15' '--max-time' '60' '--proto' '=https' '--tlsv1.2' '--output' $partArchive $source 2>&1)
+                                    $curlExit = $LASTEXITCODE
+                                    if ($curlExit -ne 0) { throw "curl.exe exit=$curlExit; $($curlOutput -join ' ')" }
+                                    $got = (Get-Item -LiteralPath $partArchive).Length
+                                    if ($got -lt 262144) { throw "Downloaded ZIP is too small ($got bytes)" }
+                                    if ($remoteSize -gt 0 -and $got -ne $remoteSize) { throw "Downloaded size mismatch: expected $remoteSize, received $got" }
+                                    $verify = [IO.Compression.ZipFile]::OpenRead($partArchive)
+                                    try { $validEntries = @($verify.Entries | Where-Object { $_.FullName -match '(?i)\.(png|jpe?g)$' }) } finally { $verify.Dispose() }
+                                    if ($validEntries.Count -lt $MinFileCount) { throw "ZIP contains only $($validEntries.Count) image files" }
+                                    $downloaded = $true
+                                } catch {
+                                    $lastError = "Source=$source; Attempt=$attempt; Error=$($_.Exception.GetType().Name): $($_.Exception.Message)"
+                                    try { if (Test-Path -LiteralPath $partArchive) { Remove-Item -LiteralPath $partArchive -Force -ErrorAction SilentlyContinue } } catch {}
+                                    if ($retry -lt 2) { Start-Sleep -Seconds 2 }
+                                } finally {
+                                    if ($outputStream) { $outputStream.Dispose() }
+                                    if ($inputStream) { $inputStream.Dispose() }
+                                    if ($response) { $response.Close() }
+                                }
+                            }
+                            if ($downloaded) { break }
+                        }
+                        $downloadClock.Stop()
+                        if (-not $downloaded) {
+                            if ($localValid) { return "UsingExistingArchive;RefreshFailed:Attempts=$attempt;Elapsed=$([int]$downloadClock.Elapsed.TotalSeconds)s;$lastError" }
+                            return "DownloadFailed:Attempts=$attempt;Elapsed=$([int]$downloadClock.Elapsed.TotalSeconds)s;LastError=$lastError"
+                        }
+                        # Replace atomically where possible; preserve the previous ZIP if the move fails.
+                        $previousArchive = $localArchive + '.previous'
+                        if (Test-Path -LiteralPath $previousArchive) { Remove-Item -LiteralPath $previousArchive -Force -ErrorAction SilentlyContinue }
+                        $hadPrevious = Test-Path -LiteralPath $localArchive -PathType Leaf
+                        if ($hadPrevious) { Move-Item -LiteralPath $localArchive -Destination $previousArchive -Force -ErrorAction Stop }
+                        try {
+                            Move-Item -LiteralPath $partArchive -Destination $localArchive -Force -ErrorAction Stop
+                            if (Test-Path -LiteralPath $previousArchive) { Remove-Item -LiteralPath $previousArchive -Force -ErrorAction SilentlyContinue }
+                        } catch {
+                            if ((-not (Test-Path -LiteralPath $localArchive)) -and (Test-Path -LiteralPath $previousArchive)) {
+                                Move-Item -LiteralPath $previousArchive -Destination $localArchive -Force -ErrorAction SilentlyContinue
+                            }
+                            throw
+                        }
+                        if ($remoteSize -lt 0) { $remoteSize = (Get-Item -LiteralPath $localArchive).Length }
+                    }
+
+                    # Extract image entries directly into the permanent Icons directory.
+                    # Keep icons.zip and metadata alongside the extracted image files.
+                    $zip = [IO.Compression.ZipFile]::OpenRead($localArchive)
+                    $entries = @($zip.Entries | Where-Object {
+                        $_.FullName -match '(?i)\.(png|jpe?g)$' -and
+                        $_.FullName -notmatch '(^/|^[a-zA-Z]:|(^|[\\/])\.\.([\\/]|$))'
+                    })
+                    $extracted = 0; $seen = @{}
+                    try {
+                        foreach ($entry in $entries) {
+                            $leaf = [IO.Path]::GetFileName($entry.FullName)
+                            if ([string]::IsNullOrWhiteSpace($leaf) -or $leaf -match '[\\/:*?"<>|]') { continue }
+                            $key = $leaf.ToLowerInvariant()
+                            if ($seen.ContainsKey($key)) { continue }
+                            $seen[$key] = $true
+                            $dest = Join-Path $IconDir $leaf
+                            $stage = $dest + '.amr-new'
+                            $input = $entry.Open()
+                            try {
+                                $output = [IO.File]::Open($stage,[IO.FileMode]::Create,[IO.FileAccess]::Write,[IO.FileShare]::None)
+                                try { $input.CopyTo($output); $output.Flush() } finally { $output.Dispose() }
+                            } finally { $input.Dispose() }
+                            Move-Item -LiteralPath $stage -Destination $dest -Force
+                            $extracted++
+                            # First install: publish each catalog icon as soon as its
+                            # archive entry is extracted instead of waiting for all 1000.
+                            $entryId = [IO.Path]::GetFileNameWithoutExtension($leaf).ToLowerInvariant()
+                            if ($CatalogIconIndexById.ContainsKey($entryId)) {
+                                foreach ($matchedIndex in $CatalogIconIndexById[$entryId]) {
+                                    [void](Publish-AMRIconFile -Index ([int]$matchedIndex) -Path $dest -ReadyIconQueue $ReadyIconQueue)
+                                }
+                            }
+                        }
+                    } finally { $zip.Dispose() }
+                    if ($extracted -lt $MinFileCount) { return "ExtractFailed:Only $extracted images extracted" }
+                    $finalCount = @(Get-ChildItem -LiteralPath $IconDir -File | Where-Object { $_.Extension -match '^\.(png|jpe?g)$' -and $_.Length -gt 128 }).Count
+                    $metaOut = [pscustomobject]@{ repository='3mr10aa/Amr_tools'; branch='main'; file='icons.zip'; size=[long](Get-Item -LiteralPath $localArchive).Length; sha=$remoteSha; imageCount=$finalCount; updatedUtc=[DateTime]::UtcNow.ToString('o') }
+                    $metaOut | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $metaFile -Encoding UTF8
+                    return "ArchiveReady:DownloadedOrReused;Extracted=$extracted;CacheImages=$finalCount;Zip=$localArchive"
+                } catch {
+                    return "IconEngineError:$($_.Exception.Message)"
+                } finally {
+                    if ($client) { $client.Dispose() }
+                    try { if (Test-Path -LiteralPath (Join-Path $IconDir 'icons.zip.download')) { Remove-Item -LiteralPath (Join-Path $IconDir 'icons.zip.download') -Force -ErrorAction SilentlyContinue } } catch {}
+                }
+            }
+
+            try { Add-Type -AssemblyName PresentationCore -ErrorAction Stop } catch {}
+
+            # Critical startup order:
+            # 1) If a complete local cache exists, decode and publish it FIRST.
+            # 2) Only after local icons are flowing, check GitHub for a newer archive.
+            # 3) On first install (no cache), Initialize extracts the archive and
+            #    publishes each matching icon immediately after extracting that file.
+            $catalogIconIndexById = @{}
+            foreach ($request in $CatalogIconRequests) {
+                foreach ($candidateId in @($request.Ids)) {
+                    $lookupId = ([string]$candidateId).ToLowerInvariant()
+                    if (-not $catalogIconIndexById.ContainsKey($lookupId)) {
+                        $catalogIconIndexById[$lookupId] = New-Object 'System.Collections.Generic.List[int]'
+                    }
+                    if (-not $catalogIconIndexById[$lookupId].Contains([int]$request.Index)) {
+                        [void]$catalogIconIndexById[$lookupId].Add([int]$request.Index)
+                    }
+                }
+            }
+
+            $cacheUsableAtStart = Test-AMRIconCacheUsable -IconDir $IconDir -Minimum $MinFileCount
+            $prepared = 0
+            if ($cacheUsableAtStart) {
+                $prepared += Publish-AMRIconsFromLocalCache -CatalogIconRequests $CatalogIconRequests -IconDir $IconDir -ReadyIconQueue $ReadyIconQueue
+            }
+
+            $syncResult = Initialize-AMRSoftwareIcons -IconDir $IconDir -DownloadDir $DownloadDir -BundledArchivePath $BundledArchivePath -ArchiveUrl $ArchiveUrl -ArchiveUrlFallback $ArchiveUrlFallback -ArchiveApiUrl $ArchiveApiUrl -ArchivePath $ArchivePath -MarkerPath $MarkerPath -MinFileCount $MinFileCount -DownloadTimeoutSec $DownloadTimeoutSec -CatalogIconRequests $CatalogIconRequests -CatalogIconIndexById $catalogIconIndexById -ReadyIconQueue $ReadyIconQueue
+
+            return [pscustomobject]@{ Result=[string]$syncResult; Prepared=$prepared; LocalCacheFirst=$cacheUsableAtStart }
+        }
+
+        $runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+        $runspace.ApartmentState = [System.Threading.ApartmentState]::MTA
+        $runspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
+        $runspace.Open()
+        $script:IconRefreshRunspace = $runspace
+        $script:IconRefreshPowerShell = [PowerShell]::Create()
+        $script:IconRefreshPowerShell.Runspace = $runspace
+
+        [void]$script:IconRefreshPowerShell.AddScript($workerScript)
+        [void]$script:IconRefreshPowerShell.AddParameter('IconDir', $script:IconDir)
+        [void]$script:IconRefreshPowerShell.AddParameter('DownloadDir', $script:DownloadDir)
+        [void]$script:IconRefreshPowerShell.AddParameter('BundledArchivePath', $script:BundledIconArchivePath)
+        [void]$script:IconRefreshPowerShell.AddParameter('ArchiveUrl', $script:IconArchiveUrl)
+        [void]$script:IconRefreshPowerShell.AddParameter('ArchiveUrlFallback', $script:IconArchiveUrlFallback)
+        [void]$script:IconRefreshPowerShell.AddParameter('ArchiveApiUrl', $script:IconArchiveApiUrl)
+        [void]$script:IconRefreshPowerShell.AddParameter('ArchivePath', $script:IconArchivePath)
+        [void]$script:IconRefreshPowerShell.AddParameter('MarkerPath', $script:IconArchiveMarkerPath)
+        [void]$script:IconRefreshPowerShell.AddParameter('MinFileCount', [int]$script:IconMinFileCount)
+        [void]$script:IconRefreshPowerShell.AddParameter('DownloadTimeoutSec', [int]$script:IconDownloadTimeoutSec)
+        [void]$script:IconRefreshPowerShell.AddParameter('CatalogIconRequests', [object[]]$catalogRequests)
+        [void]$script:IconRefreshPowerShell.AddParameter('ReadyIconQueue', $script:IconRefreshReadyQueue)
+
+        $script:IconRefreshAsync = $script:IconRefreshPowerShell.BeginInvoke()
+        if ($null -eq $script:IconRefreshAsync) { throw 'BeginInvoke returned null IAsyncResult' }
+        # Capture stable worker handles for this timer instance. Cleanup of script:
+        # state can no longer turn a queued DispatcherTimer tick into a missing-handle error.
+        $workerAsyncHandle = $script:IconRefreshAsync
+        $workerPowerShell = $script:IconRefreshPowerShell
+        $workerReadyQueue = $script:IconRefreshReadyQueue
+        Write-AMRLog 'Icon worker started in isolated background runspace.' INFO Software
+
+        $script:IconRefreshWorkerFinalized = $false
+        $timerInstance = New-Object System.Windows.Threading.DispatcherTimer
+        $script:IconRefreshTimer = $timerInstance
+        # The worker decodes images off-thread. The UI timer only assigns a prepared
+        # ImageSource to a currently realized (visible) ListBox container. The catalog
+        # item retains the source so recycled containers bind correctly when scrolled in.
+        $timerInstance.Interval = [TimeSpan]::FromMilliseconds(40)
+        $timerInstance.Add_Tick({
+            $timer = $timerInstance
+            try {
+                # DispatcherTimer can have a tick already queued when it is stopped.
+                # Treat a completed/cleaned-up worker as a harmless stale tick.
+                if ($null -eq $script:IconRefreshTimer -or
+                    -not [object]::ReferenceEquals($script:IconRefreshTimer,$timer)) {
+                    try { $timer.Stop() } catch {}
+                    return
+                }
+
+                # Deliver a small, steady batch from the local cache. File I/O and image
+                # decoding remain on the worker; only frozen ImageSources are assigned here.
+                for ($delivery = 0; $delivery -lt 4; $delivery++) {
+                    $ready = $null
+                    if (-not $workerReadyQueue.TryDequeue([ref]$ready)) { break }
+                    if ($null -ne $ready -and $ready.Index -ge 0 -and $ready.Index -lt $script:SoftwareCatalog.Count) {
+                        $catalogItem = $script:SoftwareCatalog[$ready.Index]
+                        $catalogItem.Icon = $ready.Source
+                        Sync-AMRRealizedSoftwareIconItem -Item $catalogItem
+                    }
+                }
+
+                if (-not $workerAsyncHandle.IsCompleted) {
                     $nowUtc = [DateTime]::UtcNow
-                    if (($nowUtc - $script:IconRefreshLastHeartbeatUtc).TotalSeconds -ge 5) {
-                        $state = [string]$script:IconRefreshPowerShell.InvocationStateInfo.State
-                        Write-AMRLog ("Icon worker heartbeat. State={0}; Completed={1}; UIIndex={2}/{3}; ElapsedSeconds={4}" -f $state,$script:IconRefreshAsync.IsCompleted,$script:IconRefreshScanIndex,$appsForUi.Count,[int]($nowUtc - $script:IconRefreshStartedUtc).TotalSeconds) INFO Software
+                    if (($nowUtc - $script:IconRefreshLastHeartbeatUtc).TotalSeconds -ge 15) {
+                        $state = [string]$workerPowerShell.InvocationStateInfo.State
+                        Write-AMRLog ("Icon background worker heartbeat. State=$state; Elapsed=$([int]($nowUtc - $script:IconRefreshStartedUtc).TotalSeconds)s; PreparedQueue=$($script:IconRefreshReadyQueue.Count)") INFO Software
                         $script:IconRefreshLastHeartbeatUtc = $nowUtc
                     }
                     return
                 }
 
-                Write-AMRLog 'Icon worker completed; collecting invocation output and error streams.' INFO Software
-                $workerResult = @()
-                $endInvokeException = $null
-                try { $workerResult = @($script:IconRefreshPowerShell.EndInvoke($script:IconRefreshAsync)) }
-                catch { $endInvokeException = $_; Write-AMRLog ("Icon EndInvoke exception: {0}; Type={1}; Line={2}" -f $_.Exception.Message,$_.Exception.GetType().FullName,$_.InvocationInfo.ScriptLineNumber) ERROR Software }
-                foreach ($workerError in $script:IconRefreshPowerShell.Streams.Error) {
-                    Write-AMRLog ("Icon worker error stream: {0}; Category={1}; Target={2}" -f $workerError.ToString(),$workerError.CategoryInfo.Category,$workerError.TargetObject) ERROR Software
-                }
-                Write-AMRLog ("Icon worker result: {0}; InvocationState={1}" -f ($workerResult -join ';'),$script:IconRefreshPowerShell.InvocationStateInfo.State) INFO Software
-                if ($endInvokeException) { throw $endInvokeException }
-                if ($script:IconRefreshPowerShell.InvocationStateInfo.State -eq [System.Management.Automation.PSInvocationState]::Failed) {
-                    throw 'Icon worker invocation ended in Failed state; inspect the preceding worker error stream.'
+                # Worker has finished preparing images. Drain the remaining queue
+                # over subsequent timer ticks before finalizing and releasing it.
+                if (-not $script:IconRefreshWorkerFinalized) {
+                    $workerOutput = $null
+                    $workerError = $null
+                    try { $workerOutput = $workerPowerShell.EndInvoke($workerAsyncHandle) }
+                    catch { $workerError = $_ }
+                    foreach ($e in $workerPowerShell.Streams.Error) {
+                        Write-AMRLog ("Icon worker error: $e") ERROR Software
+                    }
+                    if ($workerError) { throw $workerError }
+                    $workerSummary = @($workerOutput | Where-Object { $null -ne $_ } | Select-Object -Last 1)
+                    if ($workerSummary.Count -gt 0 -and $workerSummary[0].PSObject.Properties['Result']) {
+                        $script:IconRefreshWorkerResult = [string]$workerSummary[0].Result
+                    } else {
+                        $script:IconRefreshWorkerResult = [string]($workerOutput -join '; ')
+                    }
+                    $script:IconRefreshWorkerFinalized = $true
+                    Write-AMRLog ("Icon archive/background preparation completed. Result: $($script:IconRefreshWorkerResult); Prepared=$($workerSummary[0].Prepared); LocalCacheFirst=$($workerSummary[0].LocalCacheFirst)") INFO Software
                 }
 
-                Write-AMRLog 'WPF image loading started.' INFO Software
-                $finalUpdated = $false
-                $uiIconFailures = New-Object 'System.Collections.Generic.List[string]'
-                $uiIconAttempts = 0
-                for ($i = 0; $i -lt $script:SoftwareCatalog.Count -and $i -lt $appsForUi.Count; $i++) {
-                    if ($script:IconRefreshLoadedIndexes.Contains([int]$i)) { continue }
-                    $rawApp = $appsForUi[$i]
-                    $ids = @([string]$rawApp.Id)
-                    if ($rawApp.PSObject.Properties['IconAliases'] -and $rawApp.IconAliases) {
-                        $ids += @($rawApp.IconAliases | ForEach-Object { [string]$_ })
+                if ($workerReadyQueue.Count -gt 0) { return }
+                $catalogCount = $script:SoftwareCatalog.Count
+                $endIndex = $catalogCount
+                if ($endIndex -ge $catalogCount) {
+                    $visibleIconCount = @($script:SoftwareCatalog | Where-Object { $null -ne $_.Icon }).Count
+                    $missing = New-Object 'System.Collections.Generic.List[string]'
+                    for ($i = 0; $i -lt $catalogCount; $i++) {
+                        if ($null -eq $script:SoftwareCatalog[$i].Icon) { $missing.Add(([string]$script:SoftwareCatalog[$i].Id)) }
                     }
-                    $newSource = $null
-                    foreach ($candidateId in $ids) {
-                        foreach ($extension in @('.png','.jpg','.jpeg')) {
-                            $localIcon = Join-Path $script:IconDir ($candidateId + $extension)
-                            if (Test-Path -LiteralPath $localIcon -PathType Leaf) {
-                                $uiIconAttempts++
-                                $iconInfo = Get-Item -LiteralPath $localIcon -ErrorAction SilentlyContinue
-                                if ($null -ne $iconInfo -and ($null -eq $script:SoftwareCatalog[$i].Icon -or $iconInfo.LastWriteTimeUtc -ge $script:IconRefreshStartedUtc)) {
-                                    $newSource = Get-AMRIconImageSource -Path $localIcon
-                                }
-                                if ($null -ne $newSource) { break }
-                            }
-                        }
-                        if ($null -ne $newSource) { break }
+                    if ([string]$script:IconRefreshWorkerResult -like 'DownloadFailed:*' -or [string]$script:IconRefreshWorkerResult -like 'IconEngineError:*') { Write-AMRLog ("Paced icon matching finished with archive failure. WorkerResult=$($script:IconRefreshWorkerResult); IconsLoaded=$visibleIconCount/$catalogCount; Missing=$($missing.Count)") WARNING Software } else { Write-AMRLog ("Paced icon matching finished. WorkerResult=$($script:IconRefreshWorkerResult); IconsLoaded=$visibleIconCount/$catalogCount; Missing=$($missing.Count)") SUCCESS Software }
+                    if ($missing.Count -gt 0) {
+                        Write-AMRLog ("Apps missing icons (first 20): " + (($missing | Select-Object -First 20) -join ', ')) WARNING Software
                     }
-                    if ($null -ne $newSource) {
-                        $script:SoftwareCatalog[$i].Icon = $newSource
-                        if ($script:InstalledAppsInventory -and $script:InstalledAppsInventory.Count -gt 0) {
-                            foreach ($installedRecord in $script:InstalledAppsInventory) {
-                                if ($installedRecord.IsCatalogApp -and [string]$installedRecord.CatalogId -ieq [string]$rawApp.Id) { $installedRecord.Icon = $newSource }
-                            }
-                            if ($script:InstalledAppsView) { try { $script:InstalledAppsView.Refresh() } catch {} }
-                        }
-                        $finalUpdated = $true
-                    } elseif ($null -eq $script:SoftwareCatalog[$i].Icon) {
-                        $uiIconFailures.Add(("{0} [{1}]" -f $rawApp.Name,$rawApp.Id))
-                    }
+                    if ($timer) { $timer.Stop() }
+                    try { if ($script:IconRefreshPowerShell) { $script:IconRefreshPowerShell.Dispose() } } catch {}
+                    try { if ($script:IconRefreshRunspace) { $script:IconRefreshRunspace.Close(); $script:IconRefreshRunspace.Dispose() } } catch {}
+                    $script:IconRefreshPowerShell = $null
+                    $script:IconRefreshRunspace = $null
+                    $script:IconRefreshAsync = $null
+                    $script:IconRefreshTimer = $null
+                    $script:IconRefreshReadyQueue = $null
+                    $script:IconRefreshStarted = $false
                 }
-                if ($finalUpdated) { try { (C 'SoftwareGrid').Items.Refresh() } catch {} }
-                $visibleIconCount = @($script:SoftwareCatalog | Where-Object { $null -ne $_.Icon }).Count
-                Write-AMRLog ("WPF image loading completed. FileAttempts={0}; Updated={1}; TotalLoaded={2}/{3}; Failed={4}" -f $uiIconAttempts,$finalUpdated,$visibleIconCount,$script:SoftwareCatalog.Count,$uiIconFailures.Count) INFO Software
-                if ($uiIconFailures.Count -gt 0) {
-                    Write-AMRLog ("WPF icons not displayed for first {0} apps: {1}" -f [Math]::Min(40,$uiIconFailures.Count),(($uiIconFailures | Select-Object -First 40) -join '; ')) WARNING Software
-                }
-                $script:IconRefreshStarted = $true
             } catch {
-                $script:IconRefreshStarted = $false
-                $record = $_
-                Write-AMRLog ("Icon refresh monitor failed. Error={0}; Type={1}; Line={2}; Command={3}" -f $record.Exception.Message,$record.Exception.GetType().FullName,$record.InvocationInfo.ScriptLineNumber,$record.InvocationInfo.Line) ERROR Software
-            } finally {
-                try { if ($script:IconRefreshTimer) { $script:IconRefreshTimer.Stop() } } catch {}
+                Write-AMRLog ("Icon refresh failed: $($_.Exception.Message)") ERROR Software
+                if ($timer) { try { $timer.Stop() } catch {} }
                 try { if ($script:IconRefreshPowerShell) { $script:IconRefreshPowerShell.Dispose() } } catch {}
                 try { if ($script:IconRefreshRunspace) { $script:IconRefreshRunspace.Close(); $script:IconRefreshRunspace.Dispose() } } catch {}
                 $script:IconRefreshPowerShell = $null
                 $script:IconRefreshRunspace = $null
                 $script:IconRefreshAsync = $null
                 $script:IconRefreshTimer = $null
+                $script:IconRefreshReadyQueue = $null
+                $script:IconRefreshStarted = $false
             }
-        })
+        }.GetNewClosure())
         $script:IconRefreshTimer.Start()
-        Write-AMRLog 'Software icon refresh started in an isolated background runspace; the main window remains independent.' INFO Software
     } catch {
-        $script:IconRefreshStarted = $false
-        $record = $_
-        Write-AMRLog ("Could not start the background icon worker. Error={0}; Type={1}; Line={2}; Command={3}" -f $record.Exception.Message,$record.Exception.GetType().FullName,$record.InvocationInfo.ScriptLineNumber,$record.InvocationInfo.Line) ERROR Software
+        Write-AMRLog ("Could not start icon worker: $($_.Exception.Message)") ERROR Software
         try { if ($script:IconRefreshPowerShell) { $script:IconRefreshPowerShell.Dispose() } } catch {}
         try { if ($script:IconRefreshRunspace) { $script:IconRefreshRunspace.Close(); $script:IconRefreshRunspace.Dispose() } } catch {}
         $script:IconRefreshPowerShell = $null
         $script:IconRefreshRunspace = $null
+        $script:IconRefreshStarted = $false
     }
 }
 
-# Start from Loaded; ContentRendered is a guarded fallback for hosts with unusual WPF event timing.
-# Start-AMRBackgroundIconRefresh is idempotent, so the worker can only start once.
 $script:Window.Add_Loaded({ Start-AMRBackgroundIconRefresh })
 $script:Window.Add_ContentRendered({ Start-AMRBackgroundIconRefresh })
 
