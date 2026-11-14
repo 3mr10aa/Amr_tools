@@ -1,4 +1,3 @@
-
 name: Export AMR Source
 
 on:
@@ -15,15 +14,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Package AMR source
+      - name: Package AMR source and icons
         run: |
           mkdir -p export
           cp Amr_utility.ps1 export/Amr_utility.ps1
+          cp Icons.zip export/Icons.zip
 
-      - name: Upload source artifact
+      - name: Upload source and icons artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AMR-Source-ReadOnly
-          path: export/Amr_utility.ps1
+          name: AMR-Source-and-Icons-ReadOnly
+          path: export/
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
