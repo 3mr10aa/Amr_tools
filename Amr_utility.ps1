@@ -10896,16 +10896,6 @@ function Add-AMRSoftwareGridPage {
     } finally {
         $script:SoftwareGridPageBusy = $false
     }
-
-    # Newly appended cards may be realized after their icons were already
-    # assigned by the background worker. Refresh their visual Image controls
-    # after WPF has completed the layout/container-generation pass.
-    try {
-        $null = $script:Window.Dispatcher.BeginInvoke(
-            [Action]{ Sync-AMRRealizedSoftwareIcons },
-            [System.Windows.Threading.DispatcherPriority]::ContextIdle
-        )
-    } catch {}
 }
 
 function Reset-AMRSoftwareGridPages {
@@ -10995,9 +10985,7 @@ function Reset-AMRSoftwareGridPages {
         $script:SoftwareGridPageIndex++
     }
     try {
-        # Loaded priority can run before the first card templates are realized.
-        # ContextIdle runs after WPF has generated the initial visible containers.
-        $null = $script:Window.Dispatcher.BeginInvoke([Action]{ Sync-AMRRealizedSoftwareIcons }, [System.Windows.Threading.DispatcherPriority]::ContextIdle)
+        $null = $script:Window.Dispatcher.BeginInvoke([Action]{ Sync-AMRRealizedSoftwareIcons }, [System.Windows.Threading.DispatcherPriority]::Loaded)
         (C 'SoftwareScrollViewer').ScrollToTop()
     } catch {}
 }
