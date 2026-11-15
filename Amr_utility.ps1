@@ -1,5 +1,5 @@
 <#
-Amr | AMR Driver Center - Phase 6.10.29 Global Soft Outlined Scrollbars
+Amr | AMR Windows Utility - Cleanup Workspace & Background Scan Stability
 Windows 10/11 | Windows PowerShell 5.1 | WPF | Administrator
 Developer: عمرو أحمد عبد الفتاح | Phone: 01014716301 | Email: 3mr10aa@gmail.com
 #>
@@ -37,6 +37,147 @@ if (-not (Test-AMRAdmin)) {
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml
 Add-Type -AssemblyName System.Windows.Forms
 
+# Durable log writer: pure .NET ThreadPool timer, no PowerShell callback and no WPF dependency.
+if (-not ('AMRLogDiskWriter' -as [type])) {
+    Add-Type -Language CSharp -TypeDefinition @'
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.IO;
+using System.Text;
+using System.Threading;
+public static class AMRLogDiskWriter {
+    private static readonly ConcurrentQueue<string> Queue = new ConcurrentQueue<string>();
+    private static Timer WriterTimer;
+    private static string MainPath = String.Empty;
+    private static int Writing = 0;
+    public static void Configure(string path) {
+        if (!String.IsNullOrWhiteSpace(path)) MainPath = path;
+        if (WriterTimer == null) WriterTimer = new Timer(FlushCallback, null, 250, 250);
+    }
+    public static void Enqueue(string line) {
+        if (line == null) return;
+        Queue.Enqueue(line);
+    }
+    private static void FlushCallback(object state) { Flush(false); }
+    public static void FlushNow() { Flush(true); }
+    private static void Flush(bool all) {
+        if (Interlocked.Exchange(ref Writing, 1) != 0) return;
+        try {
+            List<string> batch = new List<string>();
+            string item;
+            int limit = all ? Int32.MaxValue : 500;
+            while (batch.Count < limit && Queue.TryDequeue(out item)) batch.Add(item);
+            if (batch.Count == 0) return;
+            try {
+                string path = MainPath;
+                if (String.IsNullOrWhiteSpace(path)) throw new InvalidOperationException("Main log path is not configured.");
+                string directory = Path.GetDirectoryName(path);
+                if (!String.IsNullOrWhiteSpace(directory) && !Directory.Exists(directory)) Directory.CreateDirectory(directory);
+                File.AppendAllText(path, String.Join(Environment.NewLine, batch.ToArray()) + Environment.NewLine, new UTF8Encoding(false));
+            } catch {
+                for (int i = batch.Count - 1; i >= 0; i--) Queue.Enqueue(batch[i]);
+                try {
+                    string fallbackDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "AMR-Utility", "Logs");
+                    if (!Directory.Exists(fallbackDir)) Directory.CreateDirectory(fallbackDir);
+                    string fallback = Path.Combine(fallbackDir, "AMR_LogWriter_Fallback.log");
+                    File.AppendAllText(fallback, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + " [ERROR] [LogWriter] Main log append failed; queued entries retained for retry." + Environment.NewLine, new UTF8Encoding(false));
+                } catch { }
+            }
+        } finally { Volatile.Write(ref Writing, 0); }
+    }
+    public static void Shutdown() {
+        try { if (WriterTimer != null) { WriterTimer.Dispose(); WriterTimer = null; } } catch { }
+        Flush(true);
+    }
+}
+'@
+}
+
+# Filesystem inspection is isolated from the Cleanup runspace. The timeout covers
+# enumeration AND per-entry metadata calls (attributes, timestamps and lengths),
+# not just Directory.GetFileSystemEntries(). A timed-out native call cannot be
+# forcefully aborted by .NET, so the helper bounds abandoned inspection threads.
+if (-not ('AMRCleanupDirectoryEnumeratorV10' -as [type])) {
+    Add-Type -Language CSharp -TypeDefinition @'
+using System;
+using System.IO;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+public sealed class AMRCleanupEntryInfoV10 {
+    public string Path;
+    public bool IsDirectory;
+    public bool IsReparsePoint;
+    public bool IsEligible;
+    public long Length;
+    public string ErrorMessage;
+}
+public static class AMRCleanupDirectoryEnumeratorV10 {
+    private static int ActiveInspections = 0;
+    private const int MaxAbandonedOrActiveInspections = 2;
+    public static bool TryInspectDirectory(string path, int timeoutMs, DateTime ageCutoff, out AMRCleanupEntryInfoV10[] entries, out string error) {
+        entries = null; error = null;
+        int active = Interlocked.Increment(ref ActiveInspections);
+        if (active > MaxAbandonedOrActiveInspections) {
+            Interlocked.Decrement(ref ActiveInspections);
+            error = "Filesystem inspection concurrency limit reached because earlier native filesystem calls have not returned.";
+            return false;
+        }
+        Task<AMRCleanupEntryInfoV10[]> task = null;
+        bool scheduled = false;
+        try {
+            task = Task.Factory.StartNew<AMRCleanupEntryInfoV10[]>(delegate {
+                try {
+                    string[] paths = Directory.GetFileSystemEntries(path);
+                    List<AMRCleanupEntryInfoV10> result = new List<AMRCleanupEntryInfoV10>(paths.Length);
+                    foreach (string entryPath in paths) {
+                        AMRCleanupEntryInfoV10 item = new AMRCleanupEntryInfoV10();
+                        item.Path = entryPath;
+                        try {
+                            FileAttributes attributes = File.GetAttributes(entryPath);
+                            item.IsDirectory = (attributes & FileAttributes.Directory) != 0;
+                            item.IsReparsePoint = (attributes & FileAttributes.ReparsePoint) != 0;
+                            item.IsEligible = true;
+                            if (!item.IsDirectory && !item.IsReparsePoint) {
+                                FileInfo info = new FileInfo(entryPath);
+                                DateTime modified = info.LastWriteTime;
+                                item.Length = info.Length;
+                                if (ageCutoff != DateTime.MinValue && modified >= ageCutoff) item.IsEligible = false;
+                            }
+                        } catch (Exception entryError) {
+                            item.ErrorMessage = entryError.GetType().FullName + ": " + entryError.Message;
+                        }
+                        result.Add(item);
+                    }
+                    return result.ToArray();
+                } finally {
+                    Interlocked.Decrement(ref ActiveInspections);
+                }
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+            scheduled = true;
+            int waitMs = Math.Max(1000, timeoutMs);
+            if (!task.Wait(waitMs)) {
+                error = "Filesystem inspection timed out after " + waitMs + " ms. The folder was skipped and the remaining categories will continue.";
+                return false;
+            }
+            entries = task.Result ?? new AMRCleanupEntryInfoV10[0];
+            return true;
+        } catch (AggregateException ex) {
+            if (!scheduled) Interlocked.Decrement(ref ActiveInspections);
+            Exception cause = ex.Flatten().InnerExceptions.Count > 0 ? ex.Flatten().InnerExceptions[0] : ex;
+            error = cause.GetType().FullName + ": " + cause.Message;
+            return false;
+        } catch (Exception ex) {
+            if (!scheduled) Interlocked.Decrement(ref ActiveInspections);
+            error = ex.GetType().FullName + ": " + ex.Message;
+            return false;
+        }
+    }
+}
+'@
+}
+
 # --- 2. Environment & Folders Setup ---
 $script:AppRoot     = Join-Path $env:ProgramData 'AMR-Utility'
 $script:BackupDir   = Join-Path $script:AppRoot 'Backups'
@@ -56,6 +197,7 @@ $script:BundledIconArchivePath = if (-not [string]::IsNullOrWhiteSpace($script:S
 
 New-Item -ItemType Directory -Force -Path $script:BackupDir,$script:LogDir,$script:ExportDir,$script:IconDir,$script:DownloadDir | Out-Null
 $script:LogFile = Join-Path $script:LogDir ("AMR_{0}.log" -f (Get-Date -Format 'yyyyMMdd'))
+try { [AMRLogDiskWriter]::Configure([string]$script:LogFile) } catch {}
 $script:DiagnosticFile = Join-Path $script:LogDir ("AMR_Diagnostics_{0}.jsonl" -f (Get-Date -Format 'yyyyMMdd'))
 $script:DriverHistoryFile = Join-Path $script:LogDir 'DriverCenterHistory.csv'
 $script:DriverDiagnosticFile = Join-Path $script:LogDir ("AMR_DriverDiagnostics_{0}.jsonl" -f (Get-Date -Format 'yyyyMMdd'))
@@ -228,6 +370,15 @@ $script:LogControls = @{
     'Backup'    = $null
 }
 
+
+# Central log pipeline: producers enqueue quickly; the WPF dispatcher renders
+# bounded batches instead of synchronously updating TextBoxes for every event.
+$script:LogUIQueue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
+# Disk persistence is handled by the isolated .NET writer, independent of WPF.
+$script:LogUIFlushTimer = $null
+$script:LogUIBatchLimit = 120
+$script:LogUIRetentionChars = 250000
+
 # --- PHASE 7: CENTRAL DIAGNOSTIC / EXCEPTION CAPTURE ---
 function Write-AMRDiagnostic {
     [CmdletBinding()]
@@ -296,7 +447,15 @@ function Register-AMRExceptionHandlers {
         $script:DispatcherUnhandledHandler = [System.Windows.Threading.DispatcherUnhandledExceptionEventHandler]{
             param($sender, $eventArgs)
             try {
-                Write-AMRDiagnostic -Severity 'ERROR' -Area 'WPF' -Operation 'DispatcherUnhandledException' -Message 'An unhandled WPF dispatcher exception was captured.' -ErrorRecord $eventArgs.Exception
+                $contextMessage = 'An unhandled WPF dispatcher exception was captured.'
+                try {
+                    if ($script:AMRCleanupScanState -and $script:AMRCleanupScanState.Current) {
+                        $scanJob = $script:AMRCleanupScanState.Current
+                        $contextMessage += (' CleanupScan=Running; Started={0:o}; LastProgress={1:o}.' -f $scanJob.StartedAt,$scanJob.LastProgressAt)
+                    } else { $contextMessage += ' CleanupScan=Idle.' }
+                    $contextMessage += (' LogPumpEnabled={0}.' -f [bool]($script:LogUIFlushTimer -and $script:LogUIFlushTimer.IsEnabled))
+                } catch {}
+                Write-AMRDiagnostic -Severity 'ERROR' -Area 'WPF' -Operation 'DispatcherUnhandledException' -Message $contextMessage -ErrorRecord $eventArgs.Exception
                 if ($script:Status) { $script:Status.Text = 'An unexpected interface error was logged. Review Diagnostics.' }
                 # Keep the utility responsive after recording the failure; the affected action may not have completed.
                 $eventArgs.Handled = $true
@@ -344,40 +503,134 @@ function Write-AMRLog {
     )
     $time = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
     $logLine = "[$time] [$Level] [$Area] $Message"
-    
-    try { Add-Content -LiteralPath $script:LogFile -Value $logLine -Encoding UTF8 -ErrorAction Stop } catch { Write-AMRDiagnostic -Severity 'ERROR' -Area 'Logging' -Operation 'AppendMainLog' -Message 'Could not append to the main application log.' -ErrorRecord $_ -Target $script:LogFile }
 
-    # Bridge legacy Driver Center events that historically landed in Overview into
-    # the dedicated structured stream; preserve the original Main Log and UI routing.
+    # Bridge legacy Driver Center events into its structured diagnostic stream.
     if ($Area -eq 'Overview' -and $Message -match '(?i)driver|catalog|pnputil|rollback|restore point|device scan|oem bundle') {
         try {
             $driverSeverity = switch ($Level) { 'SUCCESS' {'SUCCESS'} 'WARNING' {'WARNING'} 'ERROR' {'ERROR'} 'DEBUG' {'DEBUG'} default {'INFO'} }
             Write-AMRDriverDiagnostic -Severity $driverSeverity -Operation 'LegacyDriverEvent' -Stage 'LegacyLogBridge' -Message $Message -Source 'Write-AMRLog' -Result $Level
         } catch {}
     }
-    
-    if ($script:Window) {
-        try {
-            $script:Window.Dispatcher.Invoke([Action]{
-                if ($script:LogControls['All']) {
-                    $script:LogControls['All'].AppendText("$logLine`r`n")
-                    $script:LogControls['All'].ScrollToEnd()
-                }
-                if ($script:LogControls[$Area]) {
-                    $script:LogControls[$Area].AppendText("$logLine`r`n")
-                    $script:LogControls[$Area].ScrollToEnd()
-                }
-            })
-        } catch { Write-AMRDiagnostic -Severity 'WARNING' -Area 'Logging' -Operation 'UpdateLogConsole' -Message 'Could not update the WPF log console.' -ErrorRecord $_ }
+
+    # Two independent queues: durable file logging must never depend on a live WPF
+    # DispatcherTimer, and UI rendering must never perform disk I/O.
+    try { [AMRLogDiskWriter]::Enqueue([string]$logLine) } catch {
+        Write-AMRDiagnostic -Severity 'ERROR' -Area 'Logging' -Operation 'QueueMainLog' -Message 'Could not queue an application log entry for disk persistence.' -ErrorRecord $_ -Target $script:LogFile
     }
-    
-    if ($script:Status -and $script:Window) {
-        try {
-            $script:Window.Dispatcher.Invoke([Action]{
-                $script:Status.Text = "[$Area] $Message"
-            })
-        } catch { Write-AMRDiagnostic -Severity 'WARNING' -Area 'Logging' -Operation 'UpdateStatusBar' -Message 'Could not update the WPF status bar.' -ErrorRecord $_ }
+    try {
+        [void]$script:LogUIQueue.Enqueue([pscustomobject]@{
+            Line = $logLine
+            Area = [string]$Area
+            Level = [string]$Level
+            Message = [string]$Message
+        })
+    } catch {
+        # UI logging is best-effort; the independent disk queue remains authoritative.
+        Write-AMRDiagnostic -Severity 'WARNING' -Area 'Logging' -Operation 'QueueLogUI' -Message 'Could not queue a log entry for UI display.' -ErrorRecord $_
     }
+}
+
+
+function Trim-AMRLogTextBox {
+    param(
+        [Parameter(Mandatory=$true)]$Control,
+        [int]$MaxChars = 250000
+    )
+    if (-not $Control -or $Control.Text.Length -le $MaxChars) { return }
+    $removeCount = $Control.Text.Length - $MaxChars
+    $nextNewLine = $Control.Text.IndexOf("`n", $removeCount)
+    if ($nextNewLine -ge 0 -and ($nextNewLine + 1) -lt $Control.Text.Length) {
+        $Control.Select(0, $nextNewLine + 1)
+        $Control.SelectedText = ''
+    } else {
+        $Control.Clear()
+    }
+}
+
+function Start-AMRLogUIPump {
+    try { [AMRLogDiskWriter]::Configure([string]$script:LogFile) } catch {}
+    if ($script:LogUIFlushTimer) {
+        try { $script:LogUIFlushTimer.Stop() } catch {}
+        $script:LogUIFlushTimer = $null
+    }
+
+    $script:LogUIFlushTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:LogUIFlushTimer.Interval = [TimeSpan]::FromMilliseconds(150)
+    $script:LogUIFlushTimer.Add_Tick({
+      try {
+        if ($null -eq $script:LogUIQueue) { return }
+        $batch = New-Object 'System.Collections.Generic.List[object]'
+        $item = $null
+        $limit = [Math]::Max(1, [int]$script:LogUIBatchLimit)
+        while ($batch.Count -lt $limit -and $script:LogUIQueue.TryDequeue([ref]$item)) {
+            if ($null -ne $item) { [void]$batch.Add($item) }
+            $item = $null
+        }
+        if ($batch.Count -eq 0) { return }
+
+        $byArea = @{}
+        $allLines = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($entry in $batch) {
+            if ([string]$entry.Level -eq 'DEBUG') { continue }
+            $line = [string]$entry.Line
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            [void]$allLines.Add($line)
+            $areaKey = [string]$entry.Area
+            if (-not $byArea.ContainsKey($areaKey)) { $byArea[$areaKey] = New-Object 'System.Collections.Generic.List[string]' }
+            [void]$byArea[$areaKey].Add($line)
+        }
+        if ($allLines.Count -eq 0) { return }
+
+        # Each pane is isolated: a failure in one TextBox must not discard the
+        # batch or prevent the other panes from receiving their events.
+        $allControl = $script:LogControls['All']
+        if ($allControl) {
+            try {
+                $allControl.AppendText(($allLines -join "`r`n") + "`r`n")
+                Trim-AMRLogTextBox -Control $allControl -MaxChars $script:LogUIRetentionChars
+                $allControl.ScrollToEnd()
+            } catch {
+                try {
+                    $fallback = '[Log UI warning] All Logs pane could not render a batch: ' + $_.Exception.Message
+                    $allControl.AppendText($fallback + "`r`n")
+                } catch {}
+            }
+        }
+        foreach ($areaKey in $byArea.Keys) {
+            $control = $script:LogControls[$areaKey]
+            if (-not $control) { continue }
+            try {
+                $control.AppendText(($byArea[$areaKey] -join "`r`n") + "`r`n")
+                Trim-AMRLogTextBox -Control $control -MaxChars $script:LogUIRetentionChars
+                $control.ScrollToEnd()
+            } catch {
+                # Preserve the failure in the All pane if an individual category pane breaks.
+                try {
+                    $allControl = $script:LogControls['All']
+                    if ($allControl) { $allControl.AppendText(('[Log UI warning] {0} pane: {1}' -f $areaKey,$_.Exception.Message) + "`r`n") }
+                } catch {}
+            }
+        }
+        $latest = $batch[$batch.Count - 1]
+        if ($script:Status -and $latest) {
+            try { $script:Status.Text = "[$($latest.Area)] $($latest.Message)" } catch {}
+        }
+      } catch {
+        $uiLogError = $_
+        try {
+            $fallbackPath = Join-Path $env:ProgramData 'AMR-Utility\Logs\AMR_LogUI_Fallback.log'
+            $fallbackDir = Split-Path -Parent $fallbackPath
+            if (-not [System.IO.Directory]::Exists($fallbackDir)) { [void][System.IO.Directory]::CreateDirectory($fallbackDir) }
+            $fallbackLine = ('[{0:yyyy-MM-dd HH:mm:ss.fff}] [ERROR] [LogUIPump] {1} | {2}' -f (Get-Date),$uiLogError.Exception.Message,$uiLogError.ScriptStackTrace)
+            [System.IO.File]::AppendAllText($fallbackPath,$fallbackLine + [Environment]::NewLine,[System.Text.Encoding]::UTF8)
+        } catch {}
+        try {
+            $allControl = $script:LogControls['All']
+            if ($allControl) { $allControl.AppendText(('[Log UI ERROR] ' + $uiLogError.Exception.Message) + "`r`n") }
+        } catch {}
+      }
+    }.GetNewClosure())
+    $script:LogUIFlushTimer.Start()
 }
 
 # --- Driver Center: structured, persistent diagnostic event stream ---
@@ -560,6 +813,84 @@ function Show-AMRMessage {
         [System.Windows.MessageBoxImage]$Icon=[System.Windows.MessageBoxImage]::Information
     )
     return [System.Windows.MessageBox]::Show($script:Window, $Message, $Title, $Buttons, $Icon)
+}
+
+# Branded, concise result dialog shared by cleanup scans and cleanup actions.
+function Show-AMRCleanupSummary {
+    param(
+        [string]$Title='AMR | Cleanup Summary',
+        [string]$Status='Completed successfully',
+        [string]$Details='',
+        [string[]]$Lines=@(),
+        [ValidateSet('Success','Info','Warning','Error')][string]$Kind='Success'
+    )
+    try {
+        $accentHex = switch ($Kind) {
+            'Success' { '#8BDCC5' }
+            'Warning' { '#D9BD8B' }
+            'Error'   { '#FCA5A5' }
+            default   { '#9CCBFA' }
+        }
+        $brush = New-Object System.Windows.Media.BrushConverter
+        $window = New-Object System.Windows.Window
+        $window.Title = $Title
+        $window.Owner = $script:Window
+        $window.WindowStartupLocation = 'CenterOwner'
+        $window.SizeToContent = 'WidthAndHeight'
+        $window.MinWidth = 390
+        $window.MaxWidth = 560
+        $window.ResizeMode = 'NoResize'
+        $window.ShowInTaskbar = $false
+        $window.Background = $brush.ConvertFromString('#111C2B')
+        $window.Foreground = $brush.ConvertFromString('#E7EAF0')
+        $window.FontFamily = (New-Object System.Windows.Media.FontFamily -ArgumentList 'Segoe UI')
+        $outer = New-Object System.Windows.Controls.Border
+        $outer.Background = $brush.ConvertFromString('#172536')
+        $outer.BorderBrush = $brush.ConvertFromString('#B89A62')
+        $outer.BorderThickness = (New-Object System.Windows.Thickness -ArgumentList 1)
+        $outer.CornerRadius = (New-Object System.Windows.CornerRadius -ArgumentList 12)
+        $outer.Padding = [System.Windows.Thickness]::new(20)
+        $panel = New-Object System.Windows.Controls.StackPanel
+        $eyebrow = New-Object System.Windows.Controls.TextBlock
+        $eyebrow.Text = 'AMR  /  CLEANUP REPORT'
+        $eyebrow.FontSize = 10; $eyebrow.FontWeight = [System.Windows.FontWeights]::SemiBold
+        $eyebrow.Foreground = $brush.ConvertFromString('#B89A62')
+        $eyebrow.Margin = [System.Windows.Thickness]::new(0,0,0,8)
+        $heading = New-Object System.Windows.Controls.TextBlock
+        $heading.Text = $Status; $heading.FontSize = 18; $heading.FontWeight = [System.Windows.FontWeights]::Bold
+        $heading.Foreground = $brush.ConvertFromString($accentHex)
+        $heading.TextWrapping = 'Wrap'; $heading.Margin = [System.Windows.Thickness]::new(0,0,0,7)
+        $body = New-Object System.Windows.Controls.TextBlock
+        $body.Text = $Details; $body.FontSize = 12; $body.Foreground = $brush.ConvertFromString('#D6DEE9')
+        $body.TextWrapping = 'Wrap'; $body.Margin = [System.Windows.Thickness]::new(0,0,0,10)
+        $panel.Children.Add($eyebrow) | Out-Null
+        $panel.Children.Add($heading) | Out-Null
+        if (-not [string]::IsNullOrWhiteSpace($Details)) { $panel.Children.Add($body) | Out-Null }
+        foreach ($line in @($Lines | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })) {
+            $item = New-Object System.Windows.Controls.TextBlock
+            $item.Text = [string]$line; $item.FontSize = 11; $item.Foreground = $brush.ConvertFromString('#E7EAF0')
+            $item.TextWrapping = 'Wrap'; $item.Margin = [System.Windows.Thickness]::new(0,2,0,4)
+            $panel.Children.Add($item) | Out-Null
+        }
+        $button = New-Object System.Windows.Controls.Button
+        $button.Content = 'Close'; $button.Width = 88; $button.Height = 31
+        $button.HorizontalAlignment = 'Right'; $button.Margin = [System.Windows.Thickness]::new(0,14,0,0)
+        $button.Background = $brush.ConvertFromString('#263B36'); $button.Foreground = $brush.ConvertFromString('#A7F3D0')
+        $button.BorderBrush = $brush.ConvertFromString('#547B6E')
+        $button.Add_Click({ $window.Close() }.GetNewClosure())
+        $panel.Children.Add($button) | Out-Null
+        $scroll = New-Object System.Windows.Controls.ScrollViewer
+        $scroll.VerticalScrollBarVisibility = 'Auto'
+        $scroll.HorizontalScrollBarVisibility = 'Disabled'
+        $scroll.MaxHeight = 520
+        $scroll.Content = $panel
+        $outer.Child = $scroll; $window.Content = $outer
+        [void]$window.ShowDialog()
+    } catch {
+        Write-AMRLog ("Branded cleanup summary fallback: {0}" -f $_.Exception.Message) WARNING Cleanup
+        $fallback = @($Status,$Details) + @($Lines)
+        [void][System.Windows.MessageBox]::Show($script:Window,($fallback -join "`n"),$Title,[System.Windows.MessageBoxButton]::OK,[System.Windows.MessageBoxImage]::Information)
+    }
 }
 
 # --- TWEAK AUDIT ENGINE ---
@@ -2428,6 +2759,139 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
    </Setter>
   </Style>
 
+  <!-- Main navigation + one shared contextual search field. -->
+  <Style x:Key="MainNavigationTabControlStyle" TargetType="TabControl"
+         BasedOn="{StaticResource {x:Type TabControl}}">
+   <Setter Property="Template">
+    <Setter.Value>
+     <ControlTemplate TargetType="TabControl">
+      <Grid ClipToBounds="False" SnapsToDevicePixels="True">
+       <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="*"/>
+       </Grid.RowDefinitions>
+       <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="330"/>
+       </Grid.ColumnDefinitions>
+       <UniformGrid Grid.Row="0" Grid.Column="0" Rows="1" Columns="6"
+                    IsItemsHost="True" Margin="0,0,10,10" VerticalAlignment="Center"
+                    ClipToBounds="False"/>
+       <Border Grid.Row="0" Grid.Column="1" Margin="4,0,0,10"
+               Background="#101D30" BorderBrush="#2874C7" BorderThickness="1.3"
+               CornerRadius="11" Padding="9,6" VerticalAlignment="Center">
+        <StackPanel>
+         <Grid Height="36">
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+          <TextBox x:Name="PART_SmartSearchBox" Grid.Column="0" BorderThickness="0"
+                   Background="Transparent" Foreground="#F1F5F9" CaretBrush="#38BDF8"
+                   FontSize="14" VerticalContentAlignment="Center" Padding="3,0"
+                   ToolTip="Search within the current section" Tag="Search in current section..."
+                   Text=""/>
+          <TextBlock Grid.Column="0" Text="{Binding Tag, ElementName=PART_SmartSearchBox}"
+                     Foreground="#8194AA" FontSize="13" VerticalAlignment="Center"
+                     Margin="4,0,0,0" IsHitTestVisible="False">
+           <TextBlock.Style>
+            <Style TargetType="TextBlock">
+             <Setter Property="Visibility" Value="Collapsed"/>
+             <Style.Triggers>
+              <DataTrigger Binding="{Binding Text.Length, ElementName=PART_SmartSearchBox}" Value="0">
+               <Setter Property="Visibility" Value="Visible"/>
+              </DataTrigger>
+             </Style.Triggers>
+            </Style>
+           </TextBlock.Style>
+          </TextBlock>
+          <TextBlock Grid.Column="1" Text="⌕" Foreground="#38BDF8" FontSize="25"
+                     VerticalAlignment="Center" Margin="8,0,2,2" IsHitTestVisible="False"/>
+         </Grid>
+         <ComboBox x:Name="PART_SmartCategoryFilter" Height="30" Margin="0,5,0,0"
+                   Padding="9,3" FontSize="12" FontWeight="SemiBold" VerticalContentAlignment="Center"
+                   Background="#172536" Foreground="#E7EAF0" BorderBrush="#52647A"
+                   BorderThickness="1" Visibility="Collapsed"
+                   ToolTip="Filter the current section by category">
+          <ComboBox.Resources>
+           <!-- Refined champagne-on-navy selector: dark closed face, legible text, restrained hover and hairline separators. -->
+           <SolidColorBrush x:Key="AMRCategoryFaceBrush" Color="#172536"/>
+           <SolidColorBrush x:Key="AMRCategoryPopupBrush" Color="#101C2B"/>
+           <SolidColorBrush x:Key="AMRCategoryTextBrush" Color="#E7EAF0"/>
+           <SolidColorBrush x:Key="AMRCategoryAccentBrush" Color="#B89A62"/>
+           <Style TargetType="{x:Type ComboBoxItem}">
+            <Setter Property="Foreground" Value="#E7EAF0"/>
+            <Setter Property="Background" Value="#101C2B"/>
+            <Setter Property="Padding" Value="10,7"/>
+            <Setter Property="Margin" Value="0,0,0,1"/>
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="BorderThickness" Value="0,0,0,1"/>
+            <Setter Property="BorderBrush" Value="#26364A"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Style.Triggers>
+             <Trigger Property="IsHighlighted" Value="True">
+              <Setter Property="Background" Value="#26364A"/>
+              <Setter Property="Foreground" Value="#E8D7B5"/>
+              <Setter Property="BorderBrush" Value="#34465B"/>
+             </Trigger>
+             <Trigger Property="IsSelected" Value="True">
+              <Setter Property="Background" Value="#29384A"/>
+              <Setter Property="Foreground" Value="#D9BD8B"/>
+              <Setter Property="BorderBrush" Value="#B89A62"/>
+             </Trigger>
+             <Trigger Property="IsEnabled" Value="False">
+              <Setter Property="Foreground" Value="#778496"/>
+             </Trigger>
+            </Style.Triggers>
+           </Style>
+           <Style TargetType="{x:Type ComboBox}">
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled"/>
+            <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
+            <Setter Property="Template">
+             <Setter.Value>
+              <ControlTemplate TargetType="{x:Type ComboBox}">
+               <Grid>
+                <ToggleButton x:Name="CategoryToggle" Focusable="False" ClickMode="Press" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                 <ToggleButton.Template>
+                  <ControlTemplate TargetType="{x:Type ToggleButton}">
+                   <Border x:Name="Face" Background="#172536" BorderBrush="#52647A" BorderThickness="1" CornerRadius="6" Padding="9,4">
+                    <Grid>
+                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="16"/></Grid.ColumnDefinitions>
+                     <ContentPresenter Grid.Column="0" Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" TextElement.Foreground="#E7EAF0" VerticalAlignment="Center" RecognizesAccessKey="True"/>
+                     <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="#B89A62" StrokeThickness="1.5" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Grid>
+                   </Border>
+                   <ControlTemplate.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Face" Property="BorderBrush" Value="#B89A62"/></Trigger>
+                    <Trigger Property="IsPressed" Value="True"><Setter TargetName="Face" Property="Background" Value="#202F42"/></Trigger>
+                   </ControlTemplate.Triggers>
+                  </ControlTemplate>
+                 </ToggleButton.Template>
+                </ToggleButton>
+                <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+                 <Border Background="#101C2B" BorderBrush="#52647A" BorderThickness="1" CornerRadius="7" Padding="3" SnapsToDevicePixels="True">
+                  <ScrollViewer MaxHeight="300" CanContentScroll="True"><ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/></ScrollViewer>
+                 </Border>
+                </Popup>
+               </Grid>
+              </ControlTemplate>
+             </Setter.Value>
+            </Setter>
+           </Style>
+          </ComboBox.Resources>
+         </ComboBox>
+        </StackPanel>
+       </Border>
+       <Border Grid.Row="1" Grid.ColumnSpan="2" Background="{TemplateBinding Background}"
+               ClipToBounds="False">
+        <ContentPresenter ContentSource="SelectedContent" ClipToBounds="False"/>
+       </Border>
+      </Grid>
+     </ControlTemplate>
+    </Setter.Value>
+   </Setter>
+  </Style>
+
   <Style TargetType="TabItem">
    <Setter Property="Padding" Value="8,10"/>
    <Setter Property="Margin" Value="3,2"/>
@@ -2491,16 +2955,20 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
         <ContentPresenter ContentSource="SelectedContent" ClipToBounds="False"/>
        </Border>
        <Border Grid.Column="1" Background="#172435" BorderBrush="#344B68"
-               BorderThickness="1" CornerRadius="9" Padding="6"
-               Margin="4,7,6,10" Height="198" VerticalAlignment="Top"
+               BorderThickness="1" CornerRadius="9" Padding="10,8,6,8"
+               Margin="4,7,6,10" VerticalAlignment="Top" MaxHeight="560"
                ClipToBounds="False">
-        <ScrollViewer VerticalScrollBarVisibility="Auto"
-                      HorizontalScrollBarVisibility="Disabled"
-                      CanContentScroll="False" Focusable="False"
-                      ClipToBounds="False">
-         <StackPanel IsItemsHost="True" Orientation="Vertical" KeyboardNavigation.TabIndex="1"
-                     ClipToBounds="False"/>
-        </ScrollViewer>
+        <DockPanel LastChildFill="True">
+         <TextBlock DockPanel.Dock="Top" Text="{TemplateBinding Tag}" FontSize="11"
+                    FontWeight="Bold" Foreground="#8FB8E8" Margin="5,3,5,10"/>
+         <ScrollViewer VerticalScrollBarVisibility="Auto"
+                       HorizontalScrollBarVisibility="Disabled"
+                       CanContentScroll="False" Focusable="False"
+                       ClipToBounds="False">
+          <StackPanel IsItemsHost="True" Orientation="Vertical" KeyboardNavigation.TabIndex="1"
+                      ClipToBounds="False"/>
+         </ScrollViewer>
+        </DockPanel>
        </Border>
       </Grid>
      </ControlTemplate>
@@ -2508,14 +2976,15 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
    </Setter>
   </Style>
   <Style x:Key="OverviewSubTabItemStyle" TargetType="TabItem">
-   <Setter Property="Width" Value="138"/>
-   <Setter Property="Height" Value="48"/>
-   <Setter Property="MinHeight" Value="48"/>
-   <Setter Property="MaxHeight" Value="48"/>
+   <Setter Property="HorizontalAlignment" Value="Stretch"/>
+   <Setter Property="Width" Value="Auto"/>
+   <Setter Property="Height" Value="38"/>
+   <Setter Property="MinHeight" Value="38"/>
+   <Setter Property="MaxHeight" Value="38"/>
    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
    <Setter Property="VerticalContentAlignment" Value="Center"/>
-   <Setter Property="Padding" Value="8,0"/>
-   <Setter Property="Margin" Value="0,0,0,7"/>
+   <Setter Property="Padding" Value="7,6"/>
+   <Setter Property="Margin" Value="0,0,0,8"/>
    <Setter Property="Foreground" Value="#C9D8EA"/>
    <Setter Property="Background" Value="#26364B"/>
    <Setter Property="BorderThickness" Value="0"/>
@@ -2523,9 +2992,9 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
    <Setter Property="Template">
     <Setter.Value>
      <ControlTemplate TargetType="TabItem">
-      <Grid Height="48" MinHeight="48" ClipToBounds="False" SnapsToDevicePixels="True">
+      <Grid Height="38" MinHeight="38" ClipToBounds="False" SnapsToDevicePixels="True">
        <Border x:Name="OverviewSubTabTile"
-               Height="42" VerticalAlignment="Center"
+               Height="38" VerticalAlignment="Stretch"
                Background="{TemplateBinding Background}"
                BorderBrush="#3B526F" BorderThickness="1"
                CornerRadius="8" Padding="{TemplateBinding Padding}"
@@ -2637,154 +3106,70 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
   <TextBlock Name="WingetHeader" Visibility="Collapsed"/>
   <TextBlock Name="StatusText" Visibility="Collapsed"/>
   
-  <!-- Main navigation moved to the top; the decorative brand/status header is removed. -->
-  <TabControl Grid.Row="0" Margin="10,22,10,0">
+  <!-- Main navigation with persistent context-aware search at the right. -->
+  <TabControl Name="MainNavigationTabs" Grid.Row="0" Margin="10,10,10,0" Style="{StaticResource MainNavigationTabControlStyle}">
    
    <!-- 1. OVERVIEW -->
-   <TabItem Header="Overview">
-    <TabControl Name="OverviewSubTabs" Style="{StaticResource OverviewSubTabControlStyle}" TabStripPlacement="Right" ItemContainerStyle="{StaticResource OverviewSubTabItemStyle}" Background="#18181B" BorderThickness="0" Margin="0,0,0,0">
+   <TabItem Header="System">
+    <Grid Margin="0,0,0,0">
+    <TabControl Name="OverviewSubTabs" Tag="SYSTEM CENTER" Style="{StaticResource OverviewSubTabControlStyle}" TabStripPlacement="Right" ItemContainerStyle="{StaticResource OverviewSubTabItemStyle}" Background="#18181B" BorderThickness="0" Margin="0,0,0,0">
      <TabItem Header="System Overview" IsSelected="True">
-    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="10,0,10,20">
-     <StackPanel>
-      <Grid Margin="0,10,0,15">
-       <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="*"/>
-        <ColumnDefinition Width="Auto"/>
-       </Grid.ColumnDefinitions>
-       <StackPanel Grid.Column="0">
-        <TextBlock Text="SYSTEM OVERVIEW" FontSize="24" FontWeight="Bold" Foreground="#F8FAFC"/>
-        <TextBlock Text="Your device at a glance  •  Hardware, performance &amp; health" Foreground="#94A3B8" FontSize="12" TextWrapping="Wrap" Margin="0,5,8,0"/>
-       </StackPanel>
-       <StackPanel Grid.Column="1" VerticalAlignment="Center" HorizontalAlignment="Right">
-        <Button Name="RefreshOverviewBtn" Content="↻ Refresh" Background="#2563EB" Foreground="#FFFFFF" BorderBrush="#60A5FA" BorderThickness="1" Padding="18,9" FontSize="13" FontWeight="SemiBold" Cursor="Hand"/>
-        <TextBlock Name="ovLastRefresh" Text="Updated: --" Foreground="#94A3B8" FontSize="10" HorizontalAlignment="Right" Margin="0,5,2,0"/>
-       </StackPanel>
-      </Grid>
-      <WrapPanel Orientation="Horizontal">
-       <Border Background="#1B2432" BorderBrush="#334155" BorderThickness="1" CornerRadius="14" Padding="18" Margin="8" Width="390">
-        <StackPanel>
-         <TextBlock Text="System Information" FontSize="15" FontWeight="Bold" Foreground="#7DB7FF" Margin="0,0,0,10"/>
-         <TextBlock Name="ovOS" Text="OS: Loading..." Foreground="#E4E4E7" FontSize="13" Margin="0,4"/>
-         <TextBlock Name="ovPCName" Text="PC Name: Loading..." Foreground="#E4E4E7" FontSize="13" Margin="0,4"/>
-         <TextBlock Name="ovArch" Text="Architecture: Loading..." Foreground="#E4E4E7" FontSize="13" Margin="0,4"/>
-         <TextBlock Name="ovDeviceType" Text="Device Type: Loading..." Foreground="#E4E4E7" FontSize="13" Margin="0,4"/>
-        </StackPanel>
-       </Border>
-
-       <Border Background="#1B2432" BorderBrush="#334155" BorderThickness="1" CornerRadius="14" Padding="18" Margin="8" Width="390">
-        <StackPanel>
-         <TextBlock Text="Processor &amp; Graphics" FontSize="15" FontWeight="Bold" Foreground="#7DB7FF" Margin="0,0,0,10"/>
-         <TextBlock Name="ovCPU" Text="CPU: Loading..." Foreground="#E4E4E7" FontSize="13" Margin="0,4" TextWrapping="Wrap"/>
-         <TextBlock Name="ovCPULoad" Text="CPU Usage: Loading..." Foreground="#E4E4E7" FontSize="13" Margin="0,4"/>
-         <TextBlock Name="ovGPU" Text="GPU: Loading..." Foreground="#E4E4E7" FontSize="13" Margin="0,4" TextWrapping="Wrap"/>
-        </StackPanel>
-       </Border>
-
-       <Border Background="#1B2432" BorderBrush="#334155" BorderThickness="1" CornerRadius="14" Padding="18" Margin="8" Width="390">
-        <StackPanel>
-         <TextBlock Text="Memory (RAM)" FontSize="15" FontWeight="Bold" Foreground="#7DB7FF" Margin="0,0,0,10"/>
-         <TextBlock Name="ovRAMTotal" Text="Total: Loading..." Foreground="#E4E4E7" FontSize="13" Margin="0,4"/>
-         <TextBlock Name="ovRAMUsage" Text="Usage: Loading..." Foreground="#E4E4E7" FontSize="13" Margin="0,4"/>
-        </StackPanel>
-       </Border>
-
-       <Border Background="#1B2432" BorderBrush="#334155" BorderThickness="1" CornerRadius="14" Padding="18" Margin="8" Width="390">
-        <StackPanel>
-         <TextBlock Text="Motherboard &amp; BIOS" FontSize="15" FontWeight="Bold" Foreground="#7DB7FF" Margin="0,0,0,10"/>
-         <TextBlock Name="ovMobo" Text="Board: Loading..." Foreground="#E4E4E7" FontSize="13" Margin="0,4" TextWrapping="Wrap"/>
-         <TextBlock Name="ovBIOS" Text="BIOS Version: Loading..." Foreground="#E4E4E7" FontSize="13" Margin="0,4"/>
-        </StackPanel>
-       </Border>
-
-       <Border Background="#1B2432" BorderBrush="#334155" BorderThickness="1" CornerRadius="14" Padding="18" Margin="8" Width="390">
-        <StackPanel>
-         <TextBlock Text="Disk Storage" FontSize="15" FontWeight="Bold" Foreground="#7DB7FF" Margin="0,0,0,10"/>
-         <ItemsControl Name="ovDisks">
-          <ItemsControl.ItemTemplate>
-           <DataTemplate>
-            <TextBlock Text="{Binding DisplayText}" Foreground="#E4E4E7" FontSize="13" Margin="0,4"/>
-           </DataTemplate>
-          </ItemsControl.ItemTemplate>
-         </ItemsControl>
-        </StackPanel>
-       </Border>
-
-       <Border Background="#1B2432" BorderBrush="#334155" BorderThickness="1" CornerRadius="14" Padding="18" Margin="8" Width="390">
-        <StackPanel>
-         <TextBlock Text="Network Status" FontSize="15" FontWeight="Bold" Foreground="#7DB7FF" Margin="0,0,0,10"/>
-         <TextBlock Name="ovIP" Text="IPv4 Address: Loading..." Foreground="#E4E4E7" FontSize="13" Margin="0,4"/>
-        </StackPanel>
-       </Border>
-      </WrapPanel>
-
-      <TextBlock Text="LIVE PERFORMANCE &amp; DEVICE HEALTH" FontSize="15" FontWeight="Bold" Foreground="#60A5FA" Margin="10,8,10,2"/>
-      <WrapPanel Orientation="Horizontal">
-       <Border Background="#182638" BorderBrush="#35506D" BorderThickness="1" CornerRadius="14" Padding="18" Margin="8" Width="390">
-        <StackPanel>
-         <TextBlock Text="Performance &amp; Resources" FontSize="15" FontWeight="Bold" Foreground="#7DD3FC" Margin="0,0,0,8"/>
-         <TextBlock Name="ovUptime" Text="System Uptime: Loading..." Foreground="#E4E4E7" FontSize="12" Margin="0,4"/>
-         <TextBlock Name="ovProcesses" Text="Running Processes: Loading..." Foreground="#E4E4E7" FontSize="12" Margin="0,4"/>
-         <TextBlock Name="ovThreads" Text="CPU Cores / Threads: Loading..." Foreground="#E4E4E7" FontSize="12" Margin="0,4"/>
-         <TextBlock Name="ovRAMAvailable" Text="Available RAM: Loading..." Foreground="#E4E4E7" FontSize="12" Margin="0,4"/>
-        </StackPanel>
-       </Border>
-       <Border Background="#182638" BorderBrush="#35506D" BorderThickness="1" CornerRadius="14" Padding="18" Margin="8" Width="390">
-        <StackPanel>
-         <TextBlock Text="Display &amp; Graphics" FontSize="15" FontWeight="Bold" Foreground="#7DD3FC" Margin="0,0,0,8"/>
-         <TextBlock Name="ovDisplay" Text="Display: Loading..." Foreground="#E4E4E7" FontSize="12" Margin="0,4" TextWrapping="Wrap"/>
-         <TextBlock Name="ovGPUDetails" Text="Graphics Memory: Loading..." Foreground="#E4E4E7" FontSize="12" Margin="0,4" TextWrapping="Wrap"/>
-         <TextBlock Name="ovBIOSDate" Text="BIOS Date: Loading..." Foreground="#E4E4E7" FontSize="12" Margin="0,4"/>
-        </StackPanel>
-       </Border>
-       <Border Background="#182638" BorderBrush="#35506D" BorderThickness="1" CornerRadius="14" Padding="18" Margin="8" Width="390">
-        <StackPanel>
-         <TextBlock Text="Security Status" FontSize="15" FontWeight="Bold" Foreground="#7DD3FC" Margin="0,0,0,8"/>
-         <TextBlock Name="ovDefender" Text="Microsoft Defender: Checking..." Foreground="#E4E4E7" FontSize="12" Margin="0,4"/>
-         <TextBlock Name="ovFirewall" Text="Windows Firewall: Checking..." Foreground="#E4E4E7" FontSize="12" Margin="0,4"/>
-         <TextBlock Name="ovTPM" Text="TPM: Checking..." Foreground="#E4E4E7" FontSize="12" Margin="0,4"/>
-         <TextBlock Name="ovSecureBoot" Text="Secure Boot: Checking..." Foreground="#E4E4E7" FontSize="12" Margin="0,4"/>
-         <TextBlock Name="ovWindowsActivation" Text="Windows Activation: Checking..." Foreground="#E4E4E7" FontSize="12" Margin="0,4"/>
-        </StackPanel>
-       </Border>
-       <Border Name="ovBatteryCard" Background="#182638" BorderBrush="#35506D" BorderThickness="1" CornerRadius="14" Padding="18" Margin="8" Width="390">
-        <StackPanel>
-         <TextBlock Text="Battery Information" FontSize="15" FontWeight="Bold" Foreground="#7DD3FC" Margin="0,0,0,8"/>
-         <TextBlock Name="ovBatteryStatus" Text="Battery: Checking..." Foreground="#E4E4E7" FontSize="12" Margin="0,4"/>
-         <TextBlock Name="ovBatteryHealth" Text="Battery Health: Checking..." Foreground="#E4E4E7" FontSize="12" Margin="0,4"/>
-         <TextBlock Name="ovBatteryCapacity" Text="Design / Full Charge: Checking..." Foreground="#E4E4E7" FontSize="12" Margin="0,4"/>
-        </StackPanel>
-       </Border>
-       <Border Background="#182638" BorderBrush="#35506D" BorderThickness="1" CornerRadius="14" Padding="18" Margin="8" Width="390">
-        <StackPanel>
-         <TextBlock Text="Network Details" FontSize="15" FontWeight="Bold" Foreground="#7DD3FC" Margin="0,0,0,8"/>
-         <TextBlock Name="ovNetworkAdapter" Text="Adapter: Checking..." Foreground="#E4E4E7" FontSize="12" Margin="0,4" TextWrapping="Wrap"/>
-         <TextBlock Name="ovGatewayDNS" Text="Gateway / DNS: Checking..." Foreground="#E4E4E7" FontSize="12" Margin="0,4" TextWrapping="Wrap"/>
-         <TextBlock Name="ovLinkSpeed" Text="Link Speed: Checking..." Foreground="#E4E4E7" FontSize="12" Margin="0,4"/>
-        </StackPanel>
-       </Border>
-       <Border Background="#182638" BorderBrush="#35506D" BorderThickness="1" CornerRadius="14" Padding="18" Margin="8" Width="390">
-        <StackPanel>
-         <TextBlock Text="Windows &amp; Updates" FontSize="15" FontWeight="Bold" Foreground="#7DD3FC" Margin="0,0,0,8"/>
-         <TextBlock Name="ovBuild" Text="Windows Build: Checking..." Foreground="#E4E4E7" FontSize="12" Margin="0,4"/>
-         <TextBlock Name="ovLastBoot" Text="Last Boot: Checking..." Foreground="#E4E4E7" FontSize="12" Margin="0,4"/>
-         <TextBlock Name="ovUpdate" Text="Latest Installed Update: Checking..." Foreground="#E4E4E7" FontSize="12" Margin="0,4" TextWrapping="Wrap"/>
-        </StackPanel>
-       </Border>
-      </WrapPanel>
-      <TextBlock Text="DRIVER RECOVERY &amp; RESTORE" FontSize="15" FontWeight="Bold" Foreground="#60A5FA" Margin="10,12,10,2"/>
-      <Border Background="#182638" BorderBrush="#35506D" BorderThickness="1" CornerRadius="14" Padding="18" Margin="8" MaxWidth="820" HorizontalAlignment="Left">
+      <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="12,8,12,18">
        <StackPanel>
-        <TextBlock Text="AMR Driver Safety Point" FontSize="15" FontWeight="Bold" Foreground="#7DD3FC" Margin="0,0,0,6"/>
-        <TextBlock Text="Create a Windows restore point manually whenever you choose; driver installation never creates one automatically. Smart Restore verifies and targets the exact AMR restore point saved by Create Restore Point, without asking you to choose from a list. AMR also attempts to export the current OEM driver package before replacing it." Foreground="#CBD5E1" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,10"/>
-        <WrapPanel>
-         <Button Name="DriverCreateRestorePointBtn" Content="Create Restore Point" Background="#244A70" Foreground="#EAF2FF" BorderBrush="#4B83B8" Padding="14,8" FontSize="11" Margin="0,0,8,8"/>
-         <Button Name="DriverSmartRestoreBtn" Content="Smart Restore" IsEnabled="False" Background="#65412B" Foreground="#FFF1E6" BorderBrush="#A66B45" Padding="14,8" FontSize="11" Margin="0,0,8,8"/>
-        </WrapPanel>
-        <TextBlock Name="DriverRestorePointStatus" Text="Restore point status: checking Windows System Protection…" Foreground="#94A3B8" FontSize="11" TextWrapping="Wrap"/>
+        <Grid Margin="0,4,0,14">
+         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+         <StackPanel Grid.Column="0">
+          <TextBlock Text="SYSTEM OVERVIEW" FontSize="25" FontWeight="Bold" Foreground="#F8FAFC"/>
+          <TextBlock Text="Your PC at a glance  •  Hardware identity and system health" Foreground="#94A3B8" FontSize="12" Margin="0,5,8,0"/>
+         </StackPanel>
+         <StackPanel Grid.Column="1" VerticalAlignment="Center" HorizontalAlignment="Right">
+          <Button Name="RefreshOverviewBtn" Content="↻ Refresh" Background="#1769AA" Foreground="#FFFFFF" BorderBrush="#38BDF8" BorderThickness="1" Padding="18,9" FontSize="13" FontWeight="SemiBold" Cursor="Hand"/>
+          <TextBlock Name="ovLastRefresh" Text="Updated: --" Foreground="#94A3B8" FontSize="10" HorizontalAlignment="Right" Margin="0,5,2,0"/>
+         </StackPanel>
+        </Grid>
+        <UniformGrid Columns="3" Margin="0,0,0,12">
+         <Border Background="#172B43" BorderBrush="#2D5B88" BorderThickness="1" CornerRadius="12" Padding="14" Margin="4">
+          <StackPanel><TextBlock Text="WINDOWS" Foreground="#60A5FA" FontSize="11" FontWeight="Bold"/><TextBlock Name="ovOS" Text="OS: Loading..." Foreground="#F1F5F9" FontSize="14" FontWeight="SemiBold" Margin="0,7,0,3" TextWrapping="Wrap"/><TextBlock Name="ovBuild" Text="Windows Build: Checking..." Foreground="#AFC4DA" FontSize="11"/></StackPanel>
+         </Border>
+         <Border Background="#172B43" BorderBrush="#2D5B88" BorderThickness="1" CornerRadius="12" Padding="14" Margin="4">
+          <StackPanel><TextBlock Text="DEVICE" Foreground="#60A5FA" FontSize="11" FontWeight="Bold"/><TextBlock Name="ovPCName" Text="PC Name: Loading..." Foreground="#F1F5F9" FontSize="14" FontWeight="SemiBold" Margin="0,7,0,3" TextWrapping="Wrap"/><TextBlock Name="ovArch" Text="Architecture: Loading..." Foreground="#AFC4DA" FontSize="11"/></StackPanel>
+         </Border>
+         <Border Background="#172B43" BorderBrush="#2D5B88" BorderThickness="1" CornerRadius="12" Padding="14" Margin="4">
+          <StackPanel><TextBlock Text="DEVICE TYPE" Foreground="#60A5FA" FontSize="11" FontWeight="Bold"/><TextBlock Name="ovDeviceType" Text="Device Type: Loading..." Foreground="#F1F5F9" FontSize="14" FontWeight="SemiBold" Margin="0,7,0,3"/><TextBlock Name="ovLastBoot" Text="Last Boot: Checking..." Foreground="#AFC4DA" FontSize="11"/></StackPanel>
+         </Border>
+        </UniformGrid>
+        <Border Background="#101F33" BorderBrush="#2C5278" BorderThickness="1" CornerRadius="14" Padding="12" Margin="4,0,4,10">
+         <StackPanel>
+          <TextBlock Text="HARDWARE DETAILS" Foreground="#7DD3FC" FontSize="12" FontWeight="Bold" Margin="2,0,0,10"/>
+          <TabControl Name="SystemHardwareTabs" Background="Transparent" BorderThickness="0" Padding="0">
+           <TabItem Header="Processor"><Border Background="#172B43" BorderBrush="#2D5B88" BorderThickness="1" CornerRadius="10" Padding="16" Margin="4"><StackPanel><TextBlock Text="PROCESSOR" Foreground="#60A5FA" FontSize="11" FontWeight="Bold" Margin="0,0,0,10"/><TextBlock Name="ovCPU" Text="CPU: Loading..." Foreground="#F1F5F9" FontSize="14" TextWrapping="Wrap" Margin="0,4"/><TextBlock Name="ovCPULoad" Text="CPU Usage: Loading..." Foreground="#CBD5E1" FontSize="12" Margin="0,4"/><TextBlock Name="ovThreads" Text="CPU Cores / Threads: Loading..." Foreground="#CBD5E1" FontSize="12" Margin="0,4"/></StackPanel></Border></TabItem>
+           <TabItem Header="Graphics"><Border Background="#172B43" BorderBrush="#2D5B88" BorderThickness="1" CornerRadius="10" Padding="16" Margin="4"><StackPanel><TextBlock Text="GRAPHICS CARD &amp; DISPLAY" Foreground="#60A5FA" FontSize="11" FontWeight="Bold" Margin="0,0,0,10"/><TextBlock Name="ovGPU" Text="GPU: Loading..." Foreground="#F1F5F9" FontSize="14" TextWrapping="Wrap" Margin="0,4"/></StackPanel></Border></TabItem>
+           <TabItem Header="Motherboard"><Border Background="#172B43" BorderBrush="#2D5B88" BorderThickness="1" CornerRadius="10" Padding="16" Margin="4"><StackPanel><TextBlock Text="MOTHERBOARD &amp; BIOS" Foreground="#60A5FA" FontSize="11" FontWeight="Bold" Margin="0,0,0,10"/><TextBlock Name="ovMobo" Text="Board: Loading..." Foreground="#F1F5F9" FontSize="14" TextWrapping="Wrap" Margin="0,4"/><TextBlock Name="ovBIOS" Text="BIOS Version: Loading..." Foreground="#CBD5E1" FontSize="12" Margin="0,4"/><TextBlock Name="ovBIOSDate" Text="BIOS Date: Loading..." Foreground="#CBD5E1" FontSize="12" Margin="0,4"/></StackPanel></Border></TabItem>
+           <TabItem Header="Memory"><Border Background="#172B43" BorderBrush="#2D5B88" BorderThickness="1" CornerRadius="10" Padding="16" Margin="4"><StackPanel><TextBlock Text="MEMORY (RAM)" Foreground="#60A5FA" FontSize="11" FontWeight="Bold" Margin="0,0,0,10"/><TextBlock Name="ovRAMTotal" Text="Total: Loading..." Foreground="#F1F5F9" FontSize="14" Margin="0,4"/><TextBlock Name="ovRAMUsage" Text="Usage: Loading..." Foreground="#CBD5E1" FontSize="12" Margin="0,4"/></StackPanel></Border></TabItem>
+           <TabItem Header="Storage"><Border Background="#172B43" BorderBrush="#2D5B88" BorderThickness="1" CornerRadius="10" Padding="16" Margin="4"><StackPanel><TextBlock Text="STORAGE DEVICES" Foreground="#60A5FA" FontSize="11" FontWeight="Bold" Margin="0,0,0,10"/><ItemsControl Name="ovDisks"><ItemsControl.ItemTemplate><DataTemplate><Border Background="#203B59" CornerRadius="7" Padding="10" Margin="0,3"><TextBlock Text="{Binding DisplayText}" Foreground="#F1F5F9" FontSize="12" TextWrapping="Wrap"/></Border></DataTemplate></ItemsControl.ItemTemplate></ItemsControl></StackPanel></Border></TabItem>
+          </TabControl>
+         </StackPanel>
+        </Border>
+        <UniformGrid Columns="2" Margin="0,0,0,8">
+         <Border Background="#172B43" BorderBrush="#2D5B88" BorderThickness="1" CornerRadius="12" Padding="14" Margin="4"><StackPanel><TextBlock Text="SECURITY &amp; PROTECTION" Foreground="#60A5FA" FontSize="11" FontWeight="Bold" Margin="0,0,0,8"/><TextBlock Name="ovDefender" Text="Microsoft Defender: Checking..." Foreground="#E2E8F0" FontSize="12" Margin="0,3"/><TextBlock Name="ovFirewall" Text="Windows Firewall: Checking..." Foreground="#E2E8F0" FontSize="12" Margin="0,3"/><TextBlock Name="ovTPM" Text="TPM: Checking..." Foreground="#E2E8F0" FontSize="12" Margin="0,3"/><TextBlock Name="ovSecureBoot" Text="Secure Boot: Checking..." Foreground="#E2E8F0" FontSize="12" Margin="0,3"/><TextBlock Name="ovWindowsActivation" Text="Windows Activation: Checking..." Foreground="#E2E8F0" FontSize="12" Margin="0,3"/></StackPanel></Border>
+         <Border Background="#172B43" BorderBrush="#2D5B88" BorderThickness="1" CornerRadius="12" Padding="14" Margin="4"><StackPanel><TextBlock Text="NETWORK &amp; WINDOWS" Foreground="#60A5FA" FontSize="11" FontWeight="Bold" Margin="0,0,0,8"/><TextBlock Name="ovIP" Text="IPv4 Address: Loading..." Foreground="#E2E8F0" FontSize="12" Margin="0,3"/><TextBlock Name="ovNetworkAdapter" Text="Adapter: Checking..." Foreground="#E2E8F0" FontSize="12" Margin="0,3" TextWrapping="Wrap"/><TextBlock Name="ovGatewayDNS" Text="Gateway / DNS: Checking..." Foreground="#E2E8F0" FontSize="12" Margin="0,3" TextWrapping="Wrap"/><TextBlock Name="ovLinkSpeed" Text="Link Speed: Checking..." Foreground="#E2E8F0" FontSize="12" Margin="0,3"/><TextBlock Name="ovUpdate" Text="Latest Installed Update: Checking..." Foreground="#E2E8F0" FontSize="12" TextWrapping="Wrap" Margin="0,3"/></StackPanel></Border>
+        </UniformGrid>
        </StackPanel>
-      </Border>
-     </StackPanel>
-    </ScrollViewer>
+      </ScrollViewer>
+     </TabItem>
+     <TabItem Header="Live Performance">
+      <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="12,8,12,18">
+       <StackPanel>
+        <TextBlock Text="LIVE PERFORMANCE" FontSize="25" FontWeight="Bold" Foreground="#F8FAFC" Margin="4,4,0,4"/>
+        <TextBlock Text="Runtime activity, resource availability and device health snapshot" Foreground="#94A3B8" FontSize="12" Margin="4,0,0,14"/>
+        <UniformGrid Columns="2">
+         <Border Background="#172B43" BorderBrush="#2D5B88" BorderThickness="1" CornerRadius="12" Padding="16" Margin="4"><StackPanel><TextBlock Text="PERFORMANCE &amp; RESOURCES" Foreground="#7DD3FC" FontSize="12" FontWeight="Bold" Margin="0,0,0,8"/><TextBlock Name="ovUptime" Text="System Uptime: Loading..." Foreground="#E4E4E7" FontSize="13" Margin="0,4"/><TextBlock Name="ovProcesses" Text="Running Processes: Loading..." Foreground="#E4E4E7" FontSize="13" Margin="0,4"/><TextBlock Name="ovRAMAvailable" Text="Available RAM: Loading..." Foreground="#E4E4E7" FontSize="13" Margin="0,4"/></StackPanel></Border>
+         <Border Background="#172B43" BorderBrush="#2D5B88" BorderThickness="1" CornerRadius="12" Padding="16" Margin="4"><StackPanel><TextBlock Text="DISPLAY &amp; GRAPHICS" Foreground="#7DD3FC" FontSize="12" FontWeight="Bold" Margin="0,0,0,8"/><TextBlock Name="ovDisplay" Text="Display: Loading..." Foreground="#E4E4E7" FontSize="13" Margin="0,4" TextWrapping="Wrap"/><TextBlock Name="ovGPUDetails" Text="Graphics Memory: Loading..." Foreground="#E4E4E7" FontSize="13" Margin="0,4" TextWrapping="Wrap"/></StackPanel></Border>
+         <Border Name="ovBatteryCard" Background="#172B43" BorderBrush="#2D5B88" BorderThickness="1" CornerRadius="12" Padding="16" Margin="4"><StackPanel><TextBlock Text="BATTERY" Foreground="#7DD3FC" FontSize="12" FontWeight="Bold" Margin="0,0,0,8"/><TextBlock Name="ovBatteryStatus" Text="Battery: Checking..." Foreground="#E4E4E7" FontSize="13" Margin="0,4"/><TextBlock Name="ovBatteryHealth" Text="Battery Health: Checking..." Foreground="#E4E4E7" FontSize="13" Margin="0,4"/><TextBlock Name="ovBatteryCapacity" Text="Design / Full Charge: Checking..." Foreground="#E4E4E7" FontSize="13" Margin="0,4"/></StackPanel></Border>
+         <Border Background="#172B43" BorderBrush="#2D5B88" BorderThickness="1" CornerRadius="12" Padding="16" Margin="4"><StackPanel><TextBlock Text="WINDOWS SESSION" Foreground="#7DD3FC" FontSize="12" FontWeight="Bold" Margin="0,0,0,8"/></StackPanel></Border>
+        </UniformGrid>
+       </StackPanel>
+      </ScrollViewer>
      </TabItem>
      <TabItem>
       <TabItem.Header>
@@ -2798,111 +3183,104 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
        
        <!-- Keep the content's normal left-to-right layout while RTL places the scrollbar on the left. -->
        <StackPanel Name="DriverCenterMainPanel" FlowDirection="LeftToRight">
-        <Grid Name="DriverCenterHeader" Margin="0,4,0,12">
+        <Border Name="DriverCenterHeader" Background="#101D2D" BorderBrush="#344B68" BorderThickness="1" CornerRadius="14" Padding="15,12" Margin="0,2,0,14">
+         <Grid>
          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
          <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,12,0">
-          <TextBlock Text="DRIVER CENTER" FontSize="24" FontWeight="Bold" Foreground="#F8FAFC"/>
-          <TextBlock Text="Detect your PC, motherboard, Windows version and connected hardware. Find the correct official driver source." Foreground="#94A3B8" FontSize="12" TextWrapping="Wrap" Margin="0,5,8,0"/>
+          <TextBlock Text="DRIVER CENTER" FontSize="25" FontWeight="Bold" Foreground="#D8B56D"/>
+          <TextBlock Text="Manage your drivers with AMR Smart Assistant or switch to full Professional control." Foreground="#B8C5D6" FontSize="11" TextWrapping="Wrap" Margin="0,5,8,0"/>
          </StackPanel>
-         <Border Grid.Column="1" Background="#151E2B" BorderBrush="#344B68" BorderThickness="1" CornerRadius="12" Padding="4" Margin="0,0,12,0" VerticalAlignment="Center">
+         <Border Grid.Column="1" Background="#0C1726" BorderBrush="#B89A62" BorderThickness="1" CornerRadius="10" Padding="4" Margin="0,0,12,0" VerticalAlignment="Center">
           <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-           <Button Name="DriverSmartModeBtn" Content="✦ Smart View" Background="#176B50" Foreground="#FFFFFF" BorderBrush="#34D399" BorderThickness="1" Padding="14,9" FontSize="11" FontWeight="Bold" Margin="0,0,5,0" Cursor="Hand"/>
-           <Button Name="DriverAdvancedModeBtn" Content="Professional" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" BorderThickness="1" Padding="14,9" FontSize="11" Cursor="Hand"/>
+           <Button Name="DriverSmartModeBtn" Content="✦ Smart" Background="#263646" Foreground="#F4D99B" BorderBrush="#B89A62" BorderThickness="1" Padding="15,9" FontSize="11" FontWeight="Bold" Margin="0,0,5,0" Cursor="Hand"/>
+           <Button Name="DriverAdvancedModeBtn" Content="Professional" Background="#182638" Foreground="#CBD5E1" BorderBrush="#344B68" BorderThickness="1" Padding="15,9" FontSize="11" Cursor="Hand"/>
           </StackPanel>
          </Border>
-         <Button Name="ScanDriversBtn" Grid.Column="2" Content="⌕  Scan Device" Background="#2563EB" Foreground="#FFFFFF" BorderBrush="#60A5FA" BorderThickness="1" Padding="17,11" FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center" Cursor="Hand"/>
-        </Grid>
-        <Border Background="#151E2B" BorderBrush="#2D4058" BorderThickness="1" CornerRadius="10" Padding="10,9" Margin="0,0,0,12">
-         <StackPanel>
-          <TextBlock Text="DRIVER EXPERIENCE" Foreground="#7DD3FC" FontSize="10" FontWeight="Bold"/>
-          <TextBlock Name="DriverModeDescription" Text="Smart View: review AMR recommendations first with Smart Select, then prepare and install only the choices you approve." Foreground="#CBD5E1" FontSize="11" TextWrapping="Wrap" Margin="0,4,0,0"/>
-         </StackPanel>
+         <Button Name="ScanDriversBtn" Grid.Column="2" Content="⌕  Scan Device" Background="#244A70" Foreground="#F8FAFC" BorderBrush="#B89A62" BorderThickness="1" Padding="17,11" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Cursor="Hand"/>
+         </Grid>
         </Border>
         <Button Name="DriverIdentityToggleBtn" Content="Show system identity &amp; platform details" Visibility="Collapsed" HorizontalAlignment="Left" Background="#243449" Foreground="#CBD5E1" BorderBrush="#52677F" Padding="10,6" FontSize="10" Margin="0,0,0,8"/>
-        <Border Name="DriverComputerSummaryCard" Background="#1B2432" BorderBrush="#334155" BorderThickness="1" CornerRadius="12" Padding="15" Margin="0,0,0,12">
+        <Border Name="DriverComputerSummaryCard" Background="#142236" BorderBrush="#344B68" BorderThickness="1" CornerRadius="12" Padding="15" Margin="0,0,0,12">
          <Grid>
           <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
           <StackPanel Grid.Row="0" Grid.Column="0" Margin="4">
-           <TextBlock Text="COMPUTER / OEM" Foreground="#8FB8E8" FontSize="11" FontWeight="Bold"/>
+           <TextBlock Text="COMPUTER / OEM" Foreground="#D8B56D" FontSize="11" FontWeight="Bold"/>
            <TextBlock Name="DriverComputerModel" Text="Not scanned yet" Foreground="#F1F5F9" FontSize="14" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,5,8,0"/>
            <TextBlock Name="DriverComputerManufacturer" Text="Manufacturer: --" Foreground="#CBD5E1" FontSize="12" Margin="0,4,0,0" TextWrapping="Wrap"/>
           </StackPanel>
           <StackPanel Grid.Row="0" Grid.Column="1" Margin="4">
-           <TextBlock Text="MOTHERBOARD" Foreground="#8FB8E8" FontSize="11" FontWeight="Bold"/>
+           <TextBlock Text="MOTHERBOARD" Foreground="#D8B56D" FontSize="11" FontWeight="Bold"/>
            <TextBlock Name="DriverBoardModel" Text="Not scanned yet" Foreground="#F1F5F9" FontSize="14" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,5,8,0"/>
            <TextBlock Name="DriverBoardManufacturer" Text="Manufacturer: --" Foreground="#CBD5E1" FontSize="12" Margin="0,4,0,0" TextWrapping="Wrap"/>
           </StackPanel>
           <StackPanel Grid.Row="1" Grid.ColumnSpan="2" Margin="4,12,4,0">
-           <TextBlock Text="SYSTEM IDENTITY &amp; PLATFORM TYPE" Foreground="#8FB8E8" FontSize="10" FontWeight="Bold"/>
+           <TextBlock Text="SYSTEM IDENTITY &amp; PLATFORM TYPE" Foreground="#D8B56D" FontSize="10" FontWeight="Bold"/>
            <TextBlock Name="DriverSystemIdentitySummary" Text="Not scanned yet" Foreground="#CBD5E1" FontSize="11" Margin="0,4,0,0" TextWrapping="Wrap"/>
           </StackPanel>
          </Grid>
         </Border>
         <Grid Name="DriverSummaryMetrics" Margin="0,0,0,12">
          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-         <Border Grid.Column="0" Background="#182638" BorderBrush="#35506D" BorderThickness="1" CornerRadius="10" Padding="13" Margin="0,0,6,0">
-          <StackPanel><TextBlock Text="WINDOWS" Foreground="#7DD3FC" FontSize="11" FontWeight="Bold"/><TextBlock Name="DriverWindowsInfo" Text="Not scanned" Foreground="#F1F5F9" FontSize="12" Margin="0,6,0,0" TextWrapping="Wrap"/></StackPanel>
+         <Border Grid.Column="0" Background="#142236" BorderBrush="#344B68" BorderThickness="1" CornerRadius="10" Padding="13" Margin="0,0,6,0">
+          <StackPanel><TextBlock Text="WINDOWS" Foreground="#D8B56D" FontSize="11" FontWeight="Bold"/><TextBlock Name="DriverWindowsInfo" Text="Not scanned" Foreground="#F1F5F9" FontSize="12" Margin="0,6,0,0" TextWrapping="Wrap"/></StackPanel>
          </Border>
-         <Border Grid.Column="1" Background="#182638" BorderBrush="#35506D" BorderThickness="1" CornerRadius="10" Padding="13" Margin="3,0">
-          <StackPanel><TextBlock Text="DETECTED DEVICES" Foreground="#7DD3FC" FontSize="11" FontWeight="Bold"/><TextBlock Name="DriverDeviceCount" Text="--" Foreground="#F1F5F9" FontSize="20" FontWeight="Bold" Margin="0,4,0,0"/></StackPanel>
+         <Border Grid.Column="1" Background="#142236" BorderBrush="#344B68" BorderThickness="1" CornerRadius="10" Padding="13" Margin="3,0">
+          <StackPanel><TextBlock Text="DETECTED DEVICES" Foreground="#D8B56D" FontSize="11" FontWeight="Bold"/><TextBlock Name="DriverDeviceCount" Text="--" Foreground="#F1F5F9" FontSize="20" FontWeight="Bold" Margin="0,4,0,0"/></StackPanel>
          </Border>
-         <Border Grid.Column="2" Background="#182638" BorderBrush="#35506D" BorderThickness="1" CornerRadius="10" Padding="13" Margin="6,0,0,0">
+         <Border Grid.Column="2" Background="#142236" BorderBrush="#344B68" BorderThickness="1" CornerRadius="10" Padding="13" Margin="6,0,0,0">
           <StackPanel><TextBlock Text="DEVICE ISSUES" Foreground="#FCA5A5" FontSize="11" FontWeight="Bold"/><TextBlock Name="DriverProblemCount" Text="--" Foreground="#F1F5F9" FontSize="20" FontWeight="Bold" Margin="0,4,0,0"/></StackPanel>
          </Border>
         </Grid>
-        <Grid Margin="0,0,0,10">
+        <Grid Margin="0,0,0,8">
          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-         <StackPanel Grid.Column="0"><TextBlock Text="HARDWARE &amp; DRIVER STATUS" Foreground="#60A5FA" FontSize="14" FontWeight="Bold"/><TextBlock Name="DriverScanStatus" Text="Select Scan Device to inspect this computer. No driver will be downloaded or installed automatically." Foreground="#94A3B8" FontSize="11" TextWrapping="Wrap" Margin="0,4,8,0"/></StackPanel>
+         <StackPanel Grid.Column="0"><TextBlock Name="DriverModeSectionHeading" Text="" Visibility="Collapsed"/><TextBlock Name="DriverScanStatus" Text="Select Scan Device to inspect this computer. No driver will be downloaded or installed automatically." Foreground="#94A3B8" FontSize="11" TextWrapping="Wrap" Margin="0,0,8,0"/></StackPanel>
         </Grid>
-        <StackPanel Margin="0,0,0,12">
-         <Border Name="DriverSmartActionsPanel" Background="#142B2A" BorderBrush="#286653" BorderThickness="1" CornerRadius="11" Padding="10" Margin="0,0,0,9">
-          <StackPanel>
-           <TextBlock Text="SMART WORKFLOW" Foreground="#86EFAC" FontSize="10" FontWeight="Bold" Margin="2,0,0,8"/>
-           <Grid>
-            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-            <Button Name="DriverSmartSelectBtn" Grid.Column="0" Content="✦ Smart Select" IsEnabled="False" Background="#315B82" Foreground="#FFFFFF" BorderBrush="#60A5FA" Padding="12,9" FontSize="11" FontWeight="Bold" Margin="0,0,5,0"/>
-            <Button Name="DriverStartSmartInstallBtn" Grid.Column="1" Content="Start Smart Install" IsEnabled="False" Background="#176B50" Foreground="#FFFFFF" BorderBrush="#34D399" Padding="12,9" FontSize="11" FontWeight="Bold" Margin="5,0,0,0"/>
-           </Grid>
-          </StackPanel>
+        <StackPanel Margin="0,0,0,10">
+         <Border Name="DriverSmartActionsPanel" Background="#101D2D" BorderBrush="#344B68" BorderThickness="1" CornerRadius="10" Padding="10" Margin="0,0,0,9">
+          <Grid>
+           <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+           <TextBlock Name="DriverModeEyebrow" Grid.Column="0" Text="SMART ASSISTANT" Foreground="#D8B56D" FontSize="12" FontWeight="Bold" VerticalAlignment="Center" Margin="2,0,8,0"/>
+           <Button Name="DriverSmartSelectBtn" Grid.Column="1" Content="✦ Smart Select" IsEnabled="False" Background="#244A70" Foreground="#FFFFFF" BorderBrush="#5B91C5" BorderThickness="1" Padding="18,10" FontSize="11" FontWeight="Bold" Cursor="Hand" Margin="0,0,7,0"/>
+           <Button Name="DriverStartSmartInstallBtn" Grid.Column="2" Content="Smart Install" IsEnabled="False" Background="#245B46" Foreground="#FFFFFF" BorderBrush="#55A987" BorderThickness="1" Padding="18,10" FontSize="11" FontWeight="Bold" Cursor="Hand"/>
+          </Grid>
          </Border>
          <StackPanel Name="DriverProfessionalActionsPanel" Visibility="Collapsed">
-          <Border Background="#19283A" BorderBrush="#344B68" BorderThickness="1" CornerRadius="11" Padding="10" Margin="0,0,0,9">
+          <Border Background="#101D2D" BorderBrush="#B89A62" BorderThickness="1" CornerRadius="10" Padding="10" Margin="0,0,0,8">
            <StackPanel>
-            <TextBlock Text="PACKAGE &amp; INSTALL" Foreground="#93C5FD" FontSize="10" FontWeight="Bold" Margin="2,0,0,8"/>
+            <TextBlock Text="DRIVER PACKAGE" Foreground="#D8B56D" FontSize="10" FontWeight="Bold" Margin="2,0,0,7"/>
             <Grid>
              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-             <Button Name="DriverDownloadSelectedBtn" Grid.Column="0" Content="Download &amp; Save Package" IsEnabled="False" Background="#244A70" Foreground="#EAF2FF" BorderBrush="#4B83B8" Padding="10,9" FontSize="10" Margin="0,0,5,0"/>
-             <Button Name="DriverInstallSelectedBtn" Grid.Column="1" Content="Install Ready Update" IsEnabled="False" Background="#245B46" Foreground="#E8FFF3" BorderBrush="#3B8B69" Padding="10,9" FontSize="10" Margin="5,0,0,0"/>
+             <Button Name="DriverDownloadSelectedBtn" Grid.Column="0" Content="Download &amp; Save Package" IsEnabled="False" Background="#244A70" Foreground="#EAF2FF" BorderBrush="#4B83B8" Padding="12,10" FontSize="10" FontWeight="SemiBold" Margin="0,0,5,0"/>
+             <Button Name="DriverInstallSelectedBtn" Grid.Column="1" Content="Install Ready Update" IsEnabled="False" Background="#245B46" Foreground="#E8FFF3" BorderBrush="#3B8B69" Padding="12,10" FontSize="10" FontWeight="SemiBold" Margin="5,0,0,0"/>
             </Grid>
            </StackPanel>
           </Border>
-          <Border Background="#19283A" BorderBrush="#344B68" BorderThickness="1" CornerRadius="11" Padding="10" Margin="0,0,0,9">
+          <Border Background="#142236" BorderBrush="#344B68" BorderThickness="1" CornerRadius="10" Padding="10" Margin="0,0,0,8">
            <StackPanel>
-            <TextBlock Text="SELECTION &amp; INSTALL PLAN" Foreground="#93C5FD" FontSize="10" FontWeight="Bold" Margin="2,0,0,8"/>
-            <Grid>
-             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-             <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-             <Button Name="DriverSelectReadyBtn" Grid.Row="0" Grid.Column="0" Content="Select All Ready" IsEnabled="False" Background="#34445A" Foreground="#E2E8F0" BorderBrush="#526176" Padding="10,8" FontSize="10" Margin="0,0,5,6"/>
-             <Button Name="DriverClearSelectionBtn" Grid.Row="0" Grid.Column="1" Content="Clear Selection" IsEnabled="False" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" Padding="10,8" FontSize="10" Margin="5,0,0,6"/>
-             <Button Name="DriverInstallBatchBtn" Grid.Row="1" Grid.Column="0" Content="Install Selected Ready (0)" IsEnabled="False" Background="#28634D" Foreground="#E8FFF3" BorderBrush="#55A987" Padding="10,8" FontSize="10" Margin="0,0,5,0"/>
-             <Button Name="DriverInstallPlanBtn" Grid.Row="1" Grid.Column="1" Content="Preview Install Plan" IsEnabled="False" Background="#3A4660" Foreground="#E2E8F0" BorderBrush="#64748B" Padding="10,8" FontSize="10" Margin="5,0,0,0"/>
-            </Grid>
+            <StackPanel Margin="2,0,2,10">
+             <TextBlock Text="SELECTION &amp; INSTALL PLAN" Foreground="#D8B56D" FontSize="11" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,0,3"/>
+             <TextBlock Text="Choose ready drivers, review the plan, then install only what you selected." Foreground="#AAB8C8" FontSize="10" TextWrapping="Wrap" VerticalAlignment="Center"/>
+            </StackPanel>
+            <WrapPanel Orientation="Horizontal">
+             <Button Name="DriverSelectReadyBtn" Content="Select All Ready" IsEnabled="False" Background="#293B52" Foreground="#EAF1F8" BorderBrush="#526B86" Padding="13,8" FontSize="10" MinWidth="142" Margin="0,0,8,8"/>
+             <Button Name="DriverClearSelectionBtn" Content="Clear Selection" IsEnabled="False" Background="#252F3D" Foreground="#DCE5EF" BorderBrush="#48596D" Padding="13,8" FontSize="10" MinWidth="142" Margin="0,0,8,8"/>
+             <Button Name="DriverInstallBatchBtn" Content="Install Selected Ready (0)" IsEnabled="False" Background="#245B46" Foreground="#E8FFF3" BorderBrush="#55A987" Padding="13,8" FontSize="10" MinWidth="176" Margin="0,0,8,0"/>
+             <Button Name="DriverInstallPlanBtn" Content="Preview Install Plan" IsEnabled="False" Background="#344B69" Foreground="#E7EEF7" BorderBrush="#6689B5" Padding="13,8" FontSize="10" MinWidth="160" Margin="0,0,0,0"/>
+            </WrapPanel>
            </StackPanel>
           </Border>
-          <Border Background="#19283A" BorderBrush="#344B68" BorderThickness="1" CornerRadius="11" Padding="10" Margin="0,0,0,9">
+          <Border Background="#142236" BorderBrush="#344B68" BorderThickness="1" CornerRadius="10" Padding="10" Margin="0,0,0,8">
            <StackPanel>
-            <TextBlock Text="OFFICIAL SUPPORT &amp; DRIVER SOURCES" Foreground="#A7D8CE" FontSize="10" FontWeight="Bold" Margin="2,0,0,8"/>
-            <Button Name="OpenOfficialSupportBtn" Content="Official Support ↗" IsEnabled="False" Background="#263B3A" Foreground="#A7D8CE" BorderBrush="#456B65" Padding="11,8" FontSize="10" HorizontalContentAlignment="Center" Margin="0,0,0,6"/>
-            <Grid>
-             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-             <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-             <Button Name="DriverCandidateManagerBtn" Grid.Row="0" Grid.Column="0" Content="Compare Candidates" IsEnabled="False" Background="#344B69" Foreground="#E2E8F0" BorderBrush="#6689B5" Padding="9,8" FontSize="10" Margin="0,0,5,6"/>
-             <Button Name="DriverSourceManagerBtn" Grid.Row="0" Grid.Column="1" Content="Driver Source Manager" IsEnabled="False" Background="#344B69" Foreground="#E2E8F0" BorderBrush="#6689B5" Padding="9,8" FontSize="10" Margin="5,0,0,6"/>
-             <Button Name="DriverCatalogSearchBtn" Grid.Row="1" Grid.Column="0" Content="Search Microsoft Catalog ↗" IsEnabled="False" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" Padding="9,8" FontSize="10" Margin="0,0,5,0"/>
-             <Button Name="DriverRollbackCheckBtn" Grid.Row="1" Grid.Column="1" Content="Check Driver Rollback" IsEnabled="False" Background="#65412B" Foreground="#FFF1E6" BorderBrush="#A66B45" Padding="9,8" FontSize="10" Margin="5,0,0,0"/>
-            </Grid>
-            <Button Name="DriverOpenRecoveryBtn" Content="Open Driver Recovery Backups" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" Padding="11,8" FontSize="10" Margin="0,7,0,0"/>
+            <TextBlock Text="TOOLS &amp; OFFICIAL SOURCES" Foreground="#A7D8CE" FontSize="10" FontWeight="Bold" Margin="2,0,0,7"/>
+            <WrapPanel Orientation="Horizontal">
+             <Button Name="DriverCandidateManagerBtn" Content="Compare Candidates" IsEnabled="False" Background="#344B69" Foreground="#E2E8F0" BorderBrush="#6689B5" Padding="10,7" FontSize="10" Margin="0,0,6,6"/>
+             <Button Name="DriverSourceManagerBtn" Content="Source Manager" IsEnabled="False" Background="#344B69" Foreground="#E2E8F0" BorderBrush="#6689B5" Padding="10,7" FontSize="10" Margin="0,0,6,6"/>
+             <Button Name="DriverCatalogSearchBtn" Content="Microsoft Catalog ↗" IsEnabled="False" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" Padding="10,7" FontSize="10" Margin="0,0,6,6"/>
+             <Button Name="DriverRollbackCheckBtn" Content="Check Rollback" IsEnabled="False" Background="#65412B" Foreground="#FFF1E6" BorderBrush="#A66B45" Padding="10,7" FontSize="10" Margin="0,0,6,6"/>
+             <Button Name="OpenOfficialSupportBtn" Content="Official Support ↗" IsEnabled="False" Background="#263B3A" Foreground="#A7D8CE" BorderBrush="#456B65" Padding="10,7" FontSize="10" Margin="0,0,6,6"/>
+             <Button Name="DriverOpenRecoveryBtn" Content="Recovery Backups" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" Padding="10,7" FontSize="10" Margin="0,0,0,6"/>
+            </WrapPanel>
            </StackPanel>
           </Border>
          </StackPanel>
@@ -2922,7 +3300,7 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
           <Button Name="DriverOpenDownloadsBtn" Content="Open Driver Downloads" Background="#263B52" Foreground="#DBEAFE" BorderBrush="#456B8A" Padding="10,5" FontSize="10" VerticalAlignment="Center"/>
          </StackPanel>
         </Grid>
-        <Border Background="#151E2B" BorderBrush="#334155" BorderThickness="1" CornerRadius="10" Padding="6">
+        <Border Background="#101D2D" BorderBrush="#344B68" BorderThickness="1" CornerRadius="10" Padding="8">
          <ListView Name="DriverDeviceList" SelectionMode="Extended" Background="Transparent" Foreground="#E4E4E7" BorderThickness="0" MinHeight="260" MaxHeight="100000" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.CanContentScroll="True" ScrollViewer.PanningMode="Both" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling">
           <ListView.Resources>
            <!-- Explicit dark row states prevent the default white hover/selection background from hiding text. -->
@@ -2968,6 +3346,15 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
           </ListView.Resources>
           <ListView.View>
            <GridView>
+            <GridViewColumn Header="Select" Width="48">
+             <GridViewColumn.CellTemplate>
+              <DataTemplate>
+               <CheckBox HorizontalAlignment="Center" VerticalAlignment="Center"
+                         IsChecked="{Binding IsSelected, RelativeSource={RelativeSource AncestorType={x:Type ListViewItem}}, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="Select this driver row"/>
+              </DataTemplate>
+             </GridViewColumn.CellTemplate>
+            </GridViewColumn>
             <GridViewColumn Header="Device" Width="245" DisplayMemberBinding="{Binding DeviceName}"/>
             <GridViewColumn Header="Class" Width="105" DisplayMemberBinding="{Binding DeviceClass}"/>
             <GridViewColumn Header="Manufacturer" Width="145" DisplayMemberBinding="{Binding Manufacturer}"/>
@@ -3001,11 +3388,161 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
        </StackPanel>
       </Grid>
      </TabItem>
-    </TabControl>
-   </TabItem>
+     <TabItem Header="Backups">
+      <Border Background="#172536" BorderBrush="#34465B" BorderThickness="1" CornerRadius="10" Padding="10" Margin="6,4,6,6">
+       <Grid>
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <!-- The two backup destinations are shown as a compact animated submenu when the main Backups section is opened. -->
+        <Border Grid.Row="0" Background="#1D2C3D" BorderBrush="#34465B" BorderThickness="1" CornerRadius="8" Padding="8" Margin="2,0,2,8">
+         <StackPanel x:Name="BackupSubMenuPanel" Orientation="Horizontal" HorizontalAlignment="Left" Opacity="0" RenderTransformOrigin="0.5,0.5">
+          <StackPanel.RenderTransform><TranslateTransform Y="-10"/></StackPanel.RenderTransform>
+          <StackPanel.Triggers>
+           <EventTrigger RoutedEvent="FrameworkElement.Loaded">
+            <BeginStoryboard>
+             <Storyboard>
+              <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.24"/>
+              <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="-10" To="0" Duration="0:0:0.24" DecelerationRatio="0.8"/>
+             </Storyboard>
+            </BeginStoryboard>
+           </EventTrigger>
+          </StackPanel.Triggers>
+          <Button Name="BackupCenterChoiceBtn" Content="💾  Backup Center" Width="154" Height="27" Margin="0,0,8,0" Padding="9,3" FontSize="11" FontWeight="SemiBold" Background="#263646" Foreground="#E7EAF0" BorderBrush="#B89A62" BorderThickness="1" Cursor="Hand"/>
+          <Button Name="DriverBackupChoiceBtn" Content="🛡  Driver Backup" Width="154" Height="27" Padding="9,3" FontSize="11" FontWeight="SemiBold" Background="#263646" Foreground="#E7EAF0" BorderBrush="#34465B" BorderThickness="1" Cursor="Hand"/>
+         </StackPanel>
+        </Border>
+        <TabControl Name="BackupSubTabs" Grid.Row="1" Background="Transparent" BorderThickness="0">
+         <TabControl.Template>
+          <ControlTemplate TargetType="{x:Type TabControl}">
+           <Grid ClipToBounds="True" KeyboardNavigation.TabNavigation="Local">
+            <Border Background="Transparent" BorderThickness="0">
+             <ContentPresenter x:Name="PART_SelectedContentHost" ContentSource="SelectedContent" SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}"/>
+            </Border>
+           </Grid>
+          </ControlTemplate>
+         </TabControl.Template>
+       <TabItem Header="Backup Center" MinWidth="184" Height="34" Padding="14,4" FontSize="12" FontWeight="SemiBold" Background="#202A35" Foreground="#E7EAF0" BorderBrush="#B89A62">
+     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+      <Border Padding="20">
+       <StackPanel>
+        <Grid Margin="0,0,0,12">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
+        <StackPanel Grid.Column="0" Grid.ColumnSpan="2" VerticalAlignment="Center" Margin="0,0,16,0">
+         <TextBlock Text="Backup &amp; Recovery Center" FontSize="27" FontWeight="Bold" Foreground="#E7EAF0" Margin="0,0,0,2"/>
+         <TextBlock Text="Export important system settings and recovery information. Exports are saved under ProgramData\AMR-Utility\Backups." Foreground="#AEB8C8" TextWrapping="Wrap" Visibility="Collapsed"/>
+        </StackPanel>
+        <Grid Grid.Column="1" VerticalAlignment="Center" Visibility="Collapsed"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+         <Grid Grid.Column="0" Margin="0,0,6,0">
+          <TextBox Name="BackupSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search backup tools by name or keyword" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2" Visibility="Collapsed"/>
+          <TextBlock Text="⌕" Visibility="Collapsed" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="11,0,0,2" FontSize="21" FontWeight="SemiBold" Foreground="#79AAA5"/>
+         </Grid>
+         <ComboBox Name="BackupCategoryFilter" Grid.Column="1" Height="34" Padding="8,4" FontSize="13" Margin="6,0,0,0" SelectedIndex="0" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F">
+           <ComboBox.Resources>
+            <Style TargetType="{x:Type ComboBox}">
+             <Setter Property="SnapsToDevicePixels" Value="True"/>
+             <Setter Property="OverridesDefaultStyle" Value="True"/>
+             <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
+             <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
+             <Setter Property="Template">
+              <Setter.Value>
+               <ControlTemplate TargetType="{x:Type ComboBox}">
+                <Grid>
+                 <ToggleButton x:Name="DropDownToggle" Focusable="False" ClickMode="Press" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                  <ToggleButton.Template>
+                   <ControlTemplate TargetType="{x:Type ToggleButton}">
+                    <Border x:Name="ToggleBorder" Background="{Binding Background, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderThickness="1" CornerRadius="6" Padding="8,4">
+                     <Grid>
+                      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/></Grid.ColumnDefinitions>
+                      <ContentPresenter Grid.Column="0" Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentStringFormat="{Binding SelectionBoxItemStringFormat, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" VerticalAlignment="Center" HorizontalAlignment="Left"/>
+                      <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="#B7D5D1" StrokeThickness="1.6" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                     </Grid>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                     <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ToggleBorder" Property="BorderBrush" Value="#79AAA5"/></Trigger>
+                     <Trigger Property="IsPressed" Value="True"><Setter TargetName="ToggleBorder" Property="Background" Value="#31515A"/></Trigger>
+                    </ControlTemplate.Triggers>
+                   </ControlTemplate>
+                  </ToggleButton.Template>
+                 </ToggleButton>
+                 <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+                  <Border Background="#263B46" BorderBrush="#6B9994" BorderThickness="1" CornerRadius="7" Padding="3" SnapsToDevicePixels="True">
+                   <ScrollViewer MaxHeight="320" CanContentScroll="True">
+                    <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                   </ScrollViewer>
+                  </Border>
+                 </Popup>
+                </Grid>
+                <ControlTemplate.Triggers>
+                 <Trigger Property="HasItems" Value="False"><Setter TargetName="PART_Popup" Property="MinHeight" Value="24"/></Trigger>
+                 <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
+                </ControlTemplate.Triggers>
+               </ControlTemplate>
+              </Setter.Value>
+             </Setter>
+            </Style>
 
-   <!-- 2. SOFTWARE WITH INTEGRATED PROGRESS BAR -->
-   <TabItem Header="Software" IsSelected="True">
+            <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#263B46"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#D9F0ED"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#6B9994"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
+           </ComboBox.Resources>
+           <ComboBox.ItemContainerStyle>
+            <Style TargetType="ComboBoxItem">
+             <Setter Property="Foreground" Value="#D9F0ED"/>
+             <Setter Property="Background" Value="#263B46"/>
+             <Setter Property="BorderBrush" Value="#6B9994"/>
+             <Setter Property="Padding" Value="9,6"/>
+             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+             <Style.Triggers>
+              <Trigger Property="IsHighlighted" Value="True">
+               <Setter Property="Background" Value="#6B9994"/>
+               <Setter Property="Foreground" Value="#FFFFFF"/>
+              </Trigger>
+              <Trigger Property="IsSelected" Value="True">
+               <Setter Property="Background" Value="#31515A"/>
+               <Setter Property="Foreground" Value="#FFFFFF"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+               <Setter Property="Foreground" Value="#78918F"/>
+              </Trigger>
+             </Style.Triggers>
+            </Style>
+           </ComboBox.ItemContainerStyle>
+ <ComboBoxItem Content="💾 All Categories"/><ComboBoxItem Content="💾 Recovery"/><ComboBoxItem Content="💾 Registry &amp; System"/><ComboBoxItem Content="💾 Drivers &amp; Hardware"/><ComboBoxItem Content="💾 Network"/><ComboBoxItem Content="💾 Security"/><ComboBoxItem Content="💾 Configuration &amp; Reports"/></ComboBox>
+        </Grid>
+       </Grid>
+       <TextBlock Name="BackupResultsCount" Text="50 backup actions" Foreground="#AEB8C8" Margin="0,0,0,10"/>
+        <UniformGrid Name="BackupActionsGrid" Columns="3"/>
+       </StackPanel>
+      </Border>
+     </ScrollViewer>
+       </TabItem>
+       <TabItem Header="Driver Backup" MinWidth="184" Height="34" Padding="14,4" FontSize="12" FontWeight="SemiBold" Background="#202A35" Foreground="#E7EAF0" BorderBrush="#B89A62">
+        <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="16,12,16,18">
+         <StackPanel>
+          <TextBlock Text="🛡 DRIVER BACKUP" FontSize="29" FontWeight="Bold" Foreground="#E7EAF0" Margin="2,2,0,5"/>
+          <TextBlock Text="A dedicated recovery point for driver changes. Create and verify a restore point manually, then use Smart Restore to target that exact AMR checkpoint." Foreground="#94A3B8" FontSize="12" TextWrapping="Wrap" Margin="2,0,0,14"/>
+          <Border Background="#202A35" BorderBrush="#B89A62" BorderThickness="1" CornerRadius="12" Padding="18" MaxWidth="900" HorizontalAlignment="Left">
+           <StackPanel>
+            <TextBlock Text="AMR DRIVER SAFETY POINT" FontSize="14" FontWeight="Bold" Foreground="#B89A62" Margin="0,0,0,8"/>
+            <TextBlock Text="AMR does not create restore points automatically during driver installation. Create one when you choose. Smart Restore verifies and targets the exact AMR restore point saved by this utility; it will not silently choose another restore point. AMR also attempts to export the current OEM driver package before replacing it." Foreground="#CBD5E1" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,14"/>
+            <WrapPanel>
+             <Button Name="DriverCreateRestorePointBtn" Content="Create Restore Point" Background="#B89A62" Foreground="#17212B" BorderBrush="#B89A62" Padding="15,9" FontSize="12" Margin="0,0,9,8"/>
+             <Button Name="DriverSmartRestoreBtn" Content="Smart Restore" IsEnabled="False" Background="#263646" Foreground="#E7EDF3" BorderBrush="#B89A62" Padding="15,9" FontSize="12" Margin="0,0,9,8"/>
+            </WrapPanel>
+            <TextBlock Name="DriverRestorePointStatus" Text="Restore point status: checking Windows System Protection…" Foreground="#94A3B8" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0"/>
+           </StackPanel>
+          </Border>
+         </StackPanel>
+        </ScrollViewer>
+       </TabItem>
+        </TabControl>
+       </Grid>
+      </Border>
+     </TabItem>
+</TabControl>
+    </Grid>
+   </TabItem>
+<TabItem Header="Software" IsSelected="True">
     <Border Padding="10,0,10,4">
      <Grid>
       <Grid.RowDefinitions>
@@ -3014,10 +3551,10 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
        <RowDefinition Height="Auto"/>
       </Grid.RowDefinitions>
       
-      <Grid Grid.Row="0" Margin="0,10,0,20">
+      <Grid Grid.Row="0" Margin="0,2,0,8">
        <Grid.ColumnDefinitions>
         <ColumnDefinition Width="*"/>
-        <ColumnDefinition Width="470"/>
+        <ColumnDefinition Width="175"/>
        </Grid.ColumnDefinitions>
        <StackPanel Grid.Column="0" VerticalAlignment="Center">
         <TextBlock Text="Software Catalog" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF"/>
@@ -3026,11 +3563,11 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
 
        <Grid Grid.Column="1" VerticalAlignment="Center">
         <Grid.ColumnDefinitions>
-         <ColumnDefinition Width="*"/>
-         <ColumnDefinition Width="145"/>
+         <ColumnDefinition Width="0"/>
+         <ColumnDefinition Width="175"/>
         </Grid.ColumnDefinitions>
-        <TextBox Name="SearchBox" Grid.Column="0" Height="42" Margin="0,0,8,0" VerticalAlignment="Center" FontSize="15" ToolTip="Search by name or ID..."/>
-        <TextBlock Grid.Column="0" Text="🔍 Search name or ID..." IsHitTestVisible="False" VerticalAlignment="Center" Margin="15,0,0,0" Foreground="#71717A" FontSize="14">
+        <TextBox Name="SearchBox" Grid.Column="0" Height="42" Margin="0,0,8,0" VerticalAlignment="Center" FontSize="15" ToolTip="Search by name or ID..." Visibility="Collapsed"/>
+        <TextBlock Visibility="Collapsed" Grid.Column="0" Text="🔍 Search name or ID..." IsHitTestVisible="False" VerticalAlignment="Center" Margin="15,0,0,0" Foreground="#71717A" FontSize="14">
          <TextBlock.Style>
           <Style TargetType="TextBlock">
            <Setter Property="Visibility" Value="Hidden"/>
@@ -3042,7 +3579,7 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
           </Style>
          </TextBlock.Style>
         </TextBlock>
-        <Button Name="ShowInstalledBtn" Grid.Column="1" Height="38" VerticalAlignment="Center" Padding="9,0" FontSize="12" FontWeight="SemiBold" Cursor="Hand" Content="Show Installed" ToolTip="Show only applications detected as installed on this PC." Background="#263B3A" Foreground="#A7D8CE" BorderBrush="#456B65" BorderThickness="1"/>
+        <Button Name="ShowInstalledBtn" Grid.Column="1" HorizontalAlignment="Right" Height="36" VerticalAlignment="Center" Padding="12,0" FontSize="12" FontWeight="SemiBold" Cursor="Hand" Content="Show Installed" ToolTip="Show only applications detected as installed on this PC." Background="#263B3A" Foreground="#A7D8CE" BorderBrush="#456B65" BorderThickness="1"/>
        </Grid>
       </Grid>
       
@@ -3108,7 +3645,7 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
         <ScrollViewer x:Name="SoftwareScrollViewer" Grid.Column="0" FlowDirection="RightToLeft" VerticalScrollBarVisibility="Visible" HorizontalScrollBarVisibility="Disabled" CanContentScroll="False">
         <ItemsControl Name="SoftwareGrid" FlowDirection="LeftToRight" Margin="0,5,0,0">
          <ItemsControl.ItemsPanel>
-          <ItemsPanelTemplate><UniformGrid Columns="3"/></ItemsPanelTemplate>
+          <ItemsPanelTemplate><UniformGrid Columns="4"/></ItemsPanelTemplate>
          </ItemsControl.ItemsPanel>
         <ItemsControl.ItemTemplate>
          <DataTemplate>
@@ -3314,11 +3851,11 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
      </Grid>
     </Border>
    </TabItem>
-
-   <!-- 3. MEGA CUSTOMIZE SUITE (27 TOOLS & TWEAKS) -->
-   <TabItem Header="Customize">
-    <TabControl Name="CustomizeSubTabs" SelectedIndex="0" Style="{StaticResource OverviewSubTabControlStyle}" TabStripPlacement="Right" ItemContainerStyle="{StaticResource OverviewSubTabItemStyle}" Background="#18181B" BorderThickness="0" Margin="0,0,0,0">
-     <TabItem Header="Tweaks" IsSelected="True">
+<TabItem Header="Tool Kit">
+    <Grid Margin="0,0,0,0">
+<TabControl Name="ToolKitSubTabs" Tag="CUSTOMIZATION CATEGORIES" SelectedIndex="0" Style="{StaticResource OverviewSubTabControlStyle}" TabStripPlacement="Right" ItemContainerStyle="{StaticResource OverviewSubTabItemStyle}" Background="#18181B" BorderThickness="0" Margin="0,0,0,0">
+      
+<TabItem Header="Tweaks" IsSelected="True">
 <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="8,0,4,8">
       <StackPanel Name="BasicTweaksPanel">
        <Border Background="#18181B" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="10" Padding="12" Margin="0,10,0,12">
@@ -3517,735 +4054,921 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
       </StackPanel>
      </ScrollViewer>
      </TabItem>
-    </TabControl>
-   </TabItem>
-
-   <!-- CLEANUP -->
-   <TabItem Header="Cleanup">
-    <TabControl Name="CleanupSubTabs" Style="{StaticResource OverviewSubTabControlStyle}" TabStripPlacement="Right" ItemContainerStyle="{StaticResource OverviewSubTabItemStyle}" Background="#18181B" BorderThickness="0" Margin="0,0,0,0">
-     <TabItem Header="Clean Up Center" IsSelected="True">
-      <Grid Margin="18">
-       <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-       <StackPanel Grid.Row="0" Margin="2,0,2,16">
-        <TextBlock Text="CLEANUP CENTER" FontSize="21" FontWeight="Bold" Foreground="#F4F4F5"/>
-        <TextBlock Text="Review safe cleanup candidates and remove selected temporary files after scanning." FontSize="12" Foreground="#CBD5E1" Margin="0,4,0,0" TextWrapping="Wrap"/>
-       </StackPanel>
-       <Border Grid.Row="1" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="12" Padding="14">
-        <Grid>
-         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-         <Grid Grid.Row="0" Margin="0,0,0,10">
-          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-          <StackPanel>
-           <TextBlock Text="SAFE CLEANUP" FontSize="14" FontWeight="SemiBold" Foreground="#E4E4E7"/>
-           <TextBlock Name="CleanupScanSummary" Text="No scan performed yet." Foreground="#D1D5DB" FontSize="11" Margin="0,3,0,0" TextWrapping="Wrap"/>
-          </StackPanel>
-          <Button Name="CleanupScanBtn" Grid.Column="1" Content="Scan Now" Width="105" Height="32" Background="#263B36" Foreground="#A7F3D0" BorderBrush="#36594D"/>
-         </Grid>
-         <Grid Grid.Row="1" Margin="0,0,0,8">
-          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-          <TextBlock Grid.Column="0" Text="Select the categories you want to review" FontSize="12" Foreground="#CBD5E1" VerticalAlignment="Center"/>
-          <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
-           <Button Name="CleanupSelectAllBtn" Content="Select All" Height="28" MinWidth="88" Margin="0,0,6,0" Padding="10,3" Background="#244B3B" Foreground="#D1FAE5" BorderBrush="#3F8B68" FontSize="10" FontWeight="SemiBold"/>
-           <Button Name="CleanupCancelSelectionBtn" Content="Cancel Selection" Height="28" MinWidth="112" Padding="10,3" Background="#49313A" Foreground="#FFE4E6" BorderBrush="#8B5363" FontSize="10" FontWeight="SemiBold"/>
-          </StackPanel>
-         </Grid>
-         <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
-          <StackPanel>
-           <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupUserTempCheck" Content="User temporary files" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Temporary files in your Windows user profile." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupUserTempInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
-           <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupWindowsTempCheck" Content="Windows temporary files" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Temporary files under the Windows Temp folder." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupWindowsTempInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
-           <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupUpdateCheck" Content="Windows &amp; NVIDIA update leftovers" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Windows Update downloads and old NVIDIA app update artifacts (30+ days)." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupUpdateInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
-           <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupWerCheck" Content="Windows error reports" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Archived and queued Windows Error Reporting files." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupWerInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
-           <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupShaderCheck" Content="GPU &amp; application cache" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Rebuildable shader, browser, CapCut and Discord cache (7+ days)." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupShaderInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
-           <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupDeliveryCheck" Content="Delivery Optimization cache" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Cached update delivery files that Windows can download again." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupDeliveryInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
-          </StackPanel>
-         </ScrollViewer>
-         <StackPanel Grid.Row="3" Margin="0,10,0,8">
-          <ProgressBar Name="CleanupProgress" Height="7" Minimum="0" Maximum="100" Value="0" Background="#292933" Foreground="#6FC6A5"/>
-          <Grid Margin="0,5,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Name="CleanupProgressText" Text="Ready" Foreground="#CBD5E1" FontSize="11"/><TextBlock Name="CleanupSelectedSummary" Grid.Column="1" Text="Selected: 0 files • 0 MB" Foreground="#8BDCC5" FontSize="11" FontWeight="SemiBold"/></Grid>
+     <TabItem Header="Optimize">
+     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+      <Border Padding="20">
+       <StackPanel>
+        <Grid Margin="0,0,0,12">
+         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
+         <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,16,0">
+          <TextBlock Text="System Optimization Engine" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,0,0,8"/>
          </StackPanel>
-         <Button Name="CleanupRunBtn" Grid.Row="4" Content="Clean Selected" Height="36" HorizontalAlignment="Stretch" Background="#28483E" Foreground="#C7F9E8" BorderBrush="#416B5D" IsEnabled="False"/>
-        </Grid>
-       </Border>
-      </Grid>
-     </TabItem>
-     <TabItem Header="Disk Tools">
-      <Grid Margin="18">
-       <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-       <StackPanel Grid.Row="0" Margin="2,0,2,16">
-        <TextBlock Text="DISK TOOLS &amp; DIAGNOSTICS" FontSize="21" FontWeight="Bold" Foreground="#F4F4F5"/>
-        <TextBlock Text="Analyze fixed drives and Windows components. Analysis is read-only unless a clearly marked repair action is selected." FontSize="12" Foreground="#A1A1AA" TextWrapping="Wrap" Margin="0,4,0,0"/>
-       </StackPanel>
-       <Border Grid.Row="1" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="12" Padding="14">
-        <Grid>
-         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-         <StackPanel Grid.Row="0" Margin="0,0,0,12">
-          <TextBlock Text="DIAGNOSTIC TOOLS" FontSize="14" FontWeight="SemiBold" Foreground="#E4E4E7" Margin="0,0,0,10"/>
-          <Button Name="CleanupDriveAnalyzeBtn" Content="Analyze Drives" Height="36" Margin="0,0,0,8" Background="#293746" Foreground="#C7DDF5" BorderBrush="#40566D" HorizontalContentAlignment="Left" Padding="12,0"/>
-          <Button Name="CleanupComponentAnalyzeBtn" Content="Analyze Windows Components" Height="36" Margin="0,0,0,8" Background="#343044" Foreground="#DDD2F5" BorderBrush="#51466A" HorizontalContentAlignment="Left" Padding="12,0"/>
-          <Button Name="CleanupComponentRunBtn" Content="Clean Component Store (DISM)" Height="36" Margin="0,0,0,12" Background="#493B2B" Foreground="#F4DFC0" BorderBrush="#70583A" Padding="12,0" IsEnabled="False"/>
-         </StackPanel>
-         <Grid Grid.Row="1">
-          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-          <TextBlock Grid.Row="0" Text="ANALYSIS REPORT" FontSize="11" FontWeight="SemiBold" Foreground="#A1A1AA" Margin="0,0,0,7"/>
-          <TextBox Name="CleanupAdvancedReport" Grid.Row="1" Text="Advanced analysis has not been run." IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" Background="#0B1220" Foreground="#F1F5F9" BorderBrush="#526176" FontFamily="Consolas" FontSize="12" Padding="10"/>
+         <Grid Grid.Column="1" VerticalAlignment="Center">
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+          <Grid Grid.Column="0" Margin="0,0,6,0">
+          <TextBox Name="OptSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search optimization tools by name or keyword" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2" Visibility="Collapsed"/>
+          <TextBlock Text="⌕" Visibility="Collapsed" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="11,0,0,2" FontSize="21" FontWeight="SemiBold" Foreground="#79AAA5"/>
+         </Grid>
+          <ComboBox Name="OptCategoryFilter" Grid.Column="1" Height="34" Padding="8,4" FontSize="13" Margin="6,0,0,0" SelectedIndex="0" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F">
+           <ComboBox.Resources>
+            <Style TargetType="{x:Type ComboBox}">
+             <Setter Property="SnapsToDevicePixels" Value="True"/>
+             <Setter Property="OverridesDefaultStyle" Value="True"/>
+             <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
+             <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
+             <Setter Property="Template">
+              <Setter.Value>
+               <ControlTemplate TargetType="{x:Type ComboBox}">
+                <Grid>
+                 <ToggleButton x:Name="DropDownToggle" Focusable="False" ClickMode="Press" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                  <ToggleButton.Template>
+                   <ControlTemplate TargetType="{x:Type ToggleButton}">
+                    <Border x:Name="ToggleBorder" Background="{Binding Background, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderThickness="1" CornerRadius="6" Padding="8,4">
+                     <Grid>
+                      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/></Grid.ColumnDefinitions>
+                      <ContentPresenter Grid.Column="0" Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentStringFormat="{Binding SelectionBoxItemStringFormat, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" VerticalAlignment="Center" HorizontalAlignment="Left"/>
+                      <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="#B7D5D1" StrokeThickness="1.6" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                     </Grid>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                     <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ToggleBorder" Property="BorderBrush" Value="#79AAA5"/></Trigger>
+                     <Trigger Property="IsPressed" Value="True"><Setter TargetName="ToggleBorder" Property="Background" Value="#31515A"/></Trigger>
+                    </ControlTemplate.Triggers>
+                   </ControlTemplate>
+                  </ToggleButton.Template>
+                 </ToggleButton>
+                 <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+                  <Border Background="#263B46" BorderBrush="#6B9994" BorderThickness="1" CornerRadius="7" Padding="3" SnapsToDevicePixels="True">
+                   <ScrollViewer MaxHeight="320" CanContentScroll="True">
+                    <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                   </ScrollViewer>
+                  </Border>
+                 </Popup>
+                </Grid>
+                <ControlTemplate.Triggers>
+                 <Trigger Property="HasItems" Value="False"><Setter TargetName="PART_Popup" Property="MinHeight" Value="24"/></Trigger>
+                 <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
+                </ControlTemplate.Triggers>
+               </ControlTemplate>
+              </Setter.Value>
+             </Setter>
+            </Style>
+
+            <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#263B46"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#D9F0ED"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#6B9994"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
+           </ComboBox.Resources>
+           <ComboBox.ItemContainerStyle>
+            <Style TargetType="ComboBoxItem">
+             <Setter Property="Foreground" Value="#D9F0ED"/>
+             <Setter Property="Background" Value="#263B46"/>
+             <Setter Property="BorderBrush" Value="#6B9994"/>
+             <Setter Property="Padding" Value="9,6"/>
+             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+             <Style.Triggers>
+              <Trigger Property="IsHighlighted" Value="True">
+               <Setter Property="Background" Value="#6B9994"/>
+               <Setter Property="Foreground" Value="#FFFFFF"/>
+              </Trigger>
+              <Trigger Property="IsSelected" Value="True">
+               <Setter Property="Background" Value="#31515A"/>
+               <Setter Property="Foreground" Value="#FFFFFF"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+               <Setter Property="Foreground" Value="#78918F"/>
+              </Trigger>
+             </Style.Triggers>
+            </Style>
+           </ComboBox.ItemContainerStyle>
+
+           <ComboBoxItem Content="⚙️ All Categories"/><ComboBoxItem Content="⚙️ Performance &amp; Power"/><ComboBoxItem Content="⚙️ Startup &amp; Background"/><ComboBoxItem Content="⚙️ Storage &amp; Cleanup"/><ComboBoxItem Content="⚙️ Windows Maintenance"/><ComboBoxItem Content="⚙️ Network &amp; Responsiveness"/><ComboBoxItem Content="⚙️ Privacy &amp; Features"/><ComboBoxItem Content="⚙️ Diagnostics &amp; Monitoring"/>
+          </ComboBox>
          </Grid>
         </Grid>
-       </Border>
-      </Grid>
-     </TabItem>
-    </TabControl>
-   </TabItem>
+        <TextBlock Name="OptResultsCount" Foreground="#AEB8C8" Margin="0,0,0,10"/>
+        <UniformGrid Name="OptToolsGrid" Columns="3"/>
+       </StackPanel>
+      </Border>
+     </ScrollViewer>
+    </TabItem>
+     
+ <TabItem Header="Security">
+     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+      <Border Padding="20">
+       <StackPanel>
+        <Grid Margin="0,0,0,12">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
+        <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,16,0">
+         <TextBlock Text="Security &amp; Privacy Console" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,0,0,8"/>
+        </StackPanel>
+        <Grid Grid.Column="1" VerticalAlignment="Center"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+         <Grid Grid.Column="0" Margin="0,0,6,0">
+          <TextBox Name="SecSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search security tools by name or keyword" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2" Visibility="Collapsed"/>
+          <TextBlock Text="⌕" Visibility="Collapsed" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="11,0,0,2" FontSize="21" FontWeight="SemiBold" Foreground="#79AAA5"/>
+         </Grid>
+         <ComboBox Name="SecCategoryFilter" Grid.Column="1" Height="34" Padding="8,4" FontSize="13" Margin="6,0,0,0" SelectedIndex="0" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F">
+           <ComboBox.Resources>
+            <Style TargetType="{x:Type ComboBox}">
+             <Setter Property="SnapsToDevicePixels" Value="True"/>
+             <Setter Property="OverridesDefaultStyle" Value="True"/>
+             <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
+             <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
+             <Setter Property="Template">
+              <Setter.Value>
+               <ControlTemplate TargetType="{x:Type ComboBox}">
+                <Grid>
+                 <ToggleButton x:Name="DropDownToggle" Focusable="False" ClickMode="Press" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                  <ToggleButton.Template>
+                   <ControlTemplate TargetType="{x:Type ToggleButton}">
+                    <Border x:Name="ToggleBorder" Background="{Binding Background, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderThickness="1" CornerRadius="6" Padding="8,4">
+                     <Grid>
+                      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/></Grid.ColumnDefinitions>
+                      <ContentPresenter Grid.Column="0" Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentStringFormat="{Binding SelectionBoxItemStringFormat, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" VerticalAlignment="Center" HorizontalAlignment="Left"/>
+                      <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="#B7D5D1" StrokeThickness="1.6" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                     </Grid>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                     <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ToggleBorder" Property="BorderBrush" Value="#79AAA5"/></Trigger>
+                     <Trigger Property="IsPressed" Value="True"><Setter TargetName="ToggleBorder" Property="Background" Value="#31515A"/></Trigger>
+                    </ControlTemplate.Triggers>
+                   </ControlTemplate>
+                  </ToggleButton.Template>
+                 </ToggleButton>
+                 <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+                  <Border Background="#263B46" BorderBrush="#6B9994" BorderThickness="1" CornerRadius="7" Padding="3" SnapsToDevicePixels="True">
+                   <ScrollViewer MaxHeight="320" CanContentScroll="True">
+                    <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                   </ScrollViewer>
+                  </Border>
+                 </Popup>
+                </Grid>
+                <ControlTemplate.Triggers>
+                 <Trigger Property="HasItems" Value="False"><Setter TargetName="PART_Popup" Property="MinHeight" Value="24"/></Trigger>
+                 <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
+                </ControlTemplate.Triggers>
+               </ControlTemplate>
+              </Setter.Value>
+             </Setter>
+            </Style>
 
-   <!-- 9. BACKUP -->
-   <TabItem Header="Optimize">
-    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#263B46"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#D9F0ED"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#6B9994"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
+           </ComboBox.Resources>
+           <ComboBox.ItemContainerStyle>
+            <Style TargetType="ComboBoxItem">
+             <Setter Property="Foreground" Value="#D9F0ED"/>
+             <Setter Property="Background" Value="#263B46"/>
+             <Setter Property="BorderBrush" Value="#6B9994"/>
+             <Setter Property="Padding" Value="9,6"/>
+             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+             <Style.Triggers>
+              <Trigger Property="IsHighlighted" Value="True">
+               <Setter Property="Background" Value="#6B9994"/>
+               <Setter Property="Foreground" Value="#FFFFFF"/>
+              </Trigger>
+              <Trigger Property="IsSelected" Value="True">
+               <Setter Property="Background" Value="#31515A"/>
+               <Setter Property="Foreground" Value="#FFFFFF"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+               <Setter Property="Foreground" Value="#78918F"/>
+              </Trigger>
+             </Style.Triggers>
+            </Style>
+           </ComboBox.ItemContainerStyle>
+ <ComboBoxItem Content="🛡️ All Categories"/><ComboBoxItem Content="🛡️ Defender &amp; Antivirus"/><ComboBoxItem Content="🛡️ Firewall &amp; Network"/><ComboBoxItem Content="🛡️ Privacy &amp; Tracking"/><ComboBoxItem Content="🛡️ Accounts &amp; Sign-in"/><ComboBoxItem Content="🛡️ Encryption &amp; Protection"/><ComboBoxItem Content="🛡️ Auditing &amp; Reports"/><ComboBoxItem Content="🛡️ Security Settings"/></ComboBox>
+        </Grid>
+       </Grid>
+       <TextBlock Name="SecResultsCount" Foreground="#AEB8C8" Margin="0,0,0,10"/>
+        <UniformGrid Name="SecToolsGrid" Columns="3"/>
+       </StackPanel>
+      </Border>
+     </ScrollViewer>
+    </TabItem>
+ <TabItem Header="System">
+     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
      <Border Padding="20">
       <StackPanel>
        <Grid Margin="0,0,0,12">
         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
         <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,16,0">
-         <TextBlock Text="System Optimization Engine" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,0,0,8"/>
-         <TextBlock Text="50 optimization tools for performance, startup, storage, maintenance, and Windows settings." Foreground="#AEB8C8" TextWrapping="Wrap"/>
+         <TextBlock Text="Advanced System Configuration" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,0,0,8"/>
         </StackPanel>
-        <Grid Grid.Column="1" VerticalAlignment="Center">
-         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+        <Grid Grid.Column="1" VerticalAlignment="Center"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
          <Grid Grid.Column="0" Margin="0,0,6,0">
-         <TextBox Name="OptSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search optimization tools by name or keyword" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2"/>
-         <TextBlock Text="⌕" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="11,0,0,2" FontSize="21" FontWeight="SemiBold" Foreground="#79AAA5"/>
+          <TextBox Name="SysSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search system tools by name or keyword" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2" Visibility="Collapsed"/>
+          <TextBlock Text="⌕" Visibility="Collapsed" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="11,0,0,2" FontSize="21" FontWeight="SemiBold" Foreground="#79AAA5"/>
+         </Grid>
+         <ComboBox Name="SysCategoryFilter" Grid.Column="1" Height="34" Padding="8,4" FontSize="13" Margin="6,0,0,0" SelectedIndex="0" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F">
+           <ComboBox.Resources>
+            <Style TargetType="{x:Type ComboBox}">
+             <Setter Property="SnapsToDevicePixels" Value="True"/>
+             <Setter Property="OverridesDefaultStyle" Value="True"/>
+             <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
+             <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
+             <Setter Property="Template">
+              <Setter.Value>
+               <ControlTemplate TargetType="{x:Type ComboBox}">
+                <Grid>
+                 <ToggleButton x:Name="DropDownToggle" Focusable="False" ClickMode="Press" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                  <ToggleButton.Template>
+                   <ControlTemplate TargetType="{x:Type ToggleButton}">
+                    <Border x:Name="ToggleBorder" Background="{Binding Background, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderThickness="1" CornerRadius="6" Padding="8,4">
+                     <Grid>
+                      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/></Grid.ColumnDefinitions>
+                      <ContentPresenter Grid.Column="0" Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentStringFormat="{Binding SelectionBoxItemStringFormat, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" VerticalAlignment="Center" HorizontalAlignment="Left"/>
+                      <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="#B7D5D1" StrokeThickness="1.6" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                     </Grid>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                     <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ToggleBorder" Property="BorderBrush" Value="#79AAA5"/></Trigger>
+                     <Trigger Property="IsPressed" Value="True"><Setter TargetName="ToggleBorder" Property="Background" Value="#31515A"/></Trigger>
+                    </ControlTemplate.Triggers>
+                   </ControlTemplate>
+                  </ToggleButton.Template>
+                 </ToggleButton>
+                 <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+                  <Border Background="#263B46" BorderBrush="#6B9994" BorderThickness="1" CornerRadius="7" Padding="3" SnapsToDevicePixels="True">
+                   <ScrollViewer MaxHeight="320" CanContentScroll="True">
+                    <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                   </ScrollViewer>
+                  </Border>
+                 </Popup>
+                </Grid>
+                <ControlTemplate.Triggers>
+                 <Trigger Property="HasItems" Value="False"><Setter TargetName="PART_Popup" Property="MinHeight" Value="24"/></Trigger>
+                 <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
+                </ControlTemplate.Triggers>
+               </ControlTemplate>
+              </Setter.Value>
+             </Setter>
+            </Style>
+
+            <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#263B46"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#D9F0ED"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#6B9994"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
+           </ComboBox.Resources>
+           <ComboBox.ItemContainerStyle>
+            <Style TargetType="ComboBoxItem">
+             <Setter Property="Foreground" Value="#D9F0ED"/>
+             <Setter Property="Background" Value="#263B46"/>
+             <Setter Property="BorderBrush" Value="#6B9994"/>
+             <Setter Property="Padding" Value="9,6"/>
+             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+             <Style.Triggers>
+              <Trigger Property="IsHighlighted" Value="True">
+               <Setter Property="Background" Value="#6B9994"/>
+               <Setter Property="Foreground" Value="#FFFFFF"/>
+              </Trigger>
+              <Trigger Property="IsSelected" Value="True">
+               <Setter Property="Background" Value="#31515A"/>
+               <Setter Property="Foreground" Value="#FFFFFF"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+               <Setter Property="Foreground" Value="#78918F"/>
+              </Trigger>
+             </Style.Triggers>
+            </Style>
+           </ComboBox.ItemContainerStyle>
+ <ComboBoxItem Content="⚙️ All Categories"/><ComboBoxItem Content="⚙️ Performance &amp; Power"/><ComboBoxItem Content="⚙️ Startup &amp; Boot"/><ComboBoxItem Content="⚙️ Recovery &amp; Repair"/><ComboBoxItem Content="⚙️ Diagnostics &amp; Reports"/><ComboBoxItem Content="⚙️ Services &amp; Processes"/><ComboBoxItem Content="⚙️ Windows Settings"/><ComboBoxItem Content="⚙️ Storage &amp; Devices"/><ComboBoxItem Content="⚙️ Security &amp; Maintenance"/></ComboBox>
         </Grid>
-         <ComboBox Name="OptCategoryFilter" Grid.Column="1" Height="34" Padding="8,4" FontSize="13" Margin="6,0,0,0" SelectedIndex="0" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F">
-          <ComboBox.Resources>
-           <Style TargetType="{x:Type ComboBox}">
-            <Setter Property="SnapsToDevicePixels" Value="True"/>
-            <Setter Property="OverridesDefaultStyle" Value="True"/>
-            <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
-            <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
-            <Setter Property="Template">
-             <Setter.Value>
-              <ControlTemplate TargetType="{x:Type ComboBox}">
-               <Grid>
-                <ToggleButton x:Name="DropDownToggle" Focusable="False" ClickMode="Press" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
-                 <ToggleButton.Template>
-                  <ControlTemplate TargetType="{x:Type ToggleButton}">
-                   <Border x:Name="ToggleBorder" Background="{Binding Background, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderThickness="1" CornerRadius="6" Padding="8,4">
-                    <Grid>
-                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/></Grid.ColumnDefinitions>
-                     <ContentPresenter Grid.Column="0" Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentStringFormat="{Binding SelectionBoxItemStringFormat, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" VerticalAlignment="Center" HorizontalAlignment="Left"/>
-                     <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="#B7D5D1" StrokeThickness="1.6" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                    </Grid>
-                   </Border>
-                   <ControlTemplate.Triggers>
-                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ToggleBorder" Property="BorderBrush" Value="#79AAA5"/></Trigger>
-                    <Trigger Property="IsPressed" Value="True"><Setter TargetName="ToggleBorder" Property="Background" Value="#31515A"/></Trigger>
-                   </ControlTemplate.Triggers>
-                  </ControlTemplate>
-                 </ToggleButton.Template>
-                </ToggleButton>
-                <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
-                 <Border Background="#263B46" BorderBrush="#6B9994" BorderThickness="1" CornerRadius="7" Padding="3" SnapsToDevicePixels="True">
-                  <ScrollViewer MaxHeight="320" CanContentScroll="True">
-                   <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
-                  </ScrollViewer>
-                 </Border>
-                </Popup>
-               </Grid>
-               <ControlTemplate.Triggers>
-                <Trigger Property="HasItems" Value="False"><Setter TargetName="PART_Popup" Property="MinHeight" Value="24"/></Trigger>
-                <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
-               </ControlTemplate.Triggers>
-              </ControlTemplate>
-             </Setter.Value>
-            </Setter>
-           </Style>
+       </Grid>
+       <TextBlock Name="SysResultsCount" Text="50 system tools" Foreground="#AEB8C8" Margin="0,0,0,12"/>
+       <UniformGrid Name="SysToolsGrid" Columns="3"/>
+      </StackPanel>
+     </Border>
+    </ScrollViewer>
+    </TabItem>
+ <TabItem Header="Networks">
+     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+      <Border Padding="20">
+       <StackPanel>
+        <Grid Margin="0,0,0,12">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
+        <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,16,0">
+         <TextBlock Text="Network Diagnostic &amp; Repair Center" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,0,0,8"/>
+        </StackPanel>
+        <Grid Grid.Column="1" VerticalAlignment="Center"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+         <Grid Grid.Column="0" Margin="0,0,6,0">
+          <TextBox Name="NetSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search network tools by name or keyword" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2" Visibility="Collapsed"/>
+          <TextBlock Text="⌕" Visibility="Collapsed" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="11,0,0,2" FontSize="21" FontWeight="SemiBold" Foreground="#79AAA5"/>
+         </Grid>
+         <ComboBox Name="NetCategoryFilter" Grid.Column="1" Height="34" Padding="8,4" FontSize="13" Margin="6,0,0,0" SelectedIndex="0" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F">
+           <ComboBox.Resources>
+            <Style TargetType="{x:Type ComboBox}">
+             <Setter Property="SnapsToDevicePixels" Value="True"/>
+             <Setter Property="OverridesDefaultStyle" Value="True"/>
+             <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
+             <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
+             <Setter Property="Template">
+              <Setter.Value>
+               <ControlTemplate TargetType="{x:Type ComboBox}">
+                <Grid>
+                 <ToggleButton x:Name="DropDownToggle" Focusable="False" ClickMode="Press" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                  <ToggleButton.Template>
+                   <ControlTemplate TargetType="{x:Type ToggleButton}">
+                    <Border x:Name="ToggleBorder" Background="{Binding Background, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderThickness="1" CornerRadius="6" Padding="8,4">
+                     <Grid>
+                      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/></Grid.ColumnDefinitions>
+                      <ContentPresenter Grid.Column="0" Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentStringFormat="{Binding SelectionBoxItemStringFormat, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" VerticalAlignment="Center" HorizontalAlignment="Left"/>
+                      <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="#B7D5D1" StrokeThickness="1.6" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                     </Grid>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                     <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ToggleBorder" Property="BorderBrush" Value="#79AAA5"/></Trigger>
+                     <Trigger Property="IsPressed" Value="True"><Setter TargetName="ToggleBorder" Property="Background" Value="#31515A"/></Trigger>
+                    </ControlTemplate.Triggers>
+                   </ControlTemplate>
+                  </ToggleButton.Template>
+                 </ToggleButton>
+                 <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+                  <Border Background="#263B46" BorderBrush="#6B9994" BorderThickness="1" CornerRadius="7" Padding="3" SnapsToDevicePixels="True">
+                   <ScrollViewer MaxHeight="320" CanContentScroll="True">
+                    <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                   </ScrollViewer>
+                  </Border>
+                 </Popup>
+                </Grid>
+                <ControlTemplate.Triggers>
+                 <Trigger Property="HasItems" Value="False"><Setter TargetName="PART_Popup" Property="MinHeight" Value="24"/></Trigger>
+                 <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
+                </ControlTemplate.Triggers>
+               </ControlTemplate>
+              </Setter.Value>
+             </Setter>
+            </Style>
 
-           <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#263B46"/>
-           <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#D9F0ED"/>
-           <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#6B9994"/>
-           <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
-          </ComboBox.Resources>
-          <ComboBox.ItemContainerStyle>
-           <Style TargetType="ComboBoxItem">
-            <Setter Property="Foreground" Value="#D9F0ED"/>
-            <Setter Property="Background" Value="#263B46"/>
-            <Setter Property="BorderBrush" Value="#6B9994"/>
-            <Setter Property="Padding" Value="9,6"/>
-            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
-            <Style.Triggers>
-             <Trigger Property="IsHighlighted" Value="True">
-              <Setter Property="Background" Value="#6B9994"/>
-              <Setter Property="Foreground" Value="#FFFFFF"/>
-             </Trigger>
-             <Trigger Property="IsSelected" Value="True">
-              <Setter Property="Background" Value="#31515A"/>
-              <Setter Property="Foreground" Value="#FFFFFF"/>
-             </Trigger>
-             <Trigger Property="IsEnabled" Value="False">
-              <Setter Property="Foreground" Value="#78918F"/>
-             </Trigger>
-            </Style.Triggers>
-           </Style>
-          </ComboBox.ItemContainerStyle>
+            <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#263B46"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#D9F0ED"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#6B9994"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
+           </ComboBox.Resources>
+           <ComboBox.ItemContainerStyle>
+            <Style TargetType="ComboBoxItem">
+             <Setter Property="Foreground" Value="#D9F0ED"/>
+             <Setter Property="Background" Value="#263B46"/>
+             <Setter Property="BorderBrush" Value="#6B9994"/>
+             <Setter Property="Padding" Value="9,6"/>
+             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+             <Style.Triggers>
+              <Trigger Property="IsHighlighted" Value="True">
+               <Setter Property="Background" Value="#6B9994"/>
+               <Setter Property="Foreground" Value="#FFFFFF"/>
+              </Trigger>
+              <Trigger Property="IsSelected" Value="True">
+               <Setter Property="Background" Value="#31515A"/>
+               <Setter Property="Foreground" Value="#FFFFFF"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+               <Setter Property="Foreground" Value="#78918F"/>
+              </Trigger>
+             </Style.Triggers>
+            </Style>
+           </ComboBox.ItemContainerStyle>
+ <ComboBoxItem Content="🌐 All Categories"/><ComboBoxItem Content="🌐 Diagnostics"/><ComboBoxItem Content="🌐 DNS &amp; IP"/><ComboBoxItem Content="🌐 Repair &amp; Reset"/><ComboBoxItem Content="🌐 Adapters &amp; Wi-Fi"/><ComboBoxItem Content="🌐 Connections &amp; Ports"/><ComboBoxItem Content="🌐 Reports &amp; Settings"/></ComboBox>
+        </Grid>
+       </Grid>
+       <TextBlock Name="NetResultsCount" Text="50 network tools" Foreground="#AEB8C8" Margin="0,0,0,12"/>
+        <UniformGrid Name="NetToolsGrid" Columns="3"/>
+       </StackPanel>
+      </Border>
+     </ScrollViewer>
+    </TabItem>
+ <TabItem Header="Utilities">
+     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" CanContentScroll="True">
+      <Border Padding="20">
+       <StackPanel>
+       <Grid Margin="0,0,0,12">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
+        <TextBlock Grid.Column="0" Text="Quick Administration Utilities" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" VerticalAlignment="Center" Margin="0,0,16,0"/>
+        <Grid Grid.Column="1" VerticalAlignment="Center"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+         <Grid Grid.Column="0" Margin="0,0,6,0">
+          <TextBox Name="UtilSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search Utilities by name or keyword" Text="" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2" Visibility="Collapsed"/>
+          <TextBlock Text="⌕" Visibility="Collapsed" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="11,0,0,2" FontSize="21" FontWeight="SemiBold" Foreground="#79AAA5"/>
+         </Grid>
+         <ComboBox Name="UtilCategoryFilter" Grid.Column="1" Height="34" Padding="8,4" FontSize="13" Margin="6,0,0,0" SelectedIndex="0" VerticalContentAlignment="Center" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F">
+           <ComboBox.Resources>
+            <Style TargetType="{x:Type ComboBox}">
+             <Setter Property="SnapsToDevicePixels" Value="True"/>
+             <Setter Property="OverridesDefaultStyle" Value="True"/>
+             <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
+             <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
+             <Setter Property="Template">
+              <Setter.Value>
+               <ControlTemplate TargetType="{x:Type ComboBox}">
+                <Grid>
+                 <ToggleButton x:Name="DropDownToggle" Focusable="False" ClickMode="Press" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                  <ToggleButton.Template>
+                   <ControlTemplate TargetType="{x:Type ToggleButton}">
+                    <Border x:Name="ToggleBorder" Background="{Binding Background, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderThickness="1" CornerRadius="6" Padding="8,4">
+                     <Grid>
+                      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/></Grid.ColumnDefinitions>
+                      <ContentPresenter Grid.Column="0" Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentStringFormat="{Binding SelectionBoxItemStringFormat, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" VerticalAlignment="Center" HorizontalAlignment="Left"/>
+                      <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="#B7D5D1" StrokeThickness="1.6" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                     </Grid>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                     <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ToggleBorder" Property="BorderBrush" Value="#79AAA5"/></Trigger>
+                     <Trigger Property="IsPressed" Value="True"><Setter TargetName="ToggleBorder" Property="Background" Value="#31515A"/></Trigger>
+                    </ControlTemplate.Triggers>
+                   </ControlTemplate>
+                  </ToggleButton.Template>
+                 </ToggleButton>
+                 <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+                  <Border Background="#263B46" BorderBrush="#6B9994" BorderThickness="1" CornerRadius="7" Padding="3" SnapsToDevicePixels="True">
+                   <ScrollViewer MaxHeight="320" CanContentScroll="True">
+                    <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                   </ScrollViewer>
+                  </Border>
+                 </Popup>
+                </Grid>
+                <ControlTemplate.Triggers>
+                 <Trigger Property="HasItems" Value="False"><Setter TargetName="PART_Popup" Property="MinHeight" Value="24"/></Trigger>
+                 <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
+                </ControlTemplate.Triggers>
+               </ControlTemplate>
+              </Setter.Value>
+             </Setter>
+            </Style>
 
-          <ComboBoxItem Content="⚙️ All Categories"/><ComboBoxItem Content="⚙️ Performance &amp; Power"/><ComboBoxItem Content="⚙️ Startup &amp; Background"/><ComboBoxItem Content="⚙️ Storage &amp; Cleanup"/><ComboBoxItem Content="⚙️ Windows Maintenance"/><ComboBoxItem Content="⚙️ Network &amp; Responsiveness"/><ComboBoxItem Content="⚙️ Privacy &amp; Features"/><ComboBoxItem Content="⚙️ Diagnostics &amp; Monitoring"/>
+            <!-- Keep both the dropdown surface and its outer popup frame on the app's dark palette. -->
+            <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#263B46"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#D9F0ED"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.MenuBrushKey}" Color="#263B46"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.MenuTextBrushKey}" Color="#D9F0ED"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.ControlBrushKey}" Color="#263B46"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.ControlTextBrushKey}" Color="#D9F0ED"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.WindowFrameBrushKey}" Color="#6B9994"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.ActiveBorderBrushKey}" Color="#6B9994"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#6B9994"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
+           </ComboBox.Resources>
+           <ComboBox.ItemContainerStyle>
+            <Style TargetType="ComboBoxItem">
+             <Setter Property="Foreground" Value="#D9F0ED"/>
+             <Setter Property="Background" Value="#263B46"/>
+             <Setter Property="BorderBrush" Value="#6B9994"/>
+             <Setter Property="Padding" Value="9,6"/>
+             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+             <Style.Triggers>
+              <Trigger Property="IsHighlighted" Value="True">
+               <Setter Property="Background" Value="#6B9994"/>
+               <Setter Property="Foreground" Value="#FFFFFF"/>
+              </Trigger>
+              <Trigger Property="IsSelected" Value="True">
+               <Setter Property="Background" Value="#31515A"/>
+               <Setter Property="Foreground" Value="#FFFFFF"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+               <Setter Property="Foreground" Value="#78918F"/>
+              </Trigger>
+             </Style.Triggers>
+            </Style>
+           </ComboBox.ItemContainerStyle>
+
+          <ComboBoxItem Content="All Categories"/><ComboBoxItem Content="System &amp; Performance"/><ComboBoxItem Content="Hardware &amp; Devices"/><ComboBoxItem Content="Network &amp; Security"/><ComboBoxItem Content="Administration"/><ComboBoxItem Content="Troubleshooting &amp; Recovery"/>
          </ComboBox>
         </Grid>
        </Grid>
-       <TextBlock Name="OptResultsCount" Foreground="#AEB8C8" Margin="0,0,0,10"/>
-       <UniformGrid Name="OptToolsGrid" Columns="2"/>
-      </StackPanel>
-     </Border>
-    </ScrollViewer>
-   </TabItem>
-
-   <!-- 5. SECURITY -->
-   <TabItem Header="Security">
-    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-     <Border Padding="20">
-      <StackPanel>
-       <Grid Margin="0,0,0,12">
-       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
-       <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,16,0">
-        <TextBlock Text="Security &amp; Privacy Console" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,0,0,8"/>
-        <TextBlock Text="50 security and privacy tools for protection, firewall, accounts, privacy, and auditing." Foreground="#AEB8C8" TextWrapping="Wrap"/>
+       <TextBlock Name="UtilResultsCount" Text="50 utilities" Foreground="#AEB8C8" Margin="0,0,0,12"/>
+       <UniformGrid Name="UtilButtonsPanel" Columns="4">
+        <Button Name="UtilControlPanelBtn" Content="🛠 Open Classic Control Panel" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilRegeditBtn" Content="🛠 Open Registry Editor" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilDevMgmtBtn" Content="🛠 Open Device Manager" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilSysInfoBtn" Content="🛠 Open System Information" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilTaskMgrBtn" Content="🛠 Open Task Manager" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilServicesBtn" Content="🛠 Open Services" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilEventViewerBtn" Content="🛠 Open Event Viewer" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilResourceMonitorBtn" Content="🛠 Open Resource Monitor" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilPerformanceMonitorBtn" Content="🛠 Open Performance Monitor" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilDiskMgmtBtn" Content="🛠 Open Disk Management" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilComputerMgmtBtn" Content="🛠 Open Computer Management" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilTaskSchedulerBtn" Content="🛠 Open Task Scheduler" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilFirewallAdvancedBtn" Content="🛠 Open Advanced Firewall" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilNetworkConnectionsBtn" Content="🛠 Open Network Connections" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilSystemPropertiesBtn" Content="🛠 Open System Properties" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilProgramsFeaturesBtn" Content="🛠 Open Programs and Features" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilWindowsFeaturesBtn" Content="🛠 Open Windows Features" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilPowerOptionsBtn" Content="🛠 Open Power Options" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilSoundBtn" Content="🛠 Open Sound Settings" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilMemoryDiagnosticBtn" Content="🛠 Open Windows Memory Diagnostic" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilCertificatesBtn" Content="🛠 Open Certificate Manager" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilCredentialManagerBtn" Content="🛠 Open Credential Manager" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilGroupPolicyBtn" Content="🛠 Open Local Group Policy" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilLocalUsersBtn" Content="🛠 Open Local Users and Groups" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilTPMBtn" Content="🛠 Open TPM Management" Tag="Network &amp; Security" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilSystemConfigBtn" Content="🛠 Open System Configuration" Tag="System &amp; Performance" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilAboutWindowsBtn" Content="🛠 About Windows" Tag="System &amp; Performance" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilAdvancedStartupBtn" Content="🛠 Advanced Startup Options" Tag="Troubleshooting &amp; Recovery" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilRecoveryBtn" Content="🛠 Recovery Options" Tag="Troubleshooting &amp; Recovery" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilWindowsUpdateBtn" Content="🛠 Windows Update" Tag="System &amp; Performance" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilStorageSettingsBtn" Content="🛠 Storage Settings" Tag="System &amp; Performance" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilAppsSettingsBtn" Content="🛠 Installed Apps" Tag="Administration" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilPrivacySettingsBtn" Content="🛠 Privacy Settings" Tag="Network &amp; Security" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilProxySettingsBtn" Content="🛠 Proxy Settings" Tag="Network &amp; Security" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilBluetoothBtn" Content="🛠 Bluetooth Settings" Tag="Hardware &amp; Devices" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilDisplaySettingsBtn" Content="🛠 Display Settings" Tag="Hardware &amp; Devices" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilMouseSettingsBtn" Content="🛠 Mouse Settings" Tag="Hardware &amp; Devices" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilKeyboardSettingsBtn" Content="🛠 Keyboard Settings" Tag="Hardware &amp; Devices" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilPrintersBtn" Content="🛠 Printers &amp; Scanners" Tag="Hardware &amp; Devices" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilDateTimeBtn" Content="🛠 Date &amp; Time Settings" Tag="System &amp; Performance" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilRegionBtn" Content="🛠 Region Settings" Tag="Administration" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilEnvVariablesBtn" Content="🛠 Environment Variables" Tag="Administration" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilWindowsDefenderBtn" Content="🛠 Windows Security" Tag="Network &amp; Security" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilReliabilityBtn" Content="🛠 Reliability Monitor" Tag="Troubleshooting &amp; Recovery" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilStepsRecorderBtn" Content="🛠 Steps Recorder (if available)" Tag="Troubleshooting &amp; Recovery" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilDiskCleanupBtn" Content="🛠 Disk Cleanup" Tag="Troubleshooting &amp; Recovery" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilNetworkResetBtn" Content="🛠 Network Status" Tag="Network &amp; Security" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilIndexingBtn" Content="🛠 Indexing Options" Tag="System &amp; Performance" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilFontsBtn" Content="🛠 Fonts" Tag="Administration" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilColorMgmtBtn" Content="🛠 Color Management" Tag="Hardware &amp; Devices" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+       </UniformGrid>
        </StackPanel>
-       <Grid Grid.Column="1" VerticalAlignment="Center"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-        <Grid Grid.Column="0" Margin="0,0,6,0">
-         <TextBox Name="SecSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search security tools by name or keyword" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2"/>
-         <TextBlock Text="⌕" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="11,0,0,2" FontSize="21" FontWeight="SemiBold" Foreground="#79AAA5"/>
-        </Grid>
-        <ComboBox Name="SecCategoryFilter" Grid.Column="1" Height="34" Padding="8,4" FontSize="13" Margin="6,0,0,0" SelectedIndex="0" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F">
-          <ComboBox.Resources>
-           <Style TargetType="{x:Type ComboBox}">
-            <Setter Property="SnapsToDevicePixels" Value="True"/>
-            <Setter Property="OverridesDefaultStyle" Value="True"/>
-            <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
-            <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
-            <Setter Property="Template">
-             <Setter.Value>
-              <ControlTemplate TargetType="{x:Type ComboBox}">
-               <Grid>
-                <ToggleButton x:Name="DropDownToggle" Focusable="False" ClickMode="Press" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
-                 <ToggleButton.Template>
-                  <ControlTemplate TargetType="{x:Type ToggleButton}">
-                   <Border x:Name="ToggleBorder" Background="{Binding Background, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderThickness="1" CornerRadius="6" Padding="8,4">
-                    <Grid>
-                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/></Grid.ColumnDefinitions>
-                     <ContentPresenter Grid.Column="0" Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentStringFormat="{Binding SelectionBoxItemStringFormat, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" VerticalAlignment="Center" HorizontalAlignment="Left"/>
-                     <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="#B7D5D1" StrokeThickness="1.6" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                    </Grid>
-                   </Border>
-                   <ControlTemplate.Triggers>
-                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ToggleBorder" Property="BorderBrush" Value="#79AAA5"/></Trigger>
-                    <Trigger Property="IsPressed" Value="True"><Setter TargetName="ToggleBorder" Property="Background" Value="#31515A"/></Trigger>
-                   </ControlTemplate.Triggers>
-                  </ControlTemplate>
-                 </ToggleButton.Template>
-                </ToggleButton>
-                <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
-                 <Border Background="#263B46" BorderBrush="#6B9994" BorderThickness="1" CornerRadius="7" Padding="3" SnapsToDevicePixels="True">
-                  <ScrollViewer MaxHeight="320" CanContentScroll="True">
-                   <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
-                  </ScrollViewer>
-                 </Border>
-                </Popup>
-               </Grid>
-               <ControlTemplate.Triggers>
-                <Trigger Property="HasItems" Value="False"><Setter TargetName="PART_Popup" Property="MinHeight" Value="24"/></Trigger>
-                <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
-               </ControlTemplate.Triggers>
-              </ControlTemplate>
-             </Setter.Value>
-            </Setter>
-           </Style>
-
-           <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#263B46"/>
-           <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#D9F0ED"/>
-           <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#6B9994"/>
-           <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
-          </ComboBox.Resources>
-          <ComboBox.ItemContainerStyle>
-           <Style TargetType="ComboBoxItem">
-            <Setter Property="Foreground" Value="#D9F0ED"/>
-            <Setter Property="Background" Value="#263B46"/>
-            <Setter Property="BorderBrush" Value="#6B9994"/>
-            <Setter Property="Padding" Value="9,6"/>
-            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
-            <Style.Triggers>
-             <Trigger Property="IsHighlighted" Value="True">
-              <Setter Property="Background" Value="#6B9994"/>
-              <Setter Property="Foreground" Value="#FFFFFF"/>
-             </Trigger>
-             <Trigger Property="IsSelected" Value="True">
-              <Setter Property="Background" Value="#31515A"/>
-              <Setter Property="Foreground" Value="#FFFFFF"/>
-             </Trigger>
-             <Trigger Property="IsEnabled" Value="False">
-              <Setter Property="Foreground" Value="#78918F"/>
-             </Trigger>
-            </Style.Triggers>
-           </Style>
-          </ComboBox.ItemContainerStyle>
-<ComboBoxItem Content="🛡️ All Categories"/><ComboBoxItem Content="🛡️ Defender &amp; Antivirus"/><ComboBoxItem Content="🛡️ Firewall &amp; Network"/><ComboBoxItem Content="🛡️ Privacy &amp; Tracking"/><ComboBoxItem Content="🛡️ Accounts &amp; Sign-in"/><ComboBoxItem Content="🛡️ Encryption &amp; Protection"/><ComboBoxItem Content="🛡️ Auditing &amp; Reports"/><ComboBoxItem Content="🛡️ Security Settings"/></ComboBox>
-       </Grid>
-      </Grid>
-      <TextBlock Name="SecResultsCount" Foreground="#AEB8C8" Margin="0,0,0,10"/>
-       <UniformGrid Name="SecToolsGrid" Columns="2"/>
-      </StackPanel>
-     </Border>
-    </ScrollViewer>
+      </Border>
+     </ScrollViewer>
+    </TabItem>
+</TabControl>
+    </Grid>
    </TabItem>
-
-   <!-- 6. SYSTEM -->
-   <TabItem Header="System">
-    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-    <Border Padding="20">
-     <StackPanel>
-      <Grid Margin="0,0,0,12">
-       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
-       <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,16,0">
-        <TextBlock Text="Advanced System Configuration" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,0,0,8"/>
-        <TextBlock Text="50 system tools for performance, startup, recovery, diagnostics, services, and configuration." Foreground="#AEB8C8" TextWrapping="Wrap"/>
-       </StackPanel>
-       <Grid Grid.Column="1" VerticalAlignment="Center"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-        <Grid Grid.Column="0" Margin="0,0,6,0">
-         <TextBox Name="SysSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search system tools by name or keyword" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2"/>
-         <TextBlock Text="⌕" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="11,0,0,2" FontSize="21" FontWeight="SemiBold" Foreground="#79AAA5"/>
-        </Grid>
-        <ComboBox Name="SysCategoryFilter" Grid.Column="1" Height="34" Padding="8,4" FontSize="13" Margin="6,0,0,0" SelectedIndex="0" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F">
-          <ComboBox.Resources>
-           <Style TargetType="{x:Type ComboBox}">
-            <Setter Property="SnapsToDevicePixels" Value="True"/>
-            <Setter Property="OverridesDefaultStyle" Value="True"/>
-            <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
-            <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
-            <Setter Property="Template">
-             <Setter.Value>
-              <ControlTemplate TargetType="{x:Type ComboBox}">
-               <Grid>
-                <ToggleButton x:Name="DropDownToggle" Focusable="False" ClickMode="Press" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
-                 <ToggleButton.Template>
-                  <ControlTemplate TargetType="{x:Type ToggleButton}">
-                   <Border x:Name="ToggleBorder" Background="{Binding Background, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderThickness="1" CornerRadius="6" Padding="8,4">
-                    <Grid>
-                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/></Grid.ColumnDefinitions>
-                     <ContentPresenter Grid.Column="0" Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentStringFormat="{Binding SelectionBoxItemStringFormat, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" VerticalAlignment="Center" HorizontalAlignment="Left"/>
-                     <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="#B7D5D1" StrokeThickness="1.6" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                    </Grid>
-                   </Border>
-                   <ControlTemplate.Triggers>
-                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ToggleBorder" Property="BorderBrush" Value="#79AAA5"/></Trigger>
-                    <Trigger Property="IsPressed" Value="True"><Setter TargetName="ToggleBorder" Property="Background" Value="#31515A"/></Trigger>
-                   </ControlTemplate.Triggers>
-                  </ControlTemplate>
-                 </ToggleButton.Template>
-                </ToggleButton>
-                <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
-                 <Border Background="#263B46" BorderBrush="#6B9994" BorderThickness="1" CornerRadius="7" Padding="3" SnapsToDevicePixels="True">
-                  <ScrollViewer MaxHeight="320" CanContentScroll="True">
-                   <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
-                  </ScrollViewer>
-                 </Border>
-                </Popup>
-               </Grid>
-               <ControlTemplate.Triggers>
-                <Trigger Property="HasItems" Value="False"><Setter TargetName="PART_Popup" Property="MinHeight" Value="24"/></Trigger>
-                <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
-               </ControlTemplate.Triggers>
-              </ControlTemplate>
-             </Setter.Value>
-            </Setter>
-           </Style>
-
-           <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#263B46"/>
-           <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#D9F0ED"/>
-           <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#6B9994"/>
-           <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
-          </ComboBox.Resources>
-          <ComboBox.ItemContainerStyle>
-           <Style TargetType="ComboBoxItem">
-            <Setter Property="Foreground" Value="#D9F0ED"/>
-            <Setter Property="Background" Value="#263B46"/>
-            <Setter Property="BorderBrush" Value="#6B9994"/>
-            <Setter Property="Padding" Value="9,6"/>
-            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
-            <Style.Triggers>
-             <Trigger Property="IsHighlighted" Value="True">
-              <Setter Property="Background" Value="#6B9994"/>
-              <Setter Property="Foreground" Value="#FFFFFF"/>
-             </Trigger>
-             <Trigger Property="IsSelected" Value="True">
-              <Setter Property="Background" Value="#31515A"/>
-              <Setter Property="Foreground" Value="#FFFFFF"/>
-             </Trigger>
-             <Trigger Property="IsEnabled" Value="False">
-              <Setter Property="Foreground" Value="#78918F"/>
-             </Trigger>
-            </Style.Triggers>
-           </Style>
-          </ComboBox.ItemContainerStyle>
-<ComboBoxItem Content="⚙️ All Categories"/><ComboBoxItem Content="⚙️ Performance &amp; Power"/><ComboBoxItem Content="⚙️ Startup &amp; Boot"/><ComboBoxItem Content="⚙️ Recovery &amp; Repair"/><ComboBoxItem Content="⚙️ Diagnostics &amp; Reports"/><ComboBoxItem Content="⚙️ Services &amp; Processes"/><ComboBoxItem Content="⚙️ Windows Settings"/><ComboBoxItem Content="⚙️ Storage &amp; Devices"/><ComboBoxItem Content="⚙️ Security &amp; Maintenance"/></ComboBox>
+ <TabItem Header="Cleanup">
+     <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+      <DockPanel Grid.Row="0" Margin="0" LastChildFill="False">
+       
+       <TextBox Name="CleanupSearchBox" Visibility="Collapsed" Width="300" Height="34" Padding="10,4" VerticalContentAlignment="Center"
+                Background="#101F35" Foreground="#EAF4FF" BorderBrush="#2874C7"
+                ToolTip="Search cleanup options on this page"/>
+      </DockPanel>
+      <TabControl Grid.Row="1" Name="CleanupSubTabs" Tag="CLEAN UP CENTER" Style="{StaticResource OverviewSubTabControlStyle}" TabStripPlacement="Right" ItemContainerStyle="{StaticResource OverviewSubTabItemStyle}" Background="#18181B" BorderThickness="0" Margin="0,0,0,0">
+      <TabItem Header="Smart" IsSelected="True">
+       <Grid Margin="18">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <StackPanel Grid.Row="0" Margin="2,0,2,9">
+         <TextBlock Text="CLEAN UP CENTER" FontSize="21" FontWeight="Bold" Foreground="#F4F4F5"/>
+        </StackPanel>
+        <Border Grid.Row="1" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="12" Padding="14">
+         <Grid>
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+          <Grid Grid.Row="0" Margin="0,0,0,10">
+           <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+           <StackPanel>
+            <TextBlock Text="SAFE CLEANUP" FontSize="14" FontWeight="SemiBold" Foreground="#E4E4E7"/>
+            <TextBlock Name="CleanupScanSummary" Text="No scan performed yet." Foreground="#D1D5DB" FontSize="11" Margin="0,3,0,0" TextWrapping="Wrap"/>
+           </StackPanel>
+           <Button Name="CleanupScanBtn" Grid.Column="1" Content="Scan Now" Width="105" Height="32" Background="#263B36" Foreground="#A7F3D0" BorderBrush="#36594D"/>
+          </Grid>
+          <Grid Grid.Row="1" Margin="0,0,0,8">
+           <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+           <TextBlock Grid.Column="0" Text="Select the categories you want to review" FontSize="12" Foreground="#CBD5E1" VerticalAlignment="Center"/>
+           <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Name="CleanupSelectAllBtn" Content="Select All" Height="28" MinWidth="88" Margin="0,0,6,0" Padding="10,3" Background="#244B3B" Foreground="#D1FAE5" BorderBrush="#3F8B68" FontSize="10" FontWeight="SemiBold"/>
+            <Button Name="CleanupCancelSelectionBtn" Content="Cancel Selection" Height="28" MinWidth="112" Padding="10,3" Background="#49313A" Foreground="#FFE4E6" BorderBrush="#8B5363" FontSize="10" FontWeight="SemiBold"/>
+           </StackPanel>
+          </Grid>
+          <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
+           <StackPanel>
+            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupUserTempCheck" Content="User temporary files" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Temporary files in your Windows user profile." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupUserTempInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupWindowsTempCheck" Content="Windows temporary files" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Temporary files under the Windows Temp folder." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupWindowsTempInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupUpdateCheck" Content="Windows &amp; NVIDIA update leftovers" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Windows Update downloads and old NVIDIA app update artifacts (30+ days)." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupUpdateInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupWerCheck" Content="Windows error reports" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Archived and queued Windows Error Reporting files." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupWerInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupShaderCheck" Content="GPU shader cache" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Rebuildable DirectX, NVIDIA, AMD and Intel shader caches (7+ days)." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupShaderInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupAppCacheCheck" Content="Application caches" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Recognized rebuildable caches for common browsers, chat, media, gaming and developer apps (7+ days)." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupAppCacheInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupDeliveryCheck" Content="Delivery Optimization cache" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Cached update delivery files that Windows can download again." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupDeliveryInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+           </StackPanel>
+          </ScrollViewer>
+          <StackPanel Grid.Row="3" Margin="0,10,0,8">
+           <ProgressBar Name="CleanupProgress" Height="7" Minimum="0" Maximum="100" Value="0" Background="#292933" Foreground="#6FC6A5"/>
+           <Grid Margin="0,5,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Name="CleanupProgressText" Text="Ready" Foreground="#CBD5E1" FontSize="11" TextTrimming="CharacterEllipsis"/><TextBlock Name="CleanupProgressPercent" Grid.Column="1" Text="0%" Foreground="#8BDCC5" FontSize="12" FontWeight="Bold" Margin="10,0,0,0"/><TextBlock Name="CleanupSelectedSummary" Visibility="Collapsed" Text="Selected: 0 files • 0 MB"/></Grid>
+          </StackPanel>
+          <Button Name="CleanupRunBtn" Grid.Row="4" Content="Clean Selected" Height="36" HorizontalAlignment="Stretch" Background="#28483E" Foreground="#C7F9E8" BorderBrush="#416B5D" IsEnabled="False"/>
+         </Grid>
+        </Border>
        </Grid>
-      </Grid>
-      <TextBlock Name="SysResultsCount" Text="50 system tools" Foreground="#AEB8C8" Margin="0,0,0,12"/>
-      <UniformGrid Name="SysToolsGrid" Columns="2"/>
-     </StackPanel>
-    </Border>
-   </ScrollViewer>
-   </TabItem>
-
-   <!-- 7. NETWORK -->
-   <TabItem Header="Network">
-    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-     <Border Padding="20">
-      <StackPanel>
-       <Grid Margin="0,0,0,12">
-       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
-       <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,16,0">
-        <TextBlock Text="Network Diagnostic &amp; Repair Center" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,0,0,8"/>
-        <TextBlock Text="Search, diagnose, inspect, and repair common Windows networking issues." Foreground="#AEB8C8" TextWrapping="Wrap"/>
-       </StackPanel>
-       <Grid Grid.Column="1" VerticalAlignment="Center"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-        <Grid Grid.Column="0" Margin="0,0,6,0">
-         <TextBox Name="NetSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search network tools by name or keyword" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2"/>
-         <TextBlock Text="⌕" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="11,0,0,2" FontSize="21" FontWeight="SemiBold" Foreground="#79AAA5"/>
-        </Grid>
-        <ComboBox Name="NetCategoryFilter" Grid.Column="1" Height="34" Padding="8,4" FontSize="13" Margin="6,0,0,0" SelectedIndex="0" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F">
-          <ComboBox.Resources>
-           <Style TargetType="{x:Type ComboBox}">
-            <Setter Property="SnapsToDevicePixels" Value="True"/>
-            <Setter Property="OverridesDefaultStyle" Value="True"/>
-            <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
-            <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
-            <Setter Property="Template">
-             <Setter.Value>
-              <ControlTemplate TargetType="{x:Type ComboBox}">
-               <Grid>
-                <ToggleButton x:Name="DropDownToggle" Focusable="False" ClickMode="Press" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
-                 <ToggleButton.Template>
-                  <ControlTemplate TargetType="{x:Type ToggleButton}">
-                   <Border x:Name="ToggleBorder" Background="{Binding Background, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderThickness="1" CornerRadius="6" Padding="8,4">
-                    <Grid>
-                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/></Grid.ColumnDefinitions>
-                     <ContentPresenter Grid.Column="0" Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentStringFormat="{Binding SelectionBoxItemStringFormat, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" VerticalAlignment="Center" HorizontalAlignment="Left"/>
-                     <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="#B7D5D1" StrokeThickness="1.6" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                    </Grid>
-                   </Border>
-                   <ControlTemplate.Triggers>
-                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ToggleBorder" Property="BorderBrush" Value="#79AAA5"/></Trigger>
-                    <Trigger Property="IsPressed" Value="True"><Setter TargetName="ToggleBorder" Property="Background" Value="#31515A"/></Trigger>
-                   </ControlTemplate.Triggers>
-                  </ControlTemplate>
-                 </ToggleButton.Template>
-                </ToggleButton>
-                <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
-                 <Border Background="#263B46" BorderBrush="#6B9994" BorderThickness="1" CornerRadius="7" Padding="3" SnapsToDevicePixels="True">
-                  <ScrollViewer MaxHeight="320" CanContentScroll="True">
-                   <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
-                  </ScrollViewer>
-                 </Border>
-                </Popup>
-               </Grid>
-               <ControlTemplate.Triggers>
-                <Trigger Property="HasItems" Value="False"><Setter TargetName="PART_Popup" Property="MinHeight" Value="24"/></Trigger>
-                <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
-               </ControlTemplate.Triggers>
-              </ControlTemplate>
-             </Setter.Value>
-            </Setter>
-           </Style>
-
-           <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#263B46"/>
-           <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#D9F0ED"/>
-           <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#6B9994"/>
-           <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
-          </ComboBox.Resources>
-          <ComboBox.ItemContainerStyle>
-           <Style TargetType="ComboBoxItem">
-            <Setter Property="Foreground" Value="#D9F0ED"/>
-            <Setter Property="Background" Value="#263B46"/>
-            <Setter Property="BorderBrush" Value="#6B9994"/>
-            <Setter Property="Padding" Value="9,6"/>
-            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
-            <Style.Triggers>
-             <Trigger Property="IsHighlighted" Value="True">
-              <Setter Property="Background" Value="#6B9994"/>
-              <Setter Property="Foreground" Value="#FFFFFF"/>
-             </Trigger>
-             <Trigger Property="IsSelected" Value="True">
-              <Setter Property="Background" Value="#31515A"/>
-              <Setter Property="Foreground" Value="#FFFFFF"/>
-             </Trigger>
-             <Trigger Property="IsEnabled" Value="False">
-              <Setter Property="Foreground" Value="#78918F"/>
-             </Trigger>
-            </Style.Triggers>
-           </Style>
-          </ComboBox.ItemContainerStyle>
-<ComboBoxItem Content="🌐 All Categories"/><ComboBoxItem Content="🌐 Diagnostics"/><ComboBoxItem Content="🌐 DNS &amp; IP"/><ComboBoxItem Content="🌐 Repair &amp; Reset"/><ComboBoxItem Content="🌐 Adapters &amp; Wi-Fi"/><ComboBoxItem Content="🌐 Connections &amp; Ports"/><ComboBoxItem Content="🌐 Reports &amp; Settings"/></ComboBox>
+      </TabItem>
+      <TabItem Header="Disk Tools">
+       <Grid Margin="18">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <StackPanel Grid.Row="0" Margin="2,0,2,16">
+         <TextBlock Text="DISK TOOLS &amp; DIAGNOSTICS" FontSize="21" FontWeight="Bold" Foreground="#F4F4F5"/>
+         <TextBlock Text="Analyze fixed drives and Windows components. Analysis is read-only unless a clearly marked repair action is selected." FontSize="12" Foreground="#A1A1AA" TextWrapping="Wrap" Margin="0,4,0,0"/>
+        </StackPanel>
+        <Border Grid.Row="1" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="12" Padding="14">
+         <Grid>
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+          <StackPanel Grid.Row="0" Margin="0,0,0,12">
+           <TextBlock Text="DIAGNOSTIC TOOLS" FontSize="14" FontWeight="SemiBold" Foreground="#E4E4E7" Margin="0,0,0,10"/>
+           <Button Name="CleanupDriveAnalyzeBtn" Content="Analyze Drives" Height="36" Margin="0,0,0,8" Background="#293746" Foreground="#C7DDF5" BorderBrush="#40566D" HorizontalContentAlignment="Left" Padding="12,0"/>
+           <Button Name="CleanupComponentAnalyzeBtn" Content="Analyze Windows Components" Height="36" Margin="0,0,0,8" Background="#343044" Foreground="#DDD2F5" BorderBrush="#51466A" HorizontalContentAlignment="Left" Padding="12,0"/>
+           <Button Name="CleanupComponentRunBtn" Content="Clean Component Store (DISM)" Height="36" Margin="0,0,0,12" Background="#493B2B" Foreground="#F4DFC0" BorderBrush="#70583A" Padding="12,0" IsEnabled="False"/>
+          </StackPanel>
+          <Grid Grid.Row="1">
+           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+           <TextBlock Grid.Row="0" Text="ANALYSIS REPORT" FontSize="11" FontWeight="SemiBold" Foreground="#A1A1AA" Margin="0,0,0,7"/>
+           <TextBox Name="CleanupAdvancedReport" Grid.Row="1" Text="Advanced analysis has not been run." IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" Background="#0B1220" Foreground="#F1F5F9" BorderBrush="#526176" FontFamily="Consolas" FontSize="12" Padding="10"/>
+          </Grid>
+         </Grid>
+        </Border>
        </Grid>
-      </Grid>
-      <TextBlock Name="NetResultsCount" Text="50 network tools" Foreground="#AEB8C8" Margin="0,0,0,12"/>
-       <UniformGrid Name="NetToolsGrid" Columns="2"/>
-      </StackPanel>
-     </Border>
-    </ScrollViewer>
-   </TabItem>
-
-   <!-- 8. CLEANUP -->
-   <TabItem Header="Backup">
-    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-     <Border Padding="20">
-      <StackPanel>
-       <Grid Margin="0,0,0,12">
-       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
-       <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,16,0">
-        <TextBlock Text="Backup &amp; Recovery Center" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,0,0,8"/>
-        <TextBlock Text="Export important system settings and recovery information. Exports are saved under ProgramData\AMR-Utility\Backups." Foreground="#AEB8C8" TextWrapping="Wrap"/>
-       </StackPanel>
-       <Grid Grid.Column="1" VerticalAlignment="Center"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-        <Grid Grid.Column="0" Margin="0,0,6,0">
-         <TextBox Name="BackupSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search backup tools by name or keyword" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2"/>
-         <TextBlock Text="⌕" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="11,0,0,2" FontSize="21" FontWeight="SemiBold" Foreground="#79AAA5"/>
-        </Grid>
-        <ComboBox Name="BackupCategoryFilter" Grid.Column="1" Height="34" Padding="8,4" FontSize="13" Margin="6,0,0,0" SelectedIndex="0" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F">
-          <ComboBox.Resources>
-           <Style TargetType="{x:Type ComboBox}">
-            <Setter Property="SnapsToDevicePixels" Value="True"/>
-            <Setter Property="OverridesDefaultStyle" Value="True"/>
-            <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
-            <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
-            <Setter Property="Template">
-             <Setter.Value>
-              <ControlTemplate TargetType="{x:Type ComboBox}">
-               <Grid>
-                <ToggleButton x:Name="DropDownToggle" Focusable="False" ClickMode="Press" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
-                 <ToggleButton.Template>
-                  <ControlTemplate TargetType="{x:Type ToggleButton}">
-                   <Border x:Name="ToggleBorder" Background="{Binding Background, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderThickness="1" CornerRadius="6" Padding="8,4">
-                    <Grid>
-                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/></Grid.ColumnDefinitions>
-                     <ContentPresenter Grid.Column="0" Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentStringFormat="{Binding SelectionBoxItemStringFormat, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" VerticalAlignment="Center" HorizontalAlignment="Left"/>
-                     <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="#B7D5D1" StrokeThickness="1.6" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                    </Grid>
-                   </Border>
-                   <ControlTemplate.Triggers>
-                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ToggleBorder" Property="BorderBrush" Value="#79AAA5"/></Trigger>
-                    <Trigger Property="IsPressed" Value="True"><Setter TargetName="ToggleBorder" Property="Background" Value="#31515A"/></Trigger>
-                   </ControlTemplate.Triggers>
-                  </ControlTemplate>
-                 </ToggleButton.Template>
-                </ToggleButton>
-                <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
-                 <Border Background="#263B46" BorderBrush="#6B9994" BorderThickness="1" CornerRadius="7" Padding="3" SnapsToDevicePixels="True">
-                  <ScrollViewer MaxHeight="320" CanContentScroll="True">
-                   <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
-                  </ScrollViewer>
-                 </Border>
-                </Popup>
-               </Grid>
-               <ControlTemplate.Triggers>
-                <Trigger Property="HasItems" Value="False"><Setter TargetName="PART_Popup" Property="MinHeight" Value="24"/></Trigger>
-                <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
-               </ControlTemplate.Triggers>
-              </ControlTemplate>
-             </Setter.Value>
-            </Setter>
-           </Style>
-
-           <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#263B46"/>
-           <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#D9F0ED"/>
-           <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#6B9994"/>
-           <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
-          </ComboBox.Resources>
-          <ComboBox.ItemContainerStyle>
-           <Style TargetType="ComboBoxItem">
-            <Setter Property="Foreground" Value="#D9F0ED"/>
-            <Setter Property="Background" Value="#263B46"/>
-            <Setter Property="BorderBrush" Value="#6B9994"/>
-            <Setter Property="Padding" Value="9,6"/>
-            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
-            <Style.Triggers>
-             <Trigger Property="IsHighlighted" Value="True">
-              <Setter Property="Background" Value="#6B9994"/>
-              <Setter Property="Foreground" Value="#FFFFFF"/>
-             </Trigger>
-             <Trigger Property="IsSelected" Value="True">
-              <Setter Property="Background" Value="#31515A"/>
-              <Setter Property="Foreground" Value="#FFFFFF"/>
-             </Trigger>
-             <Trigger Property="IsEnabled" Value="False">
-              <Setter Property="Foreground" Value="#78918F"/>
-             </Trigger>
-            </Style.Triggers>
-           </Style>
-          </ComboBox.ItemContainerStyle>
-<ComboBoxItem Content="💾 All Categories"/><ComboBoxItem Content="💾 Recovery"/><ComboBoxItem Content="💾 Registry &amp; System"/><ComboBoxItem Content="💾 Drivers &amp; Hardware"/><ComboBoxItem Content="💾 Network"/><ComboBoxItem Content="💾 Security"/><ComboBoxItem Content="💾 Configuration &amp; Reports"/></ComboBox>
+      </TabItem>
+      <TabItem Header="Organizers">
+       <Grid Margin="18">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <StackPanel Grid.Row="0" Margin="2,0,2,14">
+         <TextBlock Text="ORGANIZERS" FontSize="21" FontWeight="Bold" Foreground="#F4F4F5"/>
+         <TextBlock Text="Manage drives and storage tools." FontSize="12" Foreground="#A1A1AA" TextWrapping="Wrap" Margin="0,4,0,0"/>
+        </StackPanel>
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,10">
+         <Button Name="CleanupDiskOrganizerRefreshBtn" Content="Refresh Drives" Height="32" MinWidth="112" Margin="0,0,8,0" Background="#293746" Foreground="#C7DDF5" BorderBrush="#40566D"/>
+         <Button Name="CleanupDiskOrganizerOpenBtn" Content="Open Selected Drive" Height="32" MinWidth="142" Margin="0,0,8,0" Background="#263B36" Foreground="#A7F3D0" BorderBrush="#36594D"/>
+         <Button Name="CleanupDiskOrganizerStorageBtn" Content="Storage Settings" Height="32" MinWidth="122" Margin="0,0,8,0" Background="#343044" Foreground="#DDD2F5" BorderBrush="#51466A"/>
+         <Button Name="CleanupDiskOrganizerOptimizeBtn" Content="Optimize Drives" Height="32" MinWidth="118" Background="#493B2B" Foreground="#F4DFC0" BorderBrush="#70583A"/>
+        </StackPanel>
+        <Border Grid.Row="2" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="12" Padding="12">
+         <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+          <TextBlock Grid.Row="0" Text="AVAILABLE VOLUMES" FontSize="12" FontWeight="SemiBold" Foreground="#DCE7F5" Margin="2,0,0,8"/>
+          <ListBox Name="CleanupDiskOrganizerList" Grid.Row="1" Background="#0B1220" Foreground="#E5EDF7" BorderBrush="#34465B" FontFamily="Consolas" FontSize="12" Padding="8"/>
+         </Grid>
+        </Border>
+        <TextBlock Name="CleanupDiskOrganizerStatus" Grid.Row="3" Text="Drive inventory has not been refreshed yet." Foreground="#AEB8C8" FontSize="11" Margin="2,9,0,0" TextWrapping="Wrap"/>
        </Grid>
-      </Grid>
-      <TextBlock Name="BackupResultsCount" Text="50 backup actions" Foreground="#AEB8C8" Margin="0,0,0,10"/>
-       <UniformGrid Name="BackupActionsGrid" Columns="2"/>
-      </StackPanel>
-     </Border>
-    </ScrollViewer>
-   </TabItem>
-
-   <!-- 10. UTILITIES -->
-   <TabItem Header="Utilities">
-    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" CanContentScroll="True">
-     <Border Padding="20">
-      <StackPanel>
-      <Grid Margin="0,0,0,12">
-       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
-       <TextBlock Grid.Column="0" Text="Quick Administration Utilities" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" VerticalAlignment="Center" Margin="0,0,16,0"/>
-       <Grid Grid.Column="1" VerticalAlignment="Center"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-        <Grid Grid.Column="0" Margin="0,0,6,0">
-         <TextBox Name="UtilSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search Utilities by name or keyword" Text="" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2"/>
-         <TextBlock Text="⌕" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="11,0,0,2" FontSize="21" FontWeight="SemiBold" Foreground="#79AAA5"/>
+      </TabItem>
+      <TabItem Header="Web &amp; Browsers">
+       <Grid Margin="18">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <Grid Grid.Row="0" Margin="2,0,2,14">
+         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+         <StackPanel Grid.Column="0" VerticalAlignment="Center">
+          <TextBlock Text="WEB &amp; BROWSERS" FontSize="21" FontWeight="Bold" Foreground="#F4F4F5"/>
+          <TextBlock Text="Open browser privacy and cache settings." FontSize="12" Foreground="#A1A1AA" TextWrapping="Wrap" Margin="0,4,0,0"/>
+         </StackPanel>
+         <Button Name="CleanupBrowserGoToScanBtn" Grid.Column="1" Content="Open Cleanup Scan" Height="34" MinWidth="150" Margin="12,0,0,0" Padding="12,0" VerticalAlignment="Center" Background="#293746" Foreground="#C7DDF5" BorderBrush="#40566D" ToolTip="Open the main Clean Up scan"/>
         </Grid>
-        <ComboBox Name="UtilCategoryFilter" Grid.Column="1" Height="34" Padding="8,4" FontSize="13" Margin="6,0,0,0" SelectedIndex="0" VerticalContentAlignment="Center" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F">
-          <ComboBox.Resources>
-           <Style TargetType="{x:Type ComboBox}">
-            <Setter Property="SnapsToDevicePixels" Value="True"/>
-            <Setter Property="OverridesDefaultStyle" Value="True"/>
-            <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
-            <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
-            <Setter Property="Template">
-             <Setter.Value>
-              <ControlTemplate TargetType="{x:Type ComboBox}">
-               <Grid>
-                <ToggleButton x:Name="DropDownToggle" Focusable="False" ClickMode="Press" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
-                 <ToggleButton.Template>
-                  <ControlTemplate TargetType="{x:Type ToggleButton}">
-                   <Border x:Name="ToggleBorder" Background="{Binding Background, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderThickness="1" CornerRadius="6" Padding="8,4">
-                    <Grid>
-                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/></Grid.ColumnDefinitions>
-                     <ContentPresenter Grid.Column="0" Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentStringFormat="{Binding SelectionBoxItemStringFormat, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" VerticalAlignment="Center" HorizontalAlignment="Left"/>
-                     <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="#B7D5D1" StrokeThickness="1.6" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                    </Grid>
+        <Border Grid.Row="1" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="12" Padding="14" Margin="0,0,0,10">
+         <StackPanel>
+          <TextBlock Text="BROWSER CLEANUP" FontSize="13" FontWeight="SemiBold" Foreground="#E4E4E7" Margin="0,0,0,9"/>
+          <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+           <ComboBox Name="CleanupBrowserChoice" Grid.Column="0" Height="34" SelectedIndex="0"
+                     Background="#172536" Foreground="#E7EAF0" BorderBrush="#52647A"
+                     BorderThickness="1" Padding="9,3" FontSize="12" FontWeight="SemiBold"
+                     VerticalContentAlignment="Center" ToolTip="Choose a browser to open its cleanup settings">
+            <ComboBox.Resources>
+             <!-- Match the Smart Search All Categories selector: dark face, dark popup, champagne accent. -->
+             <Style TargetType="{x:Type ComboBoxItem}">
+              <Setter Property="Foreground" Value="#E7EAF0"/>
+              <Setter Property="Background" Value="#101C2B"/>
+              <Setter Property="Padding" Value="10,7"/>
+              <Setter Property="Margin" Value="0,0,0,1"/>
+              <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+              <Setter Property="VerticalContentAlignment" Value="Center"/>
+              <Setter Property="BorderThickness" Value="0,0,0,1"/>
+              <Setter Property="BorderBrush" Value="#26364A"/>
+              <Setter Property="SnapsToDevicePixels" Value="True"/>
+              <Style.Triggers>
+               <Trigger Property="IsHighlighted" Value="True">
+                <Setter Property="Background" Value="#26364A"/>
+                <Setter Property="Foreground" Value="#E8D7B5"/>
+                <Setter Property="BorderBrush" Value="#34465B"/>
+               </Trigger>
+               <Trigger Property="IsSelected" Value="True">
+                <Setter Property="Background" Value="#29384A"/>
+                <Setter Property="Foreground" Value="#D9BD8B"/>
+                <Setter Property="BorderBrush" Value="#B89A62"/>
+               </Trigger>
+               <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Foreground" Value="#778496"/>
+               </Trigger>
+              </Style.Triggers>
+             </Style>
+             <Style TargetType="{x:Type ComboBox}">
+              <Setter Property="SnapsToDevicePixels" Value="True"/>
+              <Setter Property="OverridesDefaultStyle" Value="True"/>
+              <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled"/>
+              <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
+              <Setter Property="Template">
+               <Setter.Value>
+                <ControlTemplate TargetType="{x:Type ComboBox}">
+                 <Grid>
+                  <ToggleButton x:Name="BrowserChoiceToggle" Focusable="False" ClickMode="Press"
+                                IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                   <ToggleButton.Template>
+                    <ControlTemplate TargetType="{x:Type ToggleButton}">
+                     <Border x:Name="BrowserChoiceFace" Background="#172536" BorderBrush="#52647A"
+                             BorderThickness="1" CornerRadius="6" Padding="9,4">
+                      <Grid>
+                       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="16"/></Grid.ColumnDefinitions>
+                       <ContentPresenter Grid.Column="0"
+                         Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}"
+                         ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}"
+                         TextElement.Foreground="#E7EAF0" VerticalAlignment="Center" RecognizesAccessKey="True"/>
+                       <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="#B89A62"
+                             StrokeThickness="1.5" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                      </Grid>
+                     </Border>
+                     <ControlTemplate.Triggers>
+                      <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="BrowserChoiceFace" Property="BorderBrush" Value="#B89A62"/></Trigger>
+                      <Trigger Property="IsPressed" Value="True"><Setter TargetName="BrowserChoiceFace" Property="Background" Value="#202F42"/></Trigger>
+                     </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                   </ToggleButton.Template>
+                  </ToggleButton>
+                  <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom"
+                         AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+                   <Border Background="#101C2B" BorderBrush="#52647A" BorderThickness="1"
+                           CornerRadius="7" Padding="3" SnapsToDevicePixels="True">
+                    <ScrollViewer MaxHeight="300" CanContentScroll="True">
+                     <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                    </ScrollViewer>
                    </Border>
-                   <ControlTemplate.Triggers>
-                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ToggleBorder" Property="BorderBrush" Value="#79AAA5"/></Trigger>
-                    <Trigger Property="IsPressed" Value="True"><Setter TargetName="ToggleBorder" Property="Background" Value="#31515A"/></Trigger>
-                   </ControlTemplate.Triggers>
-                  </ControlTemplate>
-                 </ToggleButton.Template>
-                </ToggleButton>
-                <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
-                 <Border Background="#263B46" BorderBrush="#6B9994" BorderThickness="1" CornerRadius="7" Padding="3" SnapsToDevicePixels="True">
-                  <ScrollViewer MaxHeight="320" CanContentScroll="True">
-                   <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
-                  </ScrollViewer>
-                 </Border>
-                </Popup>
-               </Grid>
-               <ControlTemplate.Triggers>
-                <Trigger Property="HasItems" Value="False"><Setter TargetName="PART_Popup" Property="MinHeight" Value="24"/></Trigger>
-                <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
-               </ControlTemplate.Triggers>
-              </ControlTemplate>
-             </Setter.Value>
-            </Setter>
-           </Style>
-
-           <!-- Keep both the dropdown surface and its outer popup frame on the app's dark palette. -->
-           <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#263B46"/>
-           <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#D9F0ED"/>
-           <SolidColorBrush x:Key="{x:Static SystemColors.MenuBrushKey}" Color="#263B46"/>
-           <SolidColorBrush x:Key="{x:Static SystemColors.MenuTextBrushKey}" Color="#D9F0ED"/>
-           <SolidColorBrush x:Key="{x:Static SystemColors.ControlBrushKey}" Color="#263B46"/>
-           <SolidColorBrush x:Key="{x:Static SystemColors.ControlTextBrushKey}" Color="#D9F0ED"/>
-           <SolidColorBrush x:Key="{x:Static SystemColors.WindowFrameBrushKey}" Color="#6B9994"/>
-           <SolidColorBrush x:Key="{x:Static SystemColors.ActiveBorderBrushKey}" Color="#6B9994"/>
-           <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#6B9994"/>
-           <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
-          </ComboBox.Resources>
-          <ComboBox.ItemContainerStyle>
-           <Style TargetType="ComboBoxItem">
-            <Setter Property="Foreground" Value="#D9F0ED"/>
-            <Setter Property="Background" Value="#263B46"/>
-            <Setter Property="BorderBrush" Value="#6B9994"/>
-            <Setter Property="Padding" Value="9,6"/>
-            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
-            <Style.Triggers>
-             <Trigger Property="IsHighlighted" Value="True">
-              <Setter Property="Background" Value="#6B9994"/>
-              <Setter Property="Foreground" Value="#FFFFFF"/>
-             </Trigger>
-             <Trigger Property="IsSelected" Value="True">
-              <Setter Property="Background" Value="#31515A"/>
-              <Setter Property="Foreground" Value="#FFFFFF"/>
-             </Trigger>
-             <Trigger Property="IsEnabled" Value="False">
-              <Setter Property="Foreground" Value="#78918F"/>
-             </Trigger>
-            </Style.Triggers>
-           </Style>
-          </ComboBox.ItemContainerStyle>
-
-         <ComboBoxItem Content="All Categories"/><ComboBoxItem Content="System &amp; Performance"/><ComboBoxItem Content="Hardware &amp; Devices"/><ComboBoxItem Content="Network &amp; Security"/><ComboBoxItem Content="Administration"/><ComboBoxItem Content="Troubleshooting &amp; Recovery"/>
-        </ComboBox>
+                  </Popup>
+                 </Grid>
+                </ControlTemplate>
+               </Setter.Value>
+              </Setter>
+             </Style>
+            </ComboBox.Resources>
+            <ComboBoxItem Content="Google Chrome" Tag="chrome://settings/clearBrowserData"/>
+            <ComboBoxItem Content="Mozilla Firefox" Tag="about:preferences#privacy"/>
+            <ComboBoxItem Content="Microsoft Edge" Tag="edge://settings/clearBrowserData"/>
+            <ComboBoxItem Content="Brave Browser" Tag="brave://settings/clearBrowserData"/>
+            <ComboBoxItem Content="Opera" Tag="opera://settings/clearBrowserData"/>
+            <ComboBoxItem Content="Opera GX" Tag="opera://settings/clearBrowserData"/>
+            <ComboBoxItem Content="Vivaldi" Tag="vivaldi://settings/clearBrowserData"/>
+            <ComboBoxItem Content="Tor Browser" Tag="about:preferences#privacy"/>
+            <ComboBoxItem Content="LibreWolf" Tag="about:preferences#privacy"/>
+            <ComboBoxItem Content="Waterfox" Tag="about:preferences#privacy"/>
+            <ComboBoxItem Content="Pale Moon" Tag="about:preferences#privacy"/>
+            <ComboBoxItem Content="Chromium" Tag="chrome://settings/clearBrowserData"/>
+            <ComboBoxItem Content="Maxthon Browser" Tag="chrome://settings/clearBrowserData"/>
+            <ComboBoxItem Content="Falkon" Tag="falkon://settings/privacy"/>
+            <ComboBoxItem Content="Avast Secure Browser" Tag="chrome://settings/clearBrowserData"/>
+            <ComboBoxItem Content="Sidekick Browser" Tag="chrome://settings/clearBrowserData"/>
+            <ComboBoxItem Content="Zen Browser" Tag="about:preferences#privacy"/>
+            <ComboBoxItem Content="Floorp Browser" Tag="about:preferences#privacy"/>
+            <ComboBoxItem Content="Google Chrome Beta" Tag="chrome://settings/clearBrowserData"/>
+            <ComboBoxItem Content="Google Chrome Dev" Tag="chrome://settings/clearBrowserData"/>
+            <ComboBoxItem Content="Mozilla Firefox Developer Edition" Tag="about:preferences#privacy"/>
+            <ComboBoxItem Content="Microsoft Edge Beta" Tag="edge://settings/clearBrowserData"/>
+            <ComboBoxItem Content="Microsoft Edge Dev" Tag="edge://settings/clearBrowserData"/>
+            <ComboBoxItem Content="Microsoft Edge Canary" Tag="edge://settings/clearBrowserData"/>
+            <ComboBoxItem Content="Chromium (Ungoogled)" Tag="chrome://settings/clearBrowserData"/>
+            <ComboBoxItem Content="Midori Browser" Tag="midori://settings/clearBrowserData"/>
+            <ComboBoxItem Content="Brave Beta" Tag="brave://settings/clearBrowserData"/>
+            <ComboBoxItem Content="Vivaldi Snapshot" Tag="vivaldi://settings/clearBrowserData"/>
+            <ComboBoxItem Content="Brave Nightly" Tag="brave://settings/clearBrowserData"/>
+            <ComboBoxItem Content="Mullvad Browser" Tag="about:preferences#privacy"/>
+            <ComboBoxItem Content="DuckDuckGo Browser" Tag="duck://settings/clearBrowserData"/>
+            <ComboBoxItem Content="Thorium Browser" Tag="chrome://settings/clearBrowserData"/>
+            <ComboBoxItem Content="Arc Browser" Tag="chrome://settings/clearBrowserData"/>
+           </ComboBox>
+           <Button Name="CleanupBrowserOpenBtn" Grid.Column="1" Content="Open Cleanup Settings" Height="34" MinWidth="164" Margin="10,0,0,0" Background="#263B36" Foreground="#A7F3D0" BorderBrush="#36594D"/>
+          </Grid>
+         </StackPanel>
+        </Border>
+        <Border Grid.Row="2" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="12" Padding="14">
+         <StackPanel>
+          <TextBlock Text="WHAT AMR CLEANS" FontSize="13" FontWeight="SemiBold" Foreground="#E4E4E7" Margin="0,0,0,8"/>
+          <TextBlock Text="• Rebuildable browser cache folders (where detected)
+• Code and GPU caches
+• Recognized browser profiles only — profile databases, passwords, cookies, history, bookmarks and downloads are not targeted by the Clean Up cache scan." Foreground="#CBD5E1" FontSize="12" TextWrapping="Wrap"/>
+          <TextBlock Text="For cookies, history, saved passwords or site data, use the browser’s built-in controls above so you can review exactly what the browser will remove." Foreground="#D9BD8B" FontSize="11" TextWrapping="Wrap" Margin="0,12,0,0"/>
+         </StackPanel>
+        </Border>
        </Grid>
-      </Grid>
-      <TextBlock Name="UtilResultsCount" Text="50 utilities" Foreground="#AEB8C8" Margin="0,0,0,12"/>
-      <WrapPanel Name="UtilButtonsPanel" Orientation="Horizontal">
-       <Button Name="UtilControlPanelBtn" Content="🛠 Open Classic Control Panel" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilRegeditBtn" Content="🛠 Open Registry Editor" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilDevMgmtBtn" Content="🛠 Open Device Manager" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilSysInfoBtn" Content="🛠 Open System Information" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilTaskMgrBtn" Content="🛠 Open Task Manager" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilServicesBtn" Content="🛠 Open Services" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilEventViewerBtn" Content="🛠 Open Event Viewer" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilResourceMonitorBtn" Content="🛠 Open Resource Monitor" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilPerformanceMonitorBtn" Content="🛠 Open Performance Monitor" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilDiskMgmtBtn" Content="🛠 Open Disk Management" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilComputerMgmtBtn" Content="🛠 Open Computer Management" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilTaskSchedulerBtn" Content="🛠 Open Task Scheduler" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilFirewallAdvancedBtn" Content="🛠 Open Advanced Firewall" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilNetworkConnectionsBtn" Content="🛠 Open Network Connections" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilSystemPropertiesBtn" Content="🛠 Open System Properties" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilProgramsFeaturesBtn" Content="🛠 Open Programs and Features" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilWindowsFeaturesBtn" Content="🛠 Open Windows Features" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilPowerOptionsBtn" Content="🛠 Open Power Options" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilSoundBtn" Content="🛠 Open Sound Settings" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilMemoryDiagnosticBtn" Content="🛠 Open Windows Memory Diagnostic" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilCertificatesBtn" Content="🛠 Open Certificate Manager" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilCredentialManagerBtn" Content="🛠 Open Credential Manager" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilGroupPolicyBtn" Content="🛠 Open Local Group Policy" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilLocalUsersBtn" Content="🛠 Open Local Users and Groups" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilTPMBtn" Content="🛠 Open TPM Management" Tag="Network &amp; Security" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilSystemConfigBtn" Content="🛠 Open System Configuration" Tag="System &amp; Performance" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilAboutWindowsBtn" Content="🛠 About Windows" Tag="System &amp; Performance" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilAdvancedStartupBtn" Content="🛠 Advanced Startup Options" Tag="Troubleshooting &amp; Recovery" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilRecoveryBtn" Content="🛠 Recovery Options" Tag="Troubleshooting &amp; Recovery" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilWindowsUpdateBtn" Content="🛠 Windows Update" Tag="System &amp; Performance" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilStorageSettingsBtn" Content="🛠 Storage Settings" Tag="System &amp; Performance" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilAppsSettingsBtn" Content="🛠 Installed Apps" Tag="Administration" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilPrivacySettingsBtn" Content="🛠 Privacy Settings" Tag="Network &amp; Security" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilProxySettingsBtn" Content="🛠 Proxy Settings" Tag="Network &amp; Security" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilBluetoothBtn" Content="🛠 Bluetooth Settings" Tag="Hardware &amp; Devices" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilDisplaySettingsBtn" Content="🛠 Display Settings" Tag="Hardware &amp; Devices" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilMouseSettingsBtn" Content="🛠 Mouse Settings" Tag="Hardware &amp; Devices" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilKeyboardSettingsBtn" Content="🛠 Keyboard Settings" Tag="Hardware &amp; Devices" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilPrintersBtn" Content="🛠 Printers &amp; Scanners" Tag="Hardware &amp; Devices" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilDateTimeBtn" Content="🛠 Date &amp; Time Settings" Tag="System &amp; Performance" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilRegionBtn" Content="🛠 Region Settings" Tag="Administration" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilEnvVariablesBtn" Content="🛠 Environment Variables" Tag="Administration" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilWindowsDefenderBtn" Content="🛠 Windows Security" Tag="Network &amp; Security" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilReliabilityBtn" Content="🛠 Reliability Monitor" Tag="Troubleshooting &amp; Recovery" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilStepsRecorderBtn" Content="🛠 Steps Recorder (if available)" Tag="Troubleshooting &amp; Recovery" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilDiskCleanupBtn" Content="🛠 Disk Cleanup" Tag="Troubleshooting &amp; Recovery" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilNetworkResetBtn" Content="🛠 Network Status" Tag="Network &amp; Security" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilIndexingBtn" Content="🛠 Indexing Options" Tag="System &amp; Performance" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilFontsBtn" Content="🛠 Fonts" Tag="Administration" Width="260" Margin="0,0,15,15"/>
-       <Button Name="UtilColorMgmtBtn" Content="🛠 Color Management" Tag="Hardware &amp; Devices" Width="260" Margin="0,0,15,15"/>
-      </WrapPanel>
-      </StackPanel>
-     </Border>
-    </ScrollViewer>
-   </TabItem>
+      </TabItem>
+      <TabItem Header="Orphan Cleanup">
+       <Grid Margin="18">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <StackPanel Grid.Row="0" Margin="2,0,2,8">
+         <TextBlock Text="ORPHAN CLEANUP" FontSize="21" FontWeight="Bold" Foreground="#F4F4F5"/>
+         <TextBlock Text="Analyze leftovers. Review before quarantine; restore anytime." FontSize="11" Foreground="#A1A1AA" Margin="0,3,0,0"/>
+        </StackPanel>
+        <Border Grid.Row="1" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="10" Padding="10" Margin="0,0,0,8">
+         <WrapPanel VerticalAlignment="Center">
+          <Button Name="CleanupOrphanScanBtn" Content="Analyze" Height="32" MinWidth="88" Margin="0,0,7,0" Background="#263B36" Foreground="#A7F3D0" BorderBrush="#36594D"/>
+          <Button Name="CleanupOrphanQuarantineBtn" Content="Quarantine Selected" Height="32" MinWidth="132" Margin="0,0,7,0" Background="#493A27" Foreground="#E8D7B5" BorderBrush="#806744"/>
+          <Button Name="CleanupOrphanRefreshBtn" Content="Refresh Quarantine" Height="32" MinWidth="128" Margin="0,0,7,0" Background="#293746" Foreground="#C7DDF5" BorderBrush="#40566D"/>
+          <Button Name="CleanupOrphanRestoreBtn" Content="Restore Selected" Height="32" MinWidth="118" Background="#263B36" Foreground="#A7F3D0" BorderBrush="#36594D"/>
+          <TextBlock Name="CleanupOrphanStatus" Text="Ready" Width="235" Foreground="#CBD5E1" FontSize="11" VerticalAlignment="Center" Margin="12,0,0,0" TextWrapping="Wrap"/>
+         </WrapPanel>
+        </Border>
+        <Grid Grid.Row="2">
+         <Grid.ColumnDefinitions><ColumnDefinition Width="1.25*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="0.85*"/></Grid.ColumnDefinitions>
+         <Border Grid.Column="0" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="10" Padding="9">
+          <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+           <TextBlock Text="ANALYSIS RESULTS · SELECT TO QUARANTINE" Foreground="#D9BD8B" FontSize="10" FontWeight="SemiBold" Margin="2,0,0,7"/>
+           <ListBox Name="CleanupOrphanResults" Grid.Row="1" SelectionMode="Extended" Background="#0B1220" Foreground="#E5EDF7" BorderBrush="#34465B" FontSize="10" Padding="6">
+            <ListBox.ItemTemplate><DataTemplate><CheckBox Content="{Binding Display}" IsChecked="{Binding IsChecked, Mode=TwoWay}" Foreground="#E5EDF7" Background="#0B1220" Padding="2,4" FocusVisualStyle="{x:Null}">
+             <CheckBox.Style>
+              <Style TargetType="{x:Type CheckBox}">
+               <Setter Property="Template">
+                <Setter.Value>
+                 <ControlTemplate TargetType="{x:Type CheckBox}">
+                  <Grid SnapsToDevicePixels="True">
+                   <Grid.ColumnDefinitions><ColumnDefinition Width="18"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                   <Border x:Name="CheckBoxFrame" Grid.Column="0" Width="13" Height="13" CornerRadius="3" BorderThickness="1.2" BorderBrush="#B89A62" Background="#172536" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                   <Path x:Name="CheckGlyph" Grid.Column="0" Data="M 2,6.5 L 5.2,9.5 L 11.5,2.5" Stroke="#FFFFFF" StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Visibility="Collapsed" Width="11" Height="10" Stretch="Fill" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                   <ContentPresenter Grid.Column="1" Margin="5,0,0,0" VerticalAlignment="Center" HorizontalAlignment="Left" RecognizesAccessKey="True"/>
+                  </Grid>
+                  <ControlTemplate.Triggers>
+                   <Trigger Property="IsChecked" Value="True">
+                    <Setter TargetName="CheckGlyph" Property="Visibility" Value="Visible"/>
+                    <Setter TargetName="CheckBoxFrame" Property="Background" Value="#B89A62"/>
+                   </Trigger>
+                   <Trigger Property="IsMouseOver" Value="True">
+                    <Setter TargetName="CheckBoxFrame" Property="BorderBrush" Value="#D9BD8B"/>
+                    <Setter TargetName="CheckGlyph" Property="Stroke" Value="#111827"/>
+                   </Trigger>
+                   <Trigger Property="IsEnabled" Value="False">
+                    <Setter TargetName="CheckBoxFrame" Property="Opacity" Value="0.45"/>
+                    <Setter Property="Opacity" Value="0.6"/>
+                   </Trigger>
+                  </ControlTemplate.Triggers>
+                 </ControlTemplate>
+                </Setter.Value>
+               </Setter>
+              </Style>
+             </CheckBox.Style>
+            </CheckBox></DataTemplate></ListBox.ItemTemplate>
+           </ListBox>
+          </Grid>
+         </Border>
+         <Border Grid.Column="2" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="10" Padding="9">
+          <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+           <TextBlock Text="QUARANTINE · RESTORE" Foreground="#D9BD8B" FontSize="10" FontWeight="SemiBold" Margin="2,0,0,7"/>
+           <ListBox Name="CleanupOrphanQuarantineList" Grid.Row="1" SelectionMode="Extended" Background="#0B1220" Foreground="#E5EDF7" BorderBrush="#34465B" FontSize="10" Padding="6">
+            <ListBox.ItemTemplate><DataTemplate><CheckBox Content="{Binding Display}" IsChecked="{Binding IsChecked, Mode=TwoWay}" Foreground="#E5EDF7" Background="#0B1220" Padding="2,4" FocusVisualStyle="{x:Null}">
+             <CheckBox.Style>
+              <Style TargetType="{x:Type CheckBox}">
+               <Setter Property="Template">
+                <Setter.Value>
+                 <ControlTemplate TargetType="{x:Type CheckBox}">
+                  <Grid SnapsToDevicePixels="True">
+                   <Grid.ColumnDefinitions><ColumnDefinition Width="18"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                   <Border x:Name="CheckBoxFrame" Grid.Column="0" Width="13" Height="13" CornerRadius="3" BorderThickness="1.2" BorderBrush="#B89A62" Background="#172536" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                   <Path x:Name="CheckGlyph" Grid.Column="0" Data="M 2,6.5 L 5.2,9.5 L 11.5,2.5" Stroke="#FFFFFF" StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Visibility="Collapsed" Width="11" Height="10" Stretch="Fill" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                   <ContentPresenter Grid.Column="1" Margin="5,0,0,0" VerticalAlignment="Center" HorizontalAlignment="Left" RecognizesAccessKey="True"/>
+                  </Grid>
+                  <ControlTemplate.Triggers>
+                   <Trigger Property="IsChecked" Value="True">
+                    <Setter TargetName="CheckGlyph" Property="Visibility" Value="Visible"/>
+                    <Setter TargetName="CheckBoxFrame" Property="Background" Value="#B89A62"/>
+                   </Trigger>
+                   <Trigger Property="IsMouseOver" Value="True">
+                    <Setter TargetName="CheckBoxFrame" Property="BorderBrush" Value="#D9BD8B"/>
+                    <Setter TargetName="CheckGlyph" Property="Stroke" Value="#111827"/>
+                   </Trigger>
+                   <Trigger Property="IsEnabled" Value="False">
+                    <Setter TargetName="CheckBoxFrame" Property="Opacity" Value="0.45"/>
+                    <Setter Property="Opacity" Value="0.6"/>
+                   </Trigger>
+                  </ControlTemplate.Triggers>
+                 </ControlTemplate>
+                </Setter.Value>
+               </Setter>
+              </Style>
+             </CheckBox.Style>
+            </CheckBox></DataTemplate></ListBox.ItemTemplate>
+           </ListBox>
+          </Grid>
+         </Border>
+        </Grid>
+        <TextBlock Grid.Row="3" Text="Protected: user profiles, AppData, browser data, shared folders and Windows components. Quarantine is reversible; restore stops on conflicts." Foreground="#D9BD8B" FontSize="10" TextWrapping="Wrap" Margin="2,7,2,0"/>
+       </Grid>
+      </TabItem>
+      <TabItem Header="Windows Component Cleanup">
+       <Grid Margin="18">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <StackPanel Grid.Row="0" Margin="2,0,2,14">
+         <TextBlock Text="WINDOWS COMPONENT CLEANUP" FontSize="21" FontWeight="Bold" Foreground="#F4F4F5"/>
+         <TextBlock Text="Analyze and clean the Windows component store." FontSize="12" Foreground="#A1A1AA" TextWrapping="Wrap" Margin="0,4,0,0"/>
+        </StackPanel>
+        <Border Grid.Row="1" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="12" Padding="14" Margin="0,0,0,10">
+         <StackPanel>
+          <TextBlock Text="COMPONENT STORE" FontSize="13" FontWeight="SemiBold" Foreground="#E4E4E7" Margin="0,0,0,9"/>
+          <StackPanel Orientation="Horizontal">
+           <Button Name="CleanupComponentAnalyzeNewBtn" Content="Analyze Component Store" Height="34" MinWidth="170" Margin="0,0,8,0" Background="#343044" Foreground="#DDD2F5" BorderBrush="#51466A"/>
+           <Button Name="CleanupComponentRunNewBtn" Content="Clean Component Store" Height="34" MinWidth="160" Background="#493B2B" Foreground="#F4DFC0" BorderBrush="#70583A" IsEnabled="False"/>
+          </StackPanel>
+          <TextBlock Text="No /ResetBase. Updates remain uninstallable. Do not interrupt DISM." Foreground="#D9BD8B" FontSize="11" TextWrapping="Wrap" Margin="0,10,0,0"/>
+          <TextBlock Name="CleanupComponentStatusNew" Text="Ready. Analyze before cleanup." Foreground="#AEB8C8" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0"/>
+         </StackPanel>
+        </Border>
+        <Border Grid.Row="2" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="12" Padding="12">
+         <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+          <TextBlock Grid.Row="0" Text="REPORT" FontSize="11" FontWeight="SemiBold" Foreground="#A1A1AA" Margin="0,0,0,7"/>
+          <TextBox Name="CleanupComponentReportNew" Grid.Row="1" Text="Component store analysis has not been run." IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" Background="#0B1220" Foreground="#F1F5F9" BorderBrush="#526176" FontFamily="Consolas" FontSize="12" Padding="10"/>
+         </Grid>
+        </Border>
+       </Grid>
+      </TabItem>
+     </TabControl>
+    </Grid>
+    </TabItem>
 
-   <!-- 11. LOGS -->
-   <TabItem Header="Logs">
+<TabItem Header="Logs">
     <Border Padding="15">
      <Grid>
       <Grid.RowDefinitions>
@@ -4294,7 +5017,7 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
         <Grid Background="#09090B" Margin="4">
          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
          <DockPanel Grid.Row="0" Margin="8,8,8,10" LastChildFill="False">
-          <TextBox Name="DriverLogSearchBox" Width="260" Height="30" Margin="0,0,8,0" VerticalContentAlignment="Center" Background="#18181B" Foreground="#E4E4E7" BorderBrush="#52525B" ToolTip="Search driver events, device IDs, operation IDs, sources and errors"/>
+          <TextBox Name="DriverLogSearchBox" Width="260" Height="30" Margin="0,0,8,0" VerticalContentAlignment="Center" Background="#18181B" Foreground="#E4E4E7" BorderBrush="#52525B" ToolTip="Search driver events, device IDs, operation IDs, sources and errors" Visibility="Collapsed"/>
           <ComboBox Name="DriverLogSeverityFilter" Width="125" Height="30" Margin="0,0,8,0" SelectedIndex="0" Background="#18181B" Foreground="#E4E4E7">
            <ComboBoxItem Content="All"/><ComboBoxItem Content="INFO"/><ComboBoxItem Content="SUCCESS"/><ComboBoxItem Content="WARNING"/><ComboBoxItem Content="ERROR"/><ComboBoxItem Content="DEBUG"/><ComboBoxItem Content="TRACE"/>
           </ComboBox>
@@ -4309,9 +5032,7 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
      </Grid>
     </Border>
    </TabItem>
-
-   <!-- 12. ABOUT -->
-   <TabItem Header="About">
+<TabItem Header="About">
     <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="20">
      <StackPanel HorizontalAlignment="Center" Width="800">
       <Border Background="#27272A" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="12" Padding="25" Margin="0,0,0,20">
@@ -4377,10 +5098,287 @@ $script:Window = [Windows.Markup.XamlReader]::Load($reader)
 
 function C { param([string]$Name) return $script:Window.FindName($Name) }
 
+$script:SmartSearchBox = $null
+$script:SmartSearchRouting = $false
+$script:SmartCategoryRouting = $false
+$script:SmartCategoryFilter = $null
+function Get-AMRSmartSearchTarget {
+    $main = C 'MainNavigationTabs'
+    if (-not $main -or -not $main.SelectedItem) { return $null }
+    $page = [string]$main.SelectedItem.Header
+    if ($page -eq 'Software') { return 'SearchBox' }
+    if ($page -eq 'Logs') { return 'DriverLogSearchBox' }
+    if ($page -eq 'System' -or $page -eq 'Overview' -or $page -eq 'About') { return '__ContentFilter' }
+    if ($page -eq 'Backups') {
+        $backup = C 'BackupSubTabs'
+        $sub = if ($backup -and $backup.SelectedItem) { [string]$backup.SelectedItem.Header } else { 'Backup Center' }
+        if ($sub -eq 'Backup Center') { return 'BackupSearchBox' }
+        return '__ContentFilter'
+    }
+    if ($page -eq 'Cleanup') { return 'CleanupSearchBox' }
+    if ($page -eq 'Tool Kit') {
+        $kit = C 'ToolKitSubTabs'
+        $sub = if ($kit -and $kit.SelectedItem) { [string]$kit.SelectedItem.Header } else { 'Tweaks' }
+        $map = @{ Optimize='OptSearchBox'; Security='SecSearchBox'; System='SysSearchBox'; Networks='NetSearchBox'; Utilities='UtilSearchBox'; Tweaks='__ContentFilter'; 'Windows Customization'='__ContentFilter' }
+        if ($map.ContainsKey($sub)) { return $map[$sub] }
+    }
+    return $null
+}
+function Get-AMRSmartCategoryTarget {
+    $main = C 'MainNavigationTabs'
+    if (-not $main -or -not $main.SelectedItem) { return $null }
+    $page = [string]$main.SelectedItem.Header
+    if ($page -eq 'Tool Kit') {
+        $kit = C 'ToolKitSubTabs'
+        $sub = if ($kit -and $kit.SelectedItem) { [string]$kit.SelectedItem.Header } else { 'Tweaks' }
+        $map = @{ Optimize='OptCategoryFilter'; Security='SecCategoryFilter'; System='SysCategoryFilter'; Networks='NetCategoryFilter'; Utilities='UtilCategoryFilter' }
+        if ($map.ContainsKey($sub)) { return $map[$sub] }
+    }
+    if ($page -eq 'Backups') {
+        $backup = C 'BackupSubTabs'
+        $sub = if ($backup -and $backup.SelectedItem) { [string]$backup.SelectedItem.Header } else { 'Backup Center' }
+        if ($sub -eq 'Backup Center') { return 'BackupCategoryFilter' }
+    }
+    return $null
+}
+
+function Set-AMRSmartContentFilter {
+    param([string]$Query)
+    try {
+        $main = C 'MainNavigationTabs'
+        if (-not $main -or -not $main.SelectedItem) { return }
+        $active = $main.SelectedItem
+        $page = [string]$active.Header
+        if ($page -eq 'Tool Kit') {
+            $kit = C 'ToolKitSubTabs'
+            if ($kit -and $kit.SelectedItem) { $active = $kit.SelectedItem }
+        } elseif ($page -eq 'System' -or $page -eq 'Overview') {
+            $overview = C 'OverviewSubTabs'
+            if ($overview -and $overview.SelectedItem) { $active = $overview.SelectedItem }
+        } elseif ($page -eq 'Backups') {
+            $backup = C 'BackupSubTabs'
+            if ($backup -and $backup.SelectedItem) { $active = $backup.SelectedItem }
+        }
+        $root = $active.Content
+        if (-not $root) { return }
+        $stack = New-Object 'System.Collections.Generic.Stack[object]'
+        $stack.Push($root)
+        while ($stack.Count -gt 0) {
+            $node = $stack.Pop()
+            if ($node -is [System.Windows.Controls.CheckBox]) {
+                $label = [string]$node.Content
+                $match = [string]::IsNullOrWhiteSpace($Query) -or
+                    $label.IndexOf($Query,[System.StringComparison]::OrdinalIgnoreCase) -ge 0
+                $node.Visibility = if ($match) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
+            }
+            try {
+                foreach ($child in [System.Windows.LogicalTreeHelper]::GetChildren($node)) {
+                    if ($null -ne $child -and -not ($child -is [string])) { $stack.Push($child) }
+                }
+            } catch {}
+        }
+    } catch {
+        Write-AMRLog "Smart Search page filter warning: $($_.Exception.Message)" WARNING System
+    }
+}
+
+$script:SmartSearchContextUpdating = $false
+function Update-AMRSmartSearchContext {
+    # Category synchronization can raise additional routed selection events.
+    # Prevent re-entrant context refreshes while the shared controls are being updated.
+    if ($script:SmartSearchContextUpdating) { return }
+    if (-not $script:SmartSearchBox) { return }
+    $script:SmartSearchContextUpdating = $true
+    try {
+        Update-AMRSmartSearchContextCore
+    } finally {
+        $script:SmartSearchContextUpdating = $false
+    }
+}
+function Update-AMRSmartSearchContextCore {
+    if (-not $script:SmartSearchBox) { return }
+    $main = C 'MainNavigationTabs'
+    $page = if ($main -and $main.SelectedItem) { [string]$main.SelectedItem.Header } else { 'current page' }
+    if ($page -eq 'Tool Kit') {
+        $kit = C 'ToolKitSubTabs'
+        if ($kit -and $kit.SelectedItem) { $page += ' / ' + [string]$kit.SelectedItem.Header }
+    } elseif ($page -eq 'System' -or $page -eq 'Overview') {
+        $overview = C 'OverviewSubTabs'
+        if ($overview -and $overview.SelectedItem) { $page += ' / ' + [string]$overview.SelectedItem.Header }
+        if ($page -match 'System Overview$') {
+            $hardware = C 'SystemHardwareTabs'
+            if ($hardware -and $hardware.SelectedItem) { $page += ' / ' + [string]$hardware.SelectedItem.Header }
+        }
+    } elseif ($page -eq 'Backups') {
+        $backupTabs = C 'BackupSubTabs'
+        if ($backupTabs -and $backupTabs.SelectedItem) { $page += ' / ' + [string]$backupTabs.SelectedItem.Header }
+    }
+    $targetName = Get-AMRSmartSearchTarget
+    $placeholder = 'Search in ' + $page + '...'
+    switch -Regex ($page) {
+        '^Software$' { $placeholder = 'Search software, package name or ID...'; break }
+        '^Tool Kit / Optimize$' { $placeholder = 'Search in Optimize...'; break }
+        '^Tool Kit / Security$' { $placeholder = 'Search in Security...'; break }
+        '^Tool Kit / System$' { $placeholder = 'Search in System...'; break }
+        '^Tool Kit / Networks$' { $placeholder = 'Search in Networks...'; break }
+        '^Tool Kit / Utilities$' { $placeholder = 'Search in Utilities...'; break }
+        '^Backups / Backup Center$' { $placeholder = 'Search backup tools by name or category...'; break }
+        '^System.*$' { $placeholder = 'Search in ' + $page + '...'; break }
+        '^Cleanup$' { $placeholder = 'Search cleanup options...'; break }
+        '^Logs$' { $placeholder = 'Search logs, events or device IDs...'; break }
+        '^Overview' { $placeholder = 'Search within this overview...'; break }
+        '^About$' { $placeholder = 'Search about this application...'; break }
+    }
+    $script:SmartSearchBox.Tag = $placeholder
+    $script:SmartSearchBox.ToolTip = 'Smart Search — ' + $page + ' | ' + $placeholder
+
+    $categoryTargetName = Get-AMRSmartCategoryTarget
+    $categoryTarget = if ($categoryTargetName) { C $categoryTargetName } else { $null }
+    $sharedCategory = $script:SmartCategoryFilter
+    if ($sharedCategory) {
+        $script:SmartCategoryRouting = $true
+        try {
+            $sharedCategory.Items.Clear()
+            if ($categoryTarget -and $categoryTarget.Items.Count -gt 0) {
+                foreach ($item in $categoryTarget.Items) {
+                    $copy = New-Object System.Windows.Controls.ComboBoxItem
+                    if ($item -is [System.Windows.Controls.ComboBoxItem]) { $copy.Content = [string]$item.Content }
+                    else { $copy.Content = [string]$item }
+                    [void]$sharedCategory.Items.Add($copy)
+                }
+                $sharedCategory.SelectedIndex = [Math]::Max(0,$categoryTarget.SelectedIndex)
+                $sharedCategory.Visibility = [System.Windows.Visibility]::Visible
+                # Hide the old in-page category/search cluster; the shared selector is now the single visible control.
+                try { $categoryTarget.Parent.Visibility = [System.Windows.Visibility]::Collapsed } catch {}
+            } else {
+                $sharedCategory.Visibility = [System.Windows.Visibility]::Collapsed
+            }
+        } finally { $script:SmartCategoryRouting = $false }
+    }
+    if ($targetName -eq '__ContentFilter') {
+        Set-AMRSmartContentFilter -Query ([string]$script:SmartSearchBox.Text)
+        $script:SmartSearchBox.IsEnabled = $true
+        return
+    }
+    $target = if ($targetName) { C $targetName } else { $null }
+    if ($target -and $target -is [System.Windows.Controls.TextBox]) {
+        $script:SmartSearchRouting = $true
+        try { $target.Text = [string]$script:SmartSearchBox.Text }
+        finally { $script:SmartSearchRouting = $false }
+        $script:SmartSearchBox.IsEnabled = $true
+    } else {
+        $script:SmartSearchBox.IsEnabled = $false
+    }
+}
+
+
+try {
+    foreach ($categoryName in @('OptCategoryFilter','SecCategoryFilter','SysCategoryFilter','NetCategoryFilter','UtilCategoryFilter','BackupCategoryFilter')) {
+        $localCategory = C $categoryName
+        if ($localCategory) { $localCategory.Visibility = [System.Windows.Visibility]::Collapsed }
+    }
+    $mainTabs = C 'MainNavigationTabs'
+    if ($mainTabs) {
+        $mainTabs.ApplyTemplate()
+        $script:SmartSearchBox = $mainTabs.Template.FindName('PART_SmartSearchBox', $mainTabs)
+        if ($script:SmartSearchBox) {
+            $script:SmartCategoryFilter = $mainTabs.Template.FindName('PART_SmartCategoryFilter', $mainTabs)
+            if ($script:SmartCategoryFilter) {
+                $script:SmartCategoryFilter.Add_SelectionChanged({
+                    if ($script:SmartCategoryRouting) { return }
+                    $categoryName = Get-AMRSmartCategoryTarget
+                    if ($categoryName) {
+                        $targetCategory = C $categoryName
+                        if ($targetCategory -and $script:SmartCategoryFilter.SelectedIndex -ge 0) {
+                            $script:SmartCategoryRouting = $true
+                            try { $targetCategory.SelectedIndex = $script:SmartCategoryFilter.SelectedIndex }
+                            finally { $script:SmartCategoryRouting = $false }
+                        }
+                    }
+                })
+            }
+            $script:SmartSearchBox.Add_TextChanged({
+                if ($script:SmartSearchRouting) { return }
+                $targetName = Get-AMRSmartSearchTarget
+                if ($targetName -eq '__ContentFilter') {
+                    Set-AMRSmartContentFilter -Query ([string]$script:SmartSearchBox.Text)
+                    return
+                }
+                if ($targetName) {
+                    $target = C $targetName
+                    if ($target -and $target -is [System.Windows.Controls.TextBox]) {
+                        $script:SmartSearchRouting = $true
+                        try { $target.Text = [string]$script:SmartSearchBox.Text }
+                        finally { $script:SmartSearchRouting = $false }
+                    }
+                }
+            })
+        }
+        $mainTabs.Add_SelectionChanged({
+            # WPF SelectionChanged is a routed event. Ignore child TabControl events
+            # bubbling through MainNavigationTabs to prevent duplicate expensive refreshes.
+            if ($_.OriginalSource -ne $this) { return }
+            Update-AMRSmartSearchContext
+        })
+    }
+    $kitTabs = C 'ToolKitSubTabs'
+    if ($kitTabs) {
+        $kitTabs.Add_SelectionChanged({
+            # Only process a selection made by ToolKitSubTabs itself.
+            if ($_.OriginalSource -ne $this) { return }
+            Update-AMRSmartSearchContext
+        })
+    }
+    $overviewTabs = C 'OverviewSubTabs'
+    if ($overviewTabs) {
+        $overviewTabs.Add_SelectionChanged({
+            if ($_.OriginalSource -ne $this) { return }
+            Update-AMRSmartSearchContext
+        })
+    }
+    $hardwareTabs = C 'SystemHardwareTabs'
+    if ($hardwareTabs) {
+        $hardwareTabs.Add_SelectionChanged({
+            if ($_.OriginalSource -ne $this) { return }
+            Update-AMRSmartSearchContext
+        })
+    }
+    $backupTabs = C 'BackupSubTabs'
+    if ($backupTabs) {
+        $backupTabs.Add_SelectionChanged({
+            if ($_.OriginalSource -ne $this) { return }
+            Update-AMRSmartSearchContext
+        })
+    }
+    Update-AMRSmartSearchContext
+} catch {
+    Write-AMRLog "Smart Search initialization warning: $($_.Exception.Message)" WARNING System
+}
+
 $script:Status        = C 'StatusText'
 Register-AMRExceptionHandlers
 $script:ProgressBar   = C 'InstallProgressBar'
 $script:ProgressText  = C 'ProgressText'
+
+try {
+    $cleanupSearch = C 'CleanupSearchBox'
+    if ($cleanupSearch) {
+        $cleanupSearch.Add_TextChanged({
+            $query = ([string](C 'CleanupSearchBox').Text).Trim()
+            $candidateNames = @('CleanupUserTempCheck','CleanupWindowsTempCheck','CleanupUpdateCheck','CleanupWerCheck','CleanupShaderCheck','CleanupDeliveryCheck')
+            foreach ($controlName in $candidateNames) {
+                $control = C $controlName
+                if (-not $control) { continue }
+                $label = [string]$control.Content
+                $match = [string]::IsNullOrWhiteSpace($query) -or $label.IndexOf($query,[System.StringComparison]::OrdinalIgnoreCase) -ge 0
+                $control.Visibility = if ($match) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
+            }
+        })
+    }
+} catch {
+    Write-AMRLog "Cleanup Smart Search filter warning: $($_.Exception.Message)" WARNING Cleanup
+}
+
 $script:LogControls['All']       = C 'LogConsoleAll'
 $script:LogControls['System']    = C 'LogConsoleSystem'
 $script:LogControls['Overview']  = C 'LogConsoleOverview'
@@ -4389,6 +5387,110 @@ $script:LogControls['Customize'] = C 'LogConsoleCustomize'
 $script:LogControls['Tweaks']    = C 'LogConsoleTweaks'
 $script:LogControls['Cleanup']   = C 'LogConsoleCleanup'
 $script:DriverLogConsole = C 'DriverLogConsole'
+
+# Hydrate the UI consoles with recent events written before the WPF log pump
+# was initialized. Startup events are already persisted to the daily log file;
+# without this step the on-screen consoles can look empty until a new action logs.
+try {
+    if (Test-Path -LiteralPath $script:LogFile) {
+        $startupLogLines = @(Get-Content -LiteralPath $script:LogFile -Tail 500 -ErrorAction Stop)
+        if ($startupLogLines.Count -gt 0) {
+            $allStartupText = New-Object 'System.Collections.Generic.List[string]'
+            $areaStartupText = @{}
+            foreach ($startupLine in $startupLogLines) {
+                $lineText = [string]$startupLine
+                # Keep verbose DEBUG entries on disk only; UI panes show actionable levels.
+                if ($lineText -match '^\[[^\]]+\] \[DEBUG\] \[') { continue }
+                [void]$allStartupText.Add($lineText)
+                if ($lineText -match '^\[[^\]]+\] \[[^\]]+\] \[(?<Area>[^\]]+)\]') {
+                    $areaName = [string]$matches['Area']
+                    if (-not $areaStartupText.ContainsKey($areaName)) {
+                        $areaStartupText[$areaName] = New-Object 'System.Collections.Generic.List[string]'
+                    }
+                    [void]$areaStartupText[$areaName].Add($lineText)
+                }
+            }
+            if ($script:LogControls['All']) {
+                $script:LogControls['All'].Text = $allStartupText -join "`r`n"
+                Trim-AMRLogTextBox -Control $script:LogControls['All'] -MaxChars $script:LogUIRetentionChars
+            }
+            foreach ($areaName in $areaStartupText.Keys) {
+                $areaControl = $script:LogControls[$areaName]
+                if ($areaControl) {
+                    $areaControl.Text = $areaStartupText[$areaName] -join "`r`n"
+                    Trim-AMRLogTextBox -Control $areaControl -MaxChars $script:LogUIRetentionChars
+                }
+            }
+        }
+    }
+} catch {
+    Write-AMRDiagnostic -Severity 'WARNING' -Area 'Logging' -Operation 'HydrateStartupLogViews' -Message 'Could not preload recent persisted log entries into the UI consoles.' -ErrorRecord $_ -Target $script:LogFile
+}
+
+Start-AMRLogUIPump
+$script:Window.Add_Closed({
+    # Stop the active Cleanup worker before releasing the window. A closed window
+    # must never leave a previous scan alive or let a later launch inherit stale work.
+    try {
+        $cleanupJob = $script:AMRCleanupScanState.Current
+        if ($cleanupJob) {
+            try { Write-AMRLog ('Cleanup scan session ' + [string]$cleanupJob.ScanId + ' cancelled because its window was closed; a future launch must start a new scan.') WARNING Cleanup } catch {}
+            try { Write-AMRCleanupTrace ('Scan cancelled on window close. Session=' + [string]$cleanupJob.ScanId) 'WARNING' } catch {}
+            if ($cleanupJob.Timer) { try { $cleanupJob.Timer.Stop() } catch {} }
+            if ($cleanupJob.PowerShell) { try { $cleanupJob.PowerShell.Stop() } catch {}; try { $cleanupJob.PowerShell.Dispose() } catch {} }
+            if ($cleanupJob.Runspace) { try { $cleanupJob.Runspace.Close() } catch {}; try { $cleanupJob.Runspace.Dispose() } catch {} }
+            $script:AMRCleanupScanState.Current = $null
+        }
+    } catch {}
+    # Stop window-scoped DispatcherTimers before releasing the UI and its worker.
+    if ($script:LogUIFlushTimer) {
+        try { $script:LogUIFlushTimer.Stop() } catch {}
+        $script:LogUIFlushTimer = $null
+    }
+    if ($script:DriverLogRefreshTimer) {
+        try { $script:DriverLogRefreshTimer.Stop() } catch {}
+        $script:DriverLogRefreshTimer = $null
+    }
+    if ($script:IconRefreshTimer) {
+        try { $script:IconRefreshTimer.Stop() } catch {}
+        $script:IconRefreshTimer = $null
+    }
+
+    # The icon worker is window-owned. Cancel an in-flight invocation and release
+    # its PowerShell/runspace handles so closing the window cannot leave it running.
+    if ($script:IconRefreshPowerShell) {
+        try { $script:IconRefreshPowerShell.Stop() } catch {}
+        try { $script:IconRefreshPowerShell.Dispose() } catch {}
+        $script:IconRefreshPowerShell = $null
+    }
+    if ($script:IconRefreshRunspace) {
+        try { $script:IconRefreshRunspace.Close() } catch {}
+        try { $script:IconRefreshRunspace.Dispose() } catch {}
+        $script:IconRefreshRunspace = $null
+    }
+    $script:IconRefreshAsync = $null
+    $script:IconRefreshReadyQueue = $null
+    $script:IconRefreshStarted = $false
+
+    # Stop the installed-inventory background runspace when the owning window closes.
+    try {
+        $installedJob = $script:InstalledScanState.Current
+        if ($installedJob) {
+            if ($installedJob.Timer) { try { $installedJob.Timer.Stop() } catch {} }
+            if ($installedJob.PowerShell) {
+                try { $installedJob.PowerShell.Stop() } catch {}
+                try { $installedJob.PowerShell.Dispose() } catch {}
+            }
+            if ($installedJob.Runspace) {
+                try { $installedJob.Runspace.Close() } catch {}
+                try { $installedJob.Runspace.Dispose() } catch {}
+            }
+            $script:InstalledScanState.Current = $null
+        }
+    } catch {}
+    # Flush the independent disk queue only after all window-owned workers are stopped.
+    try { [AMRLogDiskWriter]::Shutdown() } catch {}
+})
 
 # Logs Tab Actions
 (C 'ClearAllLogsBtn').Add_Click({
@@ -4624,7 +5726,7 @@ function Update-AMRDriverRestorePointStatus {
         (C 'DriverRestorePointStatus').Text = ('Verified AMR restore point #{0} • {1} • {2}' -f $record.State.SequenceNumber,$record.State.Description,$when)
         (C 'DriverSmartRestoreBtn').IsEnabled = $true
     } catch {
-        (C 'DriverRestorePointStatus').Text = 'No verified AMR restore point is recorded. Use Create Restore Point whenever you want to save a recovery point.'
+        (C 'DriverRestorePointStatus').Text = 'No verified AMR restore point is recorded. Use Driver Backup > Create Restore Point whenever you want to save a recovery point.'
         (C 'DriverSmartRestoreBtn').IsEnabled = $false
     }
 }
@@ -4657,7 +5759,7 @@ function Invoke-AMRDriverSmartRestore {
     if ($script:DriverManagedJob -or $script:DriverActionJob -or $script:DriverScanJob -or $script:DriverBatchActive -or $script:DriverSmartQueueActive -or $script:DriverOperationState.State -eq 'Running') { Show-AMRMessage 'Wait for the current driver operation to finish before creating a restore point.' 'Driver Operation Busy' OK Information | Out-Null; return }
     if ((Show-AMRMessage 'Create a Windows System Restore point now? Windows System Protection must be enabled. This does not install or change any driver.' 'Create AMR Driver Restore Point' YesNo Warning) -ne 'Yes') { return }
     try {
-        $null=Start-AMRDriverManagedWorker -Operation RestorePoint -Device ([pscustomobject]@{DeviceName='System Overview';DeviceId='System'}) -Candidate 'Manually created from System Overview'
+        $null=Start-AMRDriverManagedWorker -Operation RestorePoint -Device ([pscustomobject]@{DeviceName='Driver Backup';DeviceId='DriverBackup'}) -Candidate 'Manually created from Driver Backup'
         $button.IsEnabled=$false; $button.Content='Creating…'
         $poll=New-Object System.Windows.Threading.DispatcherTimer
         $poll.Interval=[TimeSpan]::FromMilliseconds(500)
@@ -6218,7 +7320,7 @@ function Invoke-AMRVendorPackageAcquisition {
 
 function Show-AMRVendorPackageResults {
     param([Parameter(Mandatory=$true)][object]$Device,[Parameter(Mandatory=$true)][object[]]$Candidates)
-    $dialog=New-Object System.Windows.Window;$dialog.Title='Direct Vendor Package Discovery – '+[string]$Device.DeviceName;$dialog.Width=1050;$dialog.Height=590;$dialog.MinWidth=820;$dialog.MinHeight=430;$dialog.WindowStartupLocation='CenterOwner';$dialog.ResizeMode='CanResize';$dialog.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#182638');$dialog.Foreground=[System.Windows.Media.Brushes]::White;if($script:Window -and $script:Window.IsVisible){$dialog.Owner=$script:Window}
+    $dialog=New-Object System.Windows.Window;$dialog.Title='Direct Vendor Package Discovery – '+[string]$Device.DeviceName;$dialog.Width=1050;$dialog.Height=590;$dialog.MinWidth=820;$dialog.MinHeight=430;$dialog.WindowStartupLocation='CenterOwner';$dialog.ResizeMode='CanResize';$dialog.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#111C2B');$dialog.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#E7EDF5');if($script:Window -and $script:Window.IsVisible){$dialog.Owner=$script:Window}
     $root=New-Object System.Windows.Controls.DockPanel;$root.Margin=[System.Windows.Thickness]::new(14)
     $note=New-Object System.Windows.Controls.TextBlock;$note.Text='Multi-source vendor coverage: Dell Driver Pack Catalog, HP Client Driver Pack Catalog and Lenovo CDRT provide package candidates where exact model/OS catalog matches exist. MSI and GIGABYTE now add exact motherboard-model catalog metadata and official package links, but remain manual-download / non-installable until archive verification is complete. Other supported OEM, motherboard, component, storage, peripheral and system-integrator vendors appear as official portal leads in the same candidate manager. Portal leads are not packages. OEM bundles remain non-installable until extraction and INF/CAT validation; AMR will not execute vendor EXEs automatically.';$note.TextWrapping='Wrap';$note.Margin=[System.Windows.Thickness]::new(0,0,0,10);$note.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#FCD9A6');[System.Windows.Controls.DockPanel]::SetDock($note,'Top');[void]$root.Children.Add($note)
     $grid=New-Object System.Windows.Controls.ListView;$grid.SelectionMode='Single';$grid.ItemsSource=$Candidates;$grid.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#111B29');$grid.Foreground=[System.Windows.Media.Brushes]::White
@@ -6228,8 +7330,8 @@ function Show-AMRVendorPackageResults {
     $detail=New-Object System.Windows.Controls.TextBlock;$detail.TextWrapping='Wrap';$detail.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#93C5FD');$detail.Margin=[System.Windows.Thickness]::new(0,0,0,8);[void]$bottom.Children.Add($detail)
     $buttons=New-Object System.Windows.Controls.StackPanel;$buttons.Orientation='Horizontal';$buttons.HorizontalAlignment='Right'
     $download=New-Object System.Windows.Controls.Button;$download.Content='Download & Verify Selected';$download.Width=205;$download.Height=34;$download.Margin=[System.Windows.Thickness]::new(0,0,8,0);$download.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB');$download.Foreground=[System.Windows.Media.Brushes]::White
-    $open=New-Object System.Windows.Controls.Button;$open.Content='Open Official Package URL';$open.Width=175;$open.Height=34;$open.Margin=[System.Windows.Thickness]::new(0,0,8,0);$open.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#245B46');$open.Foreground=[System.Windows.Media.Brushes]::White
-    $close=New-Object System.Windows.Controls.Button;$close.Content='Close';$close.Width=90;$close.Height=34;$close.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#303846');$close.Foreground=[System.Windows.Media.Brushes]::White;$close.Add_Click({$dialog.Close()})
+    $open=New-Object System.Windows.Controls.Button;$open.Content='Open Official Package URL';$open.Width=175;$open.Height=34;$open.Margin=[System.Windows.Thickness]::new(0,0,8,0);$open.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#245B46');$open.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#E8FFF3');$open.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#55A987');$open.BorderThickness=[System.Windows.Thickness]::new(1)
+    $close=New-Object System.Windows.Controls.Button;$close.Content='Close';$close.Width=90;$close.Height=34;$close.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#252F3D');$close.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#E2EAF3');$close.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#48596D');$close.BorderThickness=[System.Windows.Thickness]::new(1);$close.Add_Click({$dialog.Close()})
     $open.Add_Click({if($grid.SelectedItem -and $grid.SelectedItem.PackageUrl){Start-Process -FilePath ([string]$grid.SelectedItem.PackageUrl) -ErrorAction SilentlyContinue}})
     $download.Add_Click(({
         if(-not $grid.SelectedItem -or [bool]$grid.SelectedItem.IsDownloaded){return}
@@ -6913,7 +8015,7 @@ function Start-AMRDriverScan {
                     $directIdVendorCount=@($devices | Where-Object { $_.HardwareCoverageStatus -in @('PCI vendor identified','USB vendor identified','Audio codec vendor identified','ACPI vendor identified') }).Count
                     $unresolvedVendorCount=@($devices | Where-Object { -not $_.HardwareVendorName }).Count
                     $sourceLeadCount=@($devices | ForEach-Object { @($_.VendorSourceCandidates).Count } | Measure-Object -Sum).Sum
-                    (C 'DriverScanStatus').Text = ('Scan completed {0}. {1} devices; {2} device issue(s); {3} installed driver records; {4} vendor identities resolved ({5} from direct hardware identifiers); {6} devices with unresolved vendor identity; {7} official source leads prepared. {8} {9} Use Smart Select to review AMR recommendations, then Start Smart Install to prepare only your approved choices.' -f $scanResult.ScanTime, $devices.Count, $issueCount, $scanResult.InstalledDriverCount, $identifiedVendorCount, $directIdVendorCount, $unresolvedVendorCount, $sourceLeadCount, $wuSummary, 'Exact Hardware ID matches remain primary; OEM/model context is supporting evidence and unverified source leads cannot install.')
+                    (C 'DriverScanStatus').Text = ('Scan completed {0}. {1} devices; {2} device issue(s); {3} installed driver records; {4} vendor identities resolved ({5} from direct hardware identifiers); {6} devices with unresolved vendor identity; {7} official source leads prepared. {8} {9} Use Smart Select to review the available driver choices, then Smart Install to prepare only your approved selections.' -f $scanResult.ScanTime, $devices.Count, $issueCount, $scanResult.InstalledDriverCount, $identifiedVendorCount, $directIdVendorCount, $unresolvedVendorCount, $sourceLeadCount, $wuSummary, 'Exact Hardware ID matches remain primary; OEM/model context is supporting evidence and unverified source leads cannot install.')
 
                     $support = Get-AMRDriverSupportSource -ComputerManufacturer ([string]$scanResult.ComputerManufacturer) -BoardManufacturer ([string]$scanResult.BoardManufacturer)
                     $script:DriverSupportUrl = $support.Url
@@ -6969,6 +8071,8 @@ function Set-AMRDriverExperienceMode {
     $smartButton = C 'DriverSmartModeBtn'
     $advancedButton = C 'DriverAdvancedModeBtn'
     $description = C 'DriverModeDescription'
+    $modeEyebrow = C 'DriverModeEyebrow'
+    $modeHeading = C 'DriverModeSectionHeading'
     $deviceList = C 'DriverDeviceList'
     $scrollViewer = C 'DriverCenterScrollViewer'
     $overviewSubTabs = C 'OverviewSubTabs'
@@ -6983,16 +8087,20 @@ function Set-AMRDriverExperienceMode {
     }
 
     if ($Mode -eq 'Smart') {
-        if ($smartButton) { $smartButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#176B50'); $smartButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#34D399'); $smartButton.FontWeight = 'Bold' }
-        if ($advancedButton) { $advancedButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#303846'); $advancedButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#526176'); $advancedButton.FontWeight = 'Normal' }
-        if ($description) { $description.Text = 'Smart View: Smart Select recommends which confirmed driver candidates deserve attention. Smart Install separately prepares and installs only the choices you approve.' }
+        if ($smartButton) { $smartButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#263646'); $smartButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62'); $smartButton.FontWeight = 'Bold' }
+        if ($advancedButton) { $advancedButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#182638'); $advancedButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#344B68'); $advancedButton.FontWeight = 'Normal' }
+        if ($description) { $description.Text = '' }
+        if ($modeEyebrow) { $modeEyebrow.Text = 'SMART ASSISTANT' }
+        if ($modeHeading) { $modeHeading.Text = '' }
+        if ($smartButton) { $smartButton.Content = '✦ Smart'; $smartButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#263646'); $smartButton.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F4D99B') }
+        if ($advancedButton) { $advancedButton.Content = 'Professional'; $advancedButton.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#CBD5E1') }
         if ($scrollViewer) { $scrollViewer.Padding = [System.Windows.Thickness]::new(10,8,10,16) }
         if ($smartActionsPanel) { $smartActionsPanel.Visibility = 'Visible' }
         if ($professionalActionsPanel) { $professionalActionsPanel.Visibility = 'Collapsed' }
 
         # Keep only the practical columns visible to a non-technical user.
         if ($deviceList -and $deviceList.View -and $deviceList.View.Columns.Count -ge 13) {
-            $widths = @(260,105,0,120,0,0,0,0,0,0,310,0,0)
+            $widths = @(0,260,105,0,120,0,0,0,0,0,0,310,0,0)
             for ($i = 0; $i -lt $widths.Count; $i++) { $deviceList.View.Columns[$i].Width = $widths[$i] }
         }
         if ($deviceList) {
@@ -7028,18 +8136,22 @@ function Set-AMRDriverExperienceMode {
         $smartSelectButton = C 'DriverSmartSelectBtn'
         if ($smartSelectButton) { $smartSelectButton.Visibility = 'Visible'; $smartSelectButton.Content = '✦ Smart Select' }
         $smartInstallButton = C 'DriverStartSmartInstallBtn'
-        if ($smartInstallButton) { $smartInstallButton.Visibility = 'Visible'; $smartInstallButton.Content = 'Start Smart Install' }
+        if ($smartInstallButton) { $smartInstallButton.Visibility = 'Visible'; $smartInstallButton.Content = 'Smart Install' }
     }
     else {
-        if ($smartButton) { $smartButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#303846'); $smartButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#526176'); $smartButton.FontWeight = 'Normal' }
-        if ($advancedButton) { $advancedButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#244A70'); $advancedButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4B83B8'); $advancedButton.FontWeight = 'Bold' }
-        if ($description) { $description.Text = 'Professional Driver Center: compare every retained Windows Update match, choose an alternative, investigate official OEM/vendor sources, inspect rollback options and export reports.' }
+        if ($smartButton) { $smartButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#182638'); $smartButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#344B68'); $smartButton.FontWeight = 'Normal' }
+        if ($advancedButton) { $advancedButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#263646'); $advancedButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62'); $advancedButton.FontWeight = 'Bold' }
+        if ($description) { $description.Text = 'Full control for experienced users: inspect every detected device, compare candidates, manage official sources, review rollback options and build installation plans.' }
+        if ($modeEyebrow) { $modeEyebrow.Text = 'PROFESSIONAL WORKSPACE  •  FULL CONTROL' }
+        if ($modeHeading) { $modeHeading.Text = 'FULL DRIVER INVENTORY & CONTROL' }
+        if ($smartButton) { $smartButton.Content = '✦ Smart'; $smartButton.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#CBD5E1') }
+        if ($advancedButton) { $advancedButton.Content = 'Professional'; $advancedButton.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F4D99B') }
         if ($scrollViewer) { $scrollViewer.Padding = [System.Windows.Thickness]::new(10,8,10,16) }
         if ($smartActionsPanel) { $smartActionsPanel.Visibility = 'Collapsed' }
         if ($professionalActionsPanel) { $professionalActionsPanel.Visibility = 'Visible' }
 
         if ($deviceList -and $deviceList.View -and $deviceList.View.Columns.Count -ge 13) {
-            $widths = @(245,105,145,115,150,135,95,190,190,75,250,130,55)
+            $widths = @(48,245,105,145,115,150,135,95,190,190,75,250,130,55)
             for ($i = 0; $i -lt $widths.Count; $i++) { $deviceList.View.Columns[$i].Width = $widths[$i] }
         }
         if ($deviceList) {
@@ -9862,21 +10974,40 @@ function Show-AMRProfessionalSourceManager {
     ) + @($leads | ForEach-Object {[pscustomobject]@{Name=$_.Name;Type=$_.Mode;Url=$_.Url;Role=$_.Role;SearchTerms=$_.SearchTerms;MatchReason=$_.MatchReason;Priority=$_.Priority}})
     $dialog=New-Object System.Windows.Window;$dialog.Title='Professional Multi-Source Manager – '+[string]$Device.DeviceName;$dialog.Width=1040;$dialog.Height=610;$dialog.MinWidth=820;$dialog.MinHeight=440;$dialog.WindowStartupLocation='CenterOwner';$dialog.ResizeMode='CanResize';$dialog.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#182638');$dialog.Foreground=[System.Windows.Media.Brushes]::White
     if($script:Window -and $script:Window.IsVisible){$dialog.Owner=$script:Window}
-    $root=New-Object System.Windows.Controls.DockPanel;$root.Margin=[System.Windows.Thickness]::new(16)
+    $root=New-Object System.Windows.Controls.DockPanel;$root.Margin=[System.Windows.Thickness]::new(18)
     $top=New-Object System.Windows.Controls.StackPanel;[System.Windows.Controls.DockPanel]::SetDock($top,'Top')
-    $heading=New-Object System.Windows.Controls.TextBlock;$heading.Text=('Multi-source discovery for {0} • component: {1} • vendor: {2} • coverage: {3}' -f $Device.DeviceName,$Device.ComponentCategory,$Device.HardwareVendorName,$Device.HardwareCoverageStatus);$heading.FontSize=15;$heading.FontWeight='SemiBold';$heading.TextWrapping='Wrap';$heading.Margin=[System.Windows.Thickness]::new(0,0,0,7);[void]$top.Children.Add($heading)
-    $identity=New-Object System.Windows.Controls.TextBlock;$identity.Text=('System identity: {0} / {1} ({2}) • motherboard: {3} {4} • IDs: {5}' -f $script:DriverOEMModelProfile.IdentityClass,$script:DriverOEMModelProfile.OEMVendor,$script:DriverOEMModelProfile.Confidence,$script:DriverOEMModelProfile.BoardVendor,$script:DriverOEMModelProfile.BoardProduct,$Device.HardwareIdSummary);$identity.TextWrapping='Wrap';$identity.FontSize=10;$identity.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#AFC0D3');$identity.Margin=[System.Windows.Thickness]::new(0,0,0,10);[void]$top.Children.Add($identity)
-    $evidence=New-Object System.Windows.Controls.TextBlock;$evidence.Text=('Hardware evidence: {0} ({1}) • subsystem partner: {2} • ID families: {3} • unresolved/other IDs: {4}' -f $Device.HardwareVendorEvidence,$Device.HardwareVendorEvidenceLevel,$(if($Device.SubsystemVendorName){$Device.SubsystemVendorName}else{'not identified'}),(@($Device.HardwareIdFamilies) -join ', '),@($Device.UnresolvedHardwareIds).Count);$evidence.TextWrapping='Wrap';$evidence.FontSize=10;$evidence.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#AFC0D3');$evidence.Margin=[System.Windows.Thickness]::new(0,0,0,10);[void]$top.Children.Add($evidence)
-    $warning=New-Object System.Windows.Controls.TextBlock;$warning.Text='Vendor identity confidence: PCI/USB/HD Audio IDs are strongest; ACPI IDs and subsystem partners are supporting evidence; generic PnP manufacturer strings are weaker. AMR now routes across 72 registered OEM, motherboard, silicon/controller, storage, peripheral, ODM and system-integrator brands. Mixed-brand systems are handled as separate hardware-vendor, system-OEM and motherboard sources and merged into one candidate manager. Unknown IDs remain available for exact lookup. Official portal leads are not packages; only supported catalog results enter package acquisition. Dell, HP and Lenovo bundles still require extraction and INF/CAT validation. Windows Update and Microsoft Catalog retain their existing installation pipeline.';$warning.TextWrapping='Wrap';$warning.FontSize=10;$warning.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#FCD9A6');$warning.Margin=[System.Windows.Thickness]::new(0,0,0,10);[void]$top.Children.Add($warning)
+    $heading=New-Object System.Windows.Controls.TextBlock;$heading.Text=('Multi-source discovery for {0} • component: {1} • vendor: {2} • coverage: {3}' -f $Device.DeviceName,$Device.ComponentCategory,$Device.HardwareVendorName,$Device.HardwareCoverageStatus);$heading.FontSize=16;$heading.FontWeight='SemiBold';$heading.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#F1F5F9');$heading.TextWrapping='Wrap';$heading.Margin=[System.Windows.Thickness]::new(0,0,0,9);[void]$top.Children.Add($heading)
+    $identity=New-Object System.Windows.Controls.TextBlock;$identity.Text=('System identity: {0} / {1} ({2}) • motherboard: {3} {4} • IDs: {5}' -f $script:DriverOEMModelProfile.IdentityClass,$script:DriverOEMModelProfile.OEMVendor,$script:DriverOEMModelProfile.Confidence,$script:DriverOEMModelProfile.BoardVendor,$script:DriverOEMModelProfile.BoardProduct,$Device.HardwareIdSummary);$identity.TextWrapping='Wrap';$identity.FontSize=10;$identity.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#C1CDDA');$identity.Margin=[System.Windows.Thickness]::new(0,0,0,7);[void]$top.Children.Add($identity)
+    $evidence=New-Object System.Windows.Controls.TextBlock;$evidence.Text=('Hardware evidence: {0} ({1}) • subsystem partner: {2} • ID families: {3} • unresolved/other IDs: {4}' -f $Device.HardwareVendorEvidence,$Device.HardwareVendorEvidenceLevel,$(if($Device.SubsystemVendorName){$Device.SubsystemVendorName}else{'not identified'}),(@($Device.HardwareIdFamilies) -join ', '),@($Device.UnresolvedHardwareIds).Count);$evidence.TextWrapping='Wrap';$evidence.FontSize=10;$evidence.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#9EAFBF');$evidence.Margin=[System.Windows.Thickness]::new(0,0,0,8);[void]$top.Children.Add($evidence)
+    $warning=New-Object System.Windows.Controls.TextBlock;$warning.Text='Vendor identity confidence: PCI/USB/HD Audio IDs are strongest; ACPI IDs and subsystem partners are supporting evidence; generic PnP manufacturer strings are weaker. AMR now routes across 72 registered OEM, motherboard, silicon/controller, storage, peripheral, ODM and system-integrator brands. Mixed-brand systems are handled as separate hardware-vendor, system-OEM and motherboard sources and merged into one candidate manager. Unknown IDs remain available for exact lookup. Official portal leads are not packages; only supported catalog results enter package acquisition. Dell, HP and Lenovo bundles still require extraction and INF/CAT validation. Windows Update and Microsoft Catalog retain their existing installation pipeline.';$warning.TextWrapping='Wrap';$warning.FontSize=10;$warning.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#D8BD8C');$warning.Margin=[System.Windows.Thickness]::new(0,0,0,12);[void]$top.Children.Add($warning)
     [void]$root.Children.Add($top)
-    $grid=New-Object System.Windows.Controls.ListView;$grid.SelectionMode='Single';$grid.ItemsSource=$sources;$grid.SelectedIndex=1;$grid.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#111B29');$grid.Foreground=[System.Windows.Media.Brushes]::White;$grid.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#40546C')
+    $grid=New-Object System.Windows.Controls.ListView;$grid.SelectionMode='Single';$grid.ItemsSource=$sources;$grid.SelectedIndex=1;$grid.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#142236');$grid.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#E7EDF5');$grid.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#3B5068');$grid.BorderThickness=[System.Windows.Thickness]::new(1);$grid.Padding=[System.Windows.Thickness]::new(3)
+    # Explicit dark GridView header and row templates prevent WPF's default white theme surfaces.
+    $headerStyle=[System.Windows.Style]::new([System.Windows.Controls.GridViewColumnHeader])
+    [void]$headerStyle.Setters.Add([System.Windows.Setter]::new([System.Windows.Controls.Control]::BackgroundProperty,[System.Windows.Media.BrushConverter]::new().ConvertFromString('#20334A')))
+    [void]$headerStyle.Setters.Add([System.Windows.Setter]::new([System.Windows.Controls.Control]::ForegroundProperty,[System.Windows.Media.BrushConverter]::new().ConvertFromString('#D8B56D')))
+    [void]$headerStyle.Setters.Add([System.Windows.Setter]::new([System.Windows.Controls.Control]::BorderBrushProperty,[System.Windows.Media.BrushConverter]::new().ConvertFromString('#3B5068')))
+    [void]$headerStyle.Setters.Add([System.Windows.Setter]::new([System.Windows.Controls.Control]::PaddingProperty,[System.Windows.Thickness]::new(9,7,9,7)))
+    [void]$headerStyle.Setters.Add([System.Windows.Setter]::new([System.Windows.Controls.Control]::FontWeightProperty,[System.Windows.FontWeights]::SemiBold))
+    [void]$grid.Resources.Add([System.Windows.Controls.GridViewColumnHeader],$headerStyle)
+    $rowStyle=[System.Windows.Style]::new([System.Windows.Controls.ListViewItem])
+    [void]$rowStyle.Setters.Add([System.Windows.Setter]::new([System.Windows.Controls.Control]::BackgroundProperty,[System.Windows.Media.BrushConverter]::new().ConvertFromString('#17283B')))
+    [void]$rowStyle.Setters.Add([System.Windows.Setter]::new([System.Windows.Controls.Control]::ForegroundProperty,[System.Windows.Media.BrushConverter]::new().ConvertFromString('#E2EAF3')))
+    [void]$rowStyle.Setters.Add([System.Windows.Setter]::new([System.Windows.Controls.Control]::PaddingProperty,[System.Windows.Thickness]::new(7,6,7,6)))
+    [void]$rowStyle.Setters.Add([System.Windows.Setter]::new([System.Windows.Controls.Control]::BorderBrushProperty,[System.Windows.Media.BrushConverter]::new().ConvertFromString('#263B52')))
+    $hoverTrigger=[System.Windows.Trigger]::new();$hoverTrigger.Property=[System.Windows.Controls.ListViewItem]::IsMouseOverProperty;$hoverTrigger.Value=$true
+    [void]$hoverTrigger.Setters.Add([System.Windows.Setter]::new([System.Windows.Controls.Control]::BackgroundProperty,[System.Windows.Media.BrushConverter]::new().ConvertFromString('#223B55')))
+    $selectedTrigger=[System.Windows.Trigger]::new();$selectedTrigger.Property=[System.Windows.Controls.ListViewItem]::IsSelectedProperty;$selectedTrigger.Value=$true
+    [void]$selectedTrigger.Setters.Add([System.Windows.Setter]::new([System.Windows.Controls.Control]::BackgroundProperty,[System.Windows.Media.BrushConverter]::new().ConvertFromString('#344B69')))
+    [void]$selectedTrigger.Setters.Add([System.Windows.Setter]::new([System.Windows.Controls.Control]::ForegroundProperty,[System.Windows.Media.BrushConverter]::new().ConvertFromString('#FFF3D7')))
+    [void]$rowStyle.Triggers.Add($hoverTrigger);[void]$rowStyle.Triggers.Add($selectedTrigger);$grid.ItemContainerStyle=$rowStyle
     $view=New-Object System.Windows.Controls.GridView
     foreach($def in @(@('Source',175,'Name'),@('Adapter / role',185,'Type'),@('Match reason',230,'MatchReason'),@('Purpose / coverage',350,'Role'))){$col=New-Object System.Windows.Controls.GridViewColumn;$col.Header=$def[0];$col.Width=[double]$def[1];$col.DisplayMemberBinding=[System.Windows.Data.Binding]::new([string]$def[2]);[void]$view.Columns.Add($col)}
     $grid.View=$view
     $bottom=New-Object System.Windows.Controls.StackPanel;$bottom.Orientation='Vertical';$bottom.Margin=[System.Windows.Thickness]::new(0,10,0,0);[System.Windows.Controls.DockPanel]::SetDock($bottom,'Bottom')
-    $terms=New-Object System.Windows.Controls.TextBox;$terms.IsReadOnly=$true;$terms.TextWrapping='Wrap';$terms.AcceptsReturn=$true;$terms.VerticalScrollBarVisibility='Auto';$terms.Height=56;$terms.Margin=[System.Windows.Thickness]::new(0,0,0,8);$terms.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#111B29');$terms.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#93C5FD');$terms.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#40546C');[void]$bottom.Children.Add($terms)
+    $terms=New-Object System.Windows.Controls.TextBox;$terms.IsReadOnly=$true;$terms.TextWrapping='Wrap';$terms.AcceptsReturn=$true;$terms.VerticalScrollBarVisibility='Auto';$terms.Height=56;$terms.Margin=[System.Windows.Thickness]::new(0,0,0,8);$terms.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#0F1A28');$terms.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#C7D8EA');$terms.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#3B5068');$terms.Padding=[System.Windows.Thickness]::new(9,7,9,7);[void]$bottom.Children.Add($terms)
     $buttons=New-Object System.Windows.Controls.StackPanel;$buttons.Orientation='Horizontal';$buttons.HorizontalAlignment='Right'
-    $discover=New-Object System.Windows.Controls.Button;$discover.Content='Discover Catalog Candidates';$discover.Width=205;$discover.Height=34;$discover.Margin=[System.Windows.Thickness]::new(0,0,8,0);$discover.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB');$discover.Foreground=[System.Windows.Media.Brushes]::White
+    $discover=New-Object System.Windows.Controls.Button;$discover.Content='Discover Catalog Candidates';$discover.Width=205;$discover.Height=34;$discover.Margin=[System.Windows.Thickness]::new(0,0,8,0);$discover.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#294B70');$discover.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#F1F5F9');$discover.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#648BB5');$discover.BorderThickness=[System.Windows.Thickness]::new(1)
     $discover.Add_Click(({
         if($script:DriverManagedJob -or $script:DriverActionJob -or $script:DriverScanJob){return}
         try{$null=Start-AMRDriverManagedWorker -Operation CatalogDiscovery -Device $Device;$discover.IsEnabled=$false;(C 'DriverActionStatus').Text='Multi-source Catalog discovery is running in the background.';$poll=New-Object System.Windows.Threading.DispatcherTimer;$poll.Interval=[TimeSpan]::FromMilliseconds(450);$poll.Add_Tick(({
@@ -9884,7 +11015,7 @@ function Show-AMRProfessionalSourceManager {
             if($script:DriverManagedJob.State -in @('Completed','Failed','Stopped')){$poll.Stop();try{$found=Complete-AMRDriverManagedWorker;if(-not $found){throw 'Catalog discovery returned no result.'};$Device|Add-Member -NotePropertyName ProfessionalDiscoveredCandidates -NotePropertyValue @($found.Results) -Force;(C 'DriverActionStatus').Text=('Catalog discovery completed: {0} Catalog result(s).' -f @($found.Results).Count);if(@($found.Errors).Count -gt 0){Write-AMRLog ('Catalog discovery warnings: '+($found.Errors -join ' | ')) WARNING Overview};$discover.IsEnabled=$true;Show-AMRProfessionalDiscoveryResults -Device $Device -Discovery $found;if(@($found.Results).Count -gt 0){Show-AMRProfessionalCandidateManager -Device $Device}}catch{(C 'DriverActionStatus').Text='Catalog discovery failed: '+[string]$_.Exception.Message;Show-AMRMessage ([string]$_.Exception.Message) 'Catalog Discovery' OK Warning | Out-Null;$discover.IsEnabled=$true}}
         }).GetNewClosure());$script:DriverManagedTimer=$poll;$poll.Start()}catch{$discover.IsEnabled=$true;Show-AMRMessage ('Could not start Catalog discovery: '+[string]$_.Exception.Message) 'Catalog Discovery' OK Warning | Out-Null}
     }).GetNewClosure());[void]$buttons.Children.Add($discover)
-    $vendorDiscover=New-Object System.Windows.Controls.Button;$vendorDiscover.Content='Discover All Vendor Sources';$vendorDiscover.Width=220;$vendorDiscover.Height=34;$vendorDiscover.Margin=[System.Windows.Thickness]::new(0,0,8,0);$vendorDiscover.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#6D4AA5');$vendorDiscover.Foreground=[System.Windows.Media.Brushes]::White
+    $vendorDiscover=New-Object System.Windows.Controls.Button;$vendorDiscover.Content='Discover All Vendor Sources';$vendorDiscover.Width=220;$vendorDiscover.Height=34;$vendorDiscover.Margin=[System.Windows.Thickness]::new(0,0,8,0);$vendorDiscover.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#34445A');$vendorDiscover.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#E8EDF4');$vendorDiscover.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#69798C');$vendorDiscover.BorderThickness=[System.Windows.Thickness]::new(1)
     $vendorDiscover.Add_Click(({
         if($script:DriverManagedJob -or $script:DriverActionJob -or $script:DriverScanJob){return}
         try{$null=Start-AMRDriverManagedWorker -Operation VendorDiscovery -Device $Device -Candidate $script:DriverOEMModelProfile;$vendorDiscover.IsEnabled=$false;(C 'DriverActionStatus').Text='Searching registered official vendor providers in the background.';$poll=New-Object System.Windows.Threading.DispatcherTimer;$poll.Interval=[TimeSpan]::FromMilliseconds(450);$poll.Add_Tick(({
@@ -9898,7 +11029,7 @@ function Show-AMRProfessionalSourceManager {
         if([string]::IsNullOrWhiteSpace([string]$item.Url)){Show-AMRMessage ([string]$item.Role) 'Source Information' OK Information | Out-Null;return}
         try{Start-Process -FilePath ([string]$item.Url) -ErrorAction Stop;Write-AMRLog ('Opened source {0} for device {1}.' -f $item.Name,$Device.DeviceName) INFO Overview}catch{Show-AMRMessage ('Could not open source: '+[string]$_.Exception.Message) 'Source Manager' OK Error | Out-Null}
     }).GetNewClosure());[void]$buttons.Children.Add($open)
-    $copy=New-Object System.Windows.Controls.Button;$copy.Content='Copy Search Context';$copy.Width=145;$copy.Height=34;$copy.Margin=[System.Windows.Thickness]::new(0,0,8,0);$copy.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#344B69');$copy.Foreground=[System.Windows.Media.Brushes]::White
+    $copy=New-Object System.Windows.Controls.Button;$copy.Content='Copy Search Context';$copy.Width=145;$copy.Height=34;$copy.Margin=[System.Windows.Thickness]::new(0,0,8,0);$copy.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#293B52');$copy.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#E7EEF7');$copy.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#526B86');$copy.BorderThickness=[System.Windows.Thickness]::new(1)
     $copy.Add_Click(({if($grid.SelectedItem -and $grid.SelectedItem.SearchTerms){try{[System.Windows.Clipboard]::SetText([string]$grid.SelectedItem.SearchTerms);Show-AMRMessage 'Exact model, OS and hardware search context copied.' 'Search Context' OK Information | Out-Null}catch{Show-AMRMessage ('Could not copy search context: '+[string]$_.Exception.Message) 'Search Context' OK Warning | Out-Null}}}).GetNewClosure());[void]$buttons.Children.Add($copy)
     $close=New-Object System.Windows.Controls.Button;$close.Content='Close';$close.Width=90;$close.Height=34;$close.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#303846');$close.Foreground=[System.Windows.Media.Brushes]::White;$close.Add_Click(({ $dialog.Close() }).GetNewClosure());[void]$buttons.Children.Add($close)
     [void]$bottom.Children.Add($buttons);[void]$root.Children.Add($bottom);[void]$root.Children.Add($grid)
@@ -10201,7 +11332,10 @@ function New-AMRInstalledInventoryRecord {
 
 function Get-AMRUniversalInstalledInventory {
     [CmdletBinding()]
-    param()
+    param(
+        [string]$WingetRawOutput = '',
+        [switch]$SkipWingetScan
+    )
     $records = New-Object 'System.Collections.Generic.List[object]'
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     $readProperty = { param($object, [string]$propertyName) $property = $object.PSObject.Properties[$propertyName]; if ($property) { return $property.Value }; return $null }
@@ -10256,10 +11390,19 @@ function Get-AMRUniversalInstalledInventory {
     # WinGet, Chocolatey and Scoop are supplemental identity sources. Their records
     # are retained only when not already represented by a native uninstall identity.
     try {
-        $wg = Get-Command winget.exe -ErrorAction SilentlyContinue
-        if ($wg) {
-            $out = & $wg.Source list --disable-interactivity --accept-source-agreements 2>$null
-            $lines = @($out | ForEach-Object { [string]$_ })
+        $lines = @()
+        if ($SkipWingetScan) {
+            if (-not [string]::IsNullOrWhiteSpace($WingetRawOutput)) {
+                $lines = @($WingetRawOutput -split "`r?`n")
+            }
+        } else {
+            $wg = Get-Command winget.exe -ErrorAction SilentlyContinue
+            if ($wg) {
+                $out = & $wg.Source list --disable-interactivity --accept-source-agreements 2>$null
+                $lines = @($out | ForEach-Object { [string]$_ })
+            }
+        }
+        if ($lines.Count -gt 0) {
             $header = -1; $idStart = -1; $verStart = -1
             for ($i=0; $i -lt $lines.Count; $i++) {
                 $mi=[regex]::Match($lines[$i],'(?i)\bId\b'); $mv=[regex]::Match($lines[$i],'(?i)\bVersion\b')
@@ -10343,6 +11486,97 @@ function Get-AMRUniversalInstalledInventory {
     return @($records | Sort-Object Name)
 }
 
+function Set-AMRInstalledCatalogMatches {
+    param(
+        [object[]]$Catalog,
+        [object]$InstalledIdentities,
+        [object]$WingetIdentities,
+        [object]$ChocoIdentities,
+        [object]$ScoopIdentities,
+        [string]$WingetRawOutput
+    )
+
+    # Canonical aliases for known catalog/installer naming differences.
+    $identityAliases = @{
+        'everythingsearch' = @('everything')
+        'visualstudiocode' = @('vscode','microsoftvisualstudiocode')
+        'microsoftedgewebview2runtime' = @('webview2runtime','microsoftedgewebview2')
+        'googlechrome' = @('chrome')
+        'microsoftedge' = @('edge')
+        'discord' = @('discord')
+        '7zip' = @('7zip')
+        'vlcmediaplayer' = @('vlc')
+        'sumatrapdf' = @('sumatrapdf')
+        'sharex' = @('sharex')
+    }
+
+    $installedCount = 0
+    foreach ($app in $Catalog) {
+        $isInstalled = $false
+        $candidateIdentities = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($identity in @([string]$app.Name, [string]$app.Id, [string]$app.ChocoId)) {
+            if ([string]::IsNullOrWhiteSpace($identity)) { continue }
+            $normalized = ($identity -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
+            if ($normalized.Length -ge 3 -and -not $candidateIdentities.Contains($normalized)) { $candidateIdentities.Add($normalized) }
+        }
+
+        # The final segment of a package ID often matches its Windows display name
+        # (for example, Vendor.ProductName vs. Product Name).
+        if (-not [string]::IsNullOrWhiteSpace([string]$app.Id) -and [string]$app.Id -match '\.') {
+            $idSuffix = ([string]$app.Id -split '\.')[-1]
+            $normalizedSuffix = ($idSuffix -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
+            if ($normalizedSuffix.Length -ge 3 -and -not $candidateIdentities.Contains($normalizedSuffix)) { $candidateIdentities.Add($normalizedSuffix) }
+        }
+
+        foreach ($baseIdentity in @($candidateIdentities.ToArray())) {
+            if ($identityAliases.ContainsKey($baseIdentity)) {
+                foreach ($alias in $identityAliases[$baseIdentity]) {
+                    $normalizedAlias = ($alias -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
+                    if ($normalizedAlias.Length -ge 3 -and -not $candidateIdentities.Contains($normalizedAlias)) { $candidateIdentities.Add($normalizedAlias) }
+                }
+            }
+        }
+
+        # Strong package-manager evidence: exact WinGet package ID, Chocolatey ID,
+        # or Scoop app-folder identity.
+        $normalizedCatalogId = ([string]$app.Id -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
+        $normalizedChocoId = ([string]$app.ChocoId -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
+        if ($normalizedCatalogId.Length -ge 3 -and $wingetIdentities.Contains($normalizedCatalogId)) { $isInstalled = $true }
+        if (-not $isInstalled -and $normalizedChocoId.Length -ge 3 -and $chocoIdentities.Contains($normalizedChocoId)) { $isInstalled = $true }
+        if (-not $isInstalled) {
+            foreach ($candidate in $candidateIdentities) {
+                if ($scoopIdentities.Contains($candidate)) { $isInstalled = $true; break }
+            }
+        }
+
+        # Windows registry and AppX identities, using exact normalized matches first.
+        if (-not $isInstalled) {
+            foreach ($normalized in $candidateIdentities) {
+                if ($installedIdentities.Contains($normalized)) { $isInstalled = $true; break }
+                # Accept only a version/architecture suffix after a complete known identity.
+                foreach ($observed in $installedIdentities) {
+                    if ($observed.Length -gt $normalized.Length -and $observed.StartsWith($normalized, [System.StringComparison]::OrdinalIgnoreCase)) {
+                        $suffix = $observed.Substring($normalized.Length)
+                        if ($suffix -match '^\d+(x64|x86|64bit|32bit)?$') { $isInstalled = $true; break }
+                    }
+                }
+                if ($isInstalled) { break }
+            }
+        }
+
+        # Fallback for WinGet CLI versions whose table headings/layout differ.
+        if (-not $isInstalled -and -not [string]::IsNullOrWhiteSpace($wingetRawOutput) -and -not [string]::IsNullOrWhiteSpace([string]$app.Id)) {
+            $escapedId = [regex]::Escape([string]$app.Id)
+            if ($wingetRawOutput -match ('(?im)(?<![A-Za-z0-9_.-])' + $escapedId + '(?![A-Za-z0-9_.-])')) { $isInstalled = $true }
+        }
+
+        $app.IsInstalled = $isInstalled
+        if ($isInstalled) { $installedCount++ }
+    }
+
+    return $installedCount
+}
+
 function Update-AMRInstalledCatalogState {
     # Build a multi-source local inventory once, then match it against the catalog.
     # Evidence sources: Windows uninstall registry, AppX/MSIX, WinGet, Chocolatey and Scoop.
@@ -10423,9 +11657,9 @@ function Update-AMRInstalledCatalogState {
             $wingetExitCode = -1
             try {
                 $wingetProcess = Start-Process -FilePath $winget.Source -ArgumentList 'list --disable-interactivity --accept-source-agreements' -PassThru -WindowStyle Hidden -RedirectStandardOutput $wingetStdoutPath -RedirectStandardError $wingetStderrPath -ErrorAction Stop
-                if (-not $wingetProcess.WaitForExit(20000)) {
+                if (-not $wingetProcess.WaitForExit(10000)) {
                     try { Stop-Process -Id $wingetProcess.Id -Force -ErrorAction SilentlyContinue } catch {}
-                    throw 'WinGet installed-package inventory timed out after 20 seconds.'
+                    throw 'WinGet installed-package inventory timed out after 10 seconds.'
                 }
                 $wingetProcess.WaitForExit()
                 $wingetExitCode = [int]$wingetProcess.ExitCode
@@ -10514,86 +11748,19 @@ function Update-AMRInstalledCatalogState {
         }
     }
 
-    # Canonical aliases for known catalog/installer naming differences.
-    $identityAliases = @{
-        'everythingsearch' = @('everything')
-        'visualstudiocode' = @('vscode','microsoftvisualstudiocode')
-        'microsoftedgewebview2runtime' = @('webview2runtime','microsoftedgewebview2')
-        'googlechrome' = @('chrome')
-        'microsoftedge' = @('edge')
-        'discord' = @('discord')
-        '7zip' = @('7zip')
-        'vlcmediaplayer' = @('vlc')
-        'sumatrapdf' = @('sumatrapdf')
-        'sharex' = @('sharex')
-    }
-
-    $installedCount = 0
-    foreach ($app in $script:SoftwareCatalog) {
-        $isInstalled = $false
-        $candidateIdentities = New-Object 'System.Collections.Generic.List[string]'
-        foreach ($identity in @([string]$app.Name, [string]$app.Id, [string]$app.ChocoId)) {
-            if ([string]::IsNullOrWhiteSpace($identity)) { continue }
-            $normalized = ($identity -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
-            if ($normalized.Length -ge 3 -and -not $candidateIdentities.Contains($normalized)) { $candidateIdentities.Add($normalized) }
-        }
-
-        # The final segment of a package ID often matches its Windows display name
-        # (for example, Vendor.ProductName vs. Product Name).
-        if (-not [string]::IsNullOrWhiteSpace([string]$app.Id) -and [string]$app.Id -match '\.') {
-            $idSuffix = ([string]$app.Id -split '\.')[-1]
-            $normalizedSuffix = ($idSuffix -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
-            if ($normalizedSuffix.Length -ge 3 -and -not $candidateIdentities.Contains($normalizedSuffix)) { $candidateIdentities.Add($normalizedSuffix) }
-        }
-
-        foreach ($baseIdentity in @($candidateIdentities.ToArray())) {
-            if ($identityAliases.ContainsKey($baseIdentity)) {
-                foreach ($alias in $identityAliases[$baseIdentity]) {
-                    $normalizedAlias = ($alias -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
-                    if ($normalizedAlias.Length -ge 3 -and -not $candidateIdentities.Contains($normalizedAlias)) { $candidateIdentities.Add($normalizedAlias) }
-                }
-            }
-        }
-
-        # Strong package-manager evidence: exact WinGet package ID, Chocolatey ID,
-        # or Scoop app-folder identity.
-        $normalizedCatalogId = ([string]$app.Id -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
-        $normalizedChocoId = ([string]$app.ChocoId -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
-        if ($normalizedCatalogId.Length -ge 3 -and $wingetIdentities.Contains($normalizedCatalogId)) { $isInstalled = $true }
-        if (-not $isInstalled -and $normalizedChocoId.Length -ge 3 -and $chocoIdentities.Contains($normalizedChocoId)) { $isInstalled = $true }
-        if (-not $isInstalled) {
-            foreach ($candidate in $candidateIdentities) {
-                if ($scoopIdentities.Contains($candidate)) { $isInstalled = $true; break }
-            }
-        }
-
-        # Windows registry and AppX identities, using exact normalized matches first.
-        if (-not $isInstalled) {
-            foreach ($normalized in $candidateIdentities) {
-                if ($installedIdentities.Contains($normalized)) { $isInstalled = $true; break }
-                # Accept only a version/architecture suffix after a complete known identity.
-                foreach ($observed in $installedIdentities) {
-                    if ($observed.Length -gt $normalized.Length -and $observed.StartsWith($normalized, [System.StringComparison]::OrdinalIgnoreCase)) {
-                        $suffix = $observed.Substring($normalized.Length)
-                        if ($suffix -match '^\d+(x64|x86|64bit|32bit)?$') { $isInstalled = $true; break }
-                    }
-                }
-                if ($isInstalled) { break }
-            }
-        }
-
-        # Fallback for WinGet CLI versions whose table headings/layout differ.
-        if (-not $isInstalled -and -not [string]::IsNullOrWhiteSpace($wingetRawOutput) -and -not [string]::IsNullOrWhiteSpace([string]$app.Id)) {
-            $escapedId = [regex]::Escape([string]$app.Id)
-            if ($wingetRawOutput -match ('(?im)(?<![A-Za-z0-9_.-])' + $escapedId + '(?![A-Za-z0-9_.-])')) { $isInstalled = $true }
-        }
-
-        $app.IsInstalled = $isInstalled
-        if ($isInstalled) { $installedCount++ }
-    }
+    $installedCount = Set-AMRInstalledCatalogMatches `
+        -Catalog $script:SoftwareCatalog `
+        -InstalledIdentities $installedIdentities `
+        -WingetIdentities $wingetIdentities `
+        -ChocoIdentities $chocoIdentities `
+        -ScoopIdentities $scoopIdentities `
+        -WingetRawOutput $wingetRawOutput
 
     Write-AMRLog ("Installed inventory scanned: {0} registry entries, {1} AppX/MSIX packages, {2} WinGet IDs, {3} Chocolatey packages, {4} Scoop apps. Catalog matches: {5}." -f $registryEntryCount,$appxPackageCount,$wingetIdentities.Count,$chocoIdentities.Count,$scoopIdentities.Count,$installedCount) INFO Software
-    return $installedCount
+    return [pscustomobject]@{
+        Count = [int]$installedCount
+        WingetRawOutput = [string]$wingetRawOutput
+    }
 }
 
 
@@ -10610,8 +11777,85 @@ $script:InstalledScanState = @{
     Error = ''
     PendingShow = $false
     RescanRequested = $false
+    CacheLoaded = $false
 }
 
+# Persistent snapshot: the last completed inventory is loaded immediately on the
+# next launch, while a fresh scan refreshes it in the background.
+$script:InstalledInventoryCacheDir = Join-Path $script:AppRoot 'Cache'
+$script:InstalledInventoryCacheFile = Join-Path $script:InstalledInventoryCacheDir 'InstalledInventoryCache.json'
+try { New-Item -ItemType Directory -Force -Path $script:InstalledInventoryCacheDir | Out-Null } catch {}
+
+function Get-AMRInstalledCatalogFingerprint {
+    try {
+        $catalogIds = @($script:SoftwareCatalog | ForEach-Object { [string]$_.Id }) -join "`n"
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($catalogIds)
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try { return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant() }
+        finally { $sha.Dispose() }
+    } catch { return '' }
+}
+
+function Import-AMRInstalledInventoryCache {
+    param([switch]$Quiet)
+    $cachePath = [string]$script:InstalledInventoryCacheFile
+    if (-not (Test-Path -LiteralPath $cachePath -PathType Leaf)) { return $false }
+    try {
+        $cache = Get-Content -LiteralPath $cachePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if ([int]$cache.SchemaVersion -ne 1) { return $false }
+        $fingerprint = Get-AMRInstalledCatalogFingerprint
+        if ([string]::IsNullOrWhiteSpace($fingerprint) -or [string]$cache.CatalogFingerprint -ne $fingerprint) { return $false }
+        $flags = @($cache.InstalledFlags)
+        if ($flags.Count -ne $script:SoftwareCatalog.Count) { return $false }
+        $records = @($cache.Inventory)
+        if ($records.Count -gt 20000) { return $false }
+        for ($index = 0; $index -lt $script:SoftwareCatalog.Count; $index++) {
+            $script:SoftwareCatalog[$index].IsInstalled = [bool]$flags[$index]
+        }
+        foreach ($record in $records) {
+            if (-not $record.PSObject.Properties['Icon']) { $record | Add-Member -NotePropertyName Icon -NotePropertyValue $null }
+            else { $record.Icon = $null }
+            if (-not $record.PSObject.Properties['IsUniversalInventory']) { $record | Add-Member -NotePropertyName IsUniversalInventory -NotePropertyValue $true } else { $record.IsUniversalInventory = $true }
+            if (-not $record.PSObject.Properties['DetailsExpanded']) { $record | Add-Member -NotePropertyName DetailsExpanded -NotePropertyValue $false } else { $record.DetailsExpanded = $false }
+            if (-not $record.PSObject.Properties['Category']) { $record | Add-Member -NotePropertyName Category -NotePropertyValue '' }
+        }
+        $script:InstalledScanState.Inventory = @($records)
+        $script:InstalledScanState.Count = [int]$cache.Count
+        $script:InstalledScanState.Ready = $true
+        $script:InstalledScanState.CacheLoaded = $true
+        if (-not $Quiet) {
+            Write-AMRLog ("Loaded cached installed-app snapshot: {0} record(s). A background refresh has been scheduled." -f $records.Count) INFO Software
+        }
+        return $true
+    } catch {
+        if (-not $Quiet) { Write-AMRLog "Installed-app cache could not be loaded and will be rebuilt: $($_.Exception.Message)" WARNING Software }
+        return $false
+    }
+}
+
+function Save-AMRInstalledInventoryCache {
+    try {
+        $fingerprint = Get-AMRInstalledCatalogFingerprint
+        if ([string]::IsNullOrWhiteSpace($fingerprint)) { return $false }
+        $cachePayload = [ordered]@{
+            SchemaVersion = 1
+            CatalogFingerprint = $fingerprint
+            SavedAtUtc = [DateTime]::UtcNow.ToString('o')
+            Count = [int]$script:InstalledScanState.Count
+            InstalledFlags = @($script:SoftwareCatalog | ForEach-Object { [bool]$_.IsInstalled })
+            Inventory = @($script:InstalledScanState.Inventory | ForEach-Object { $_ | Select-Object * -ExcludeProperty Icon })
+        }
+        $json = ConvertTo-Json -InputObject $cachePayload -Depth 7
+        $temporaryPath = $script:InstalledInventoryCacheFile + '.tmp'
+        Set-Content -LiteralPath $temporaryPath -Value $json -Encoding UTF8 -ErrorAction Stop
+        Move-Item -LiteralPath $temporaryPath -Destination $script:InstalledInventoryCacheFile -Force -ErrorAction Stop
+        return $true
+    } catch {
+        try { if (Test-Path -LiteralPath ($script:InstalledInventoryCacheFile + '.tmp')) { Remove-Item -LiteralPath ($script:InstalledInventoryCacheFile + '.tmp') -Force -ErrorAction SilentlyContinue } } catch {}
+        Write-AMRLog "Could not save installed-app cache: $($_.Exception.Message)" WARNING Software
+        return $false
+    }
+}
 
 # ----------------------------------------------------------
 # AMR Smart Icon Engine ALPHA3 - Installed Apps Bridge
@@ -10970,6 +12214,27 @@ function Complete-AMRInstalledCatalogScan {
             $JobState.Count = [int]$payload.Count
             $JobState.Inventory = @($payload.Inventory)
             $JobState.Error = ''
+            [void](Save-AMRInstalledInventoryCache)
+
+            # If the user opened the cached Installed view while refresh was still
+            # running, replace its records with the fresh snapshot without losing
+            # the selected category, search text, or current scroll position.
+            if ($script:ShowInstalledOnly -and $script:InstalledAppsView) {
+                try {
+                    $savedInstalledCategory = [string]$script:SelectedSoftwareCategory
+                    $installedScroll = C 'SoftwareScrollViewer'
+                    $savedInstalledOffset = [double]$installedScroll.VerticalOffset
+                    Set-AMRInstalledViewVisible -InstalledCount $JobState.Count
+                    if ($savedInstalledCategory -and $savedInstalledCategory -ne 'All Applications') {
+                        $categoryItem = @($script:SoftwareCategories | Where-Object { [string]$_.Name -eq $savedInstalledCategory } | Select-Object -First 1)
+                        if ($categoryItem.Count -gt 0) { (C 'SoftwareCategoryList').SelectedItem = $categoryItem[0] }
+                    }
+                    $installedScroll.UpdateLayout()
+                    $installedScroll.ScrollToVerticalOffset($savedInstalledOffset)
+                } catch {
+                    Write-AMRLog "Could not refresh the visible Installed view from the new snapshot: $($_.Exception.Message)" WARNING Software
+                }
+            }
             foreach ($entry in @($payload.Logs)) {
                 if ($entry -and $entry.Message) {
                     $level = if ($entry.Level) { [string]$entry.Level } else { 'INFO' }
@@ -10981,7 +12246,8 @@ function Complete-AMRInstalledCatalogScan {
     }
 
     if ($workerError) {
-        $JobState.Ready = $false
+        # Keep a previously loaded/completed snapshot usable if only the refresh failed.
+        # A first-run failure still leaves Ready=false and reports the error normally.
         $JobState.Error = $workerError
         Write-AMRLog "Background installed-app scan failed: $workerError" ERROR Software
         if ($JobState.PendingShow) {
@@ -11043,13 +12309,15 @@ function Start-AMRInstalledCatalogScan {
     try {
         $inventoryCommand = Get-Command Update-AMRInstalledCatalogState -ErrorAction Stop
         $inventoryFunctionBody = $inventoryCommand.ScriptBlock.ToString()
+        $matchCommand = Get-Command Set-AMRInstalledCatalogMatches -ErrorAction Stop
+        $matchFunctionBody = $matchCommand.ScriptBlock.ToString()
         $universalCommand = Get-Command Get-AMRUniversalInstalledInventory -ErrorAction Stop
         $universalFunctionBody = $universalCommand.ScriptBlock.ToString()
         $recordCommand = Get-Command New-AMRInstalledInventoryRecord -ErrorAction Stop
         $recordFunctionBody = $recordCommand.ScriptBlock.ToString()
 
         $workerScript = @'
-param($CatalogSnapshot, $InventoryFunctionBody, $UniversalFunctionBody, $RecordFunctionBody)
+param($CatalogSnapshot, $InventoryFunctionBody, $MatchFunctionBody, $UniversalFunctionBody, $RecordFunctionBody)
 $ErrorActionPreference = 'Continue'
 $script:SoftwareCatalog = @($CatalogSnapshot)
 $script:InventoryLogs = New-Object 'System.Collections.Generic.List[object]'
@@ -11063,17 +12331,20 @@ function Write-AMRLog {
         })
     } catch {}
 }
+$matchDefinition = "function Set-AMRInstalledCatalogMatches {`r`n" + $MatchFunctionBody + "`r`n}"
+Invoke-Expression $matchDefinition
 $definition = "function Update-AMRInstalledCatalogState {`r`n" + $InventoryFunctionBody + "`r`n}"
 Invoke-Expression $definition
 $recordDefinition = "function New-AMRInstalledInventoryRecord {`r`n" + $RecordFunctionBody + "`r`n}"
 Invoke-Expression $recordDefinition
 $universalDefinition = "function Get-AMRUniversalInstalledInventory {`r`n" + $UniversalFunctionBody + "`r`n}"
 Invoke-Expression $universalDefinition
-$count = Update-AMRInstalledCatalogState
+$scanResult = Update-AMRInstalledCatalogState
 $flags = @($script:SoftwareCatalog | ForEach-Object { [bool]$_.IsInstalled })
-$inventory = @(Get-AMRUniversalInstalledInventory)
+# Reuse the WinGet output collected above; do not launch a second WinGet CLI scan.
+$inventory = @(Get-AMRUniversalInstalledInventory -WingetRawOutput ([string]$scanResult.WingetRawOutput) -SkipWingetScan)
 [pscustomobject]@{
-    Count = [int]$count
+    Count = [int]$scanResult.Count
     InstalledFlags = $flags
     Inventory = $inventory
     Logs = @($script:InventoryLogs.ToArray())
@@ -11087,6 +12358,7 @@ $inventory = @(Get-AMRUniversalInstalledInventory)
         [void]$powerShell.AddScript($workerScript)
         [void]$powerShell.AddArgument($catalogSnapshot)
         [void]$powerShell.AddArgument($inventoryFunctionBody)
+        [void]$powerShell.AddArgument($matchFunctionBody)
         [void]$powerShell.AddArgument($universalFunctionBody)
         [void]$powerShell.AddArgument($recordFunctionBody)
         $asyncResult = $powerShell.BeginInvoke()
@@ -11144,13 +12416,14 @@ $script:AppsView.Filter = [System.Predicate[object]]{
     return ($item.Name -match "(?i)$escaped") -or ($item.Id -match "(?i)$escaped")
 }
 
-# Keep the existing 3/4-column UniformGrid and card template, but realize only a
-# small page of cards at a time. This avoids creating 1,000 WPF visual trees when
-# Software opens and prevents the first-open layout pass from monopolizing UI.
+# Keep the existing four-column UniformGrid and card template. Populate the
+# grid incrementally so opening Software does not create the full catalog at once.
+# Note: the standard ItemsControl/UniformGrid remains non-virtualized; paging only
+# limits the number of cards currently added to the visual tree.
 $script:SoftwareGridPageItems = New-Object 'System.Collections.ObjectModel.ObservableCollection[object]'
 $script:SoftwareGridPageSource = @()
 $script:SoftwareGridPageIndex = 0
-$script:SoftwareGridPageSize = 30
+$script:SoftwareGridPageSize = 16
 $script:SoftwareGridPageBusy = $false
 $script:SoftwareGridPageDispatchPending = $false
 
@@ -11191,7 +12464,7 @@ function Reset-AMRSoftwareGridPages {
     # together, preserving their original order inside that category. This
     # prevents separators from jumping backwards (e.g. 2, 1, 3, 2).
     $viewItems = @($View)
-    $columns = 3 # Preserve the catalog's three-column order in normal and maximized states.
+    $columns = 4 # Keep exactly four application cards per row in every window state.
     $orderedItems = New-Object 'System.Collections.Generic.List[object]'
     $categoryOrdinals = @{}
     for ($categoryIndex = 0; $categoryIndex -lt $script:SoftwareCategoryNames.Count; $categoryIndex++) {
@@ -11257,10 +12530,9 @@ function Reset-AMRSoftwareGridPages {
     $script:SoftwareGridPageSource = $orderedItems.ToArray()
     # Keep the visual tree deliberately small on every launch. A UniformGrid
     # inside a regular ScrollViewer is NOT virtualized, so add a small first batch.
-    $script:SoftwareGridPageSize = 12
-    # Keep the first page large enough to include the next category while retaining
-    # the same three-column order in both normal and maximized window states. Prefill enough items to include the next categories.
-    $initialCount = if ($script:ShowInstalledOnly) { if ($script:Window.WindowState -eq [System.Windows.WindowState]::Maximized) { 48 } else { 24 } } elseif ($script:Window.WindowState -eq [System.Windows.WindowState]::Maximized) { 48 } else { 18 }
+    $script:SoftwareGridPageSize = 16
+    # Prefill complete four-card rows to avoid a partially populated row on first display.
+    $initialCount = if ($script:Window.WindowState -eq [System.Windows.WindowState]::Maximized) { 48 } else { 16 }
     $initialEnd = [Math]::Min($initialCount, $script:SoftwareGridPageSource.Count)
     while ($script:SoftwareGridPageIndex -lt $initialEnd) {
         [void]$newSoftwareGridPageItems.Add($script:SoftwareGridPageSource[$script:SoftwareGridPageIndex])
@@ -11373,7 +12645,7 @@ function Reset-AMRSoftwareGridPages {
 }, $true)
 Reset-AMRSoftwareGridPages -View $script:AppsView
 
-# Preserve the original Software card layout: 3 columns normally, 4 when maximized.
+# Keep a consistent four-column Software card layout in normal and maximized states.
 function Find-AMRVisualChildByType {
     param(
         [System.Windows.DependencyObject]$Parent,
@@ -11463,36 +12735,35 @@ function Sync-AMRRealizedSoftwareIconItem {
 
         $generator = $grid.ItemContainerGenerator
 
-        for ($i = 0; $i -lt $grid.Items.Count; $i++) {
-            $current = $grid.Items[$i]
+        # Resolve the container directly instead of scanning every catalog item
+        # for each delivered icon. Non-realized items are still handled by the
+        # existing deferred full-sync path when their card becomes visible.
+        $container = $generator.ContainerFromItem($Item)
 
-            if (-not [object]::ReferenceEquals($current,$Item)) {
-                continue
-            }
-
-            $container = $generator.ContainerFromIndex($i)
-
-            if ($null -eq $container) {
+        if ($null -eq $container) {
+            # An icon may arrive for a catalog item that has not been added to
+            # the current paged ItemsSource yet. Do not schedule a full-grid
+            # synchronization for an item that is not on the active page set;
+            # Add-AMRSoftwareGridPage queues the sync when that page is added.
+            if ($grid.Items.Contains($Item)) {
                 Queue-AMRSoftwareIconSync
-                return
             }
-
-            $image = Find-AMRNamedVisualChild -Parent $container -Name 'SoftwareIconImage'
-            $initials = Find-AMRNamedVisualChild -Parent $container -Name 'SoftwareIconInitials'
-
-            if ($null -ne $image) {
-                $image.Source = $Item.Icon
-            }
-
-            if ($null -ne $initials) {
-                $initials.Visibility = if ($null -eq $Item.Icon) {
-                    [System.Windows.Visibility]::Visible
-                } else {
-                    [System.Windows.Visibility]::Collapsed
-                }
-            }
-
             return
+        }
+
+        $image = Find-AMRNamedVisualChild -Parent $container -Name 'SoftwareIconImage'
+        $initials = Find-AMRNamedVisualChild -Parent $container -Name 'SoftwareIconInitials'
+
+        if ($null -ne $image) {
+            $image.Source = $Item.Icon
+        }
+
+        if ($null -ne $initials) {
+            $initials.Visibility = if ($null -eq $Item.Icon) {
+                [System.Windows.Visibility]::Visible
+            } else {
+                [System.Windows.Visibility]::Collapsed
+            }
         }
     } catch {}
 }
@@ -11521,7 +12792,7 @@ try {
 $script:UpdateSoftwareGridColumns = {
     $uniformGrid = Find-AMRVisualChildByType -Parent (C 'SoftwareGrid') -ChildType ([System.Windows.Controls.Primitives.UniformGrid])
     if ($null -ne $uniformGrid) {
-        $newColumnCount = 3 # Fixed column count prevents maximize/restore from reflowing the catalog.
+        $newColumnCount = 4 # Fixed four-column layout prevents maximize/restore from reflowing the catalog.
         if ($uniformGrid.Columns -ne $newColumnCount) {
             $uniformGrid.Columns = $newColumnCount
             if ($script:AppsView) {
@@ -12699,6 +13970,40 @@ function Update-AMRInstallProgressFromLogLine {
     return $displayLine
 }
 
+function Write-AMRInstallLogBatch {
+    param([string[]]$Lines)
+    if (-not $Lines -or $Lines.Count -eq 0) { return }
+
+    $displayLines = New-Object 'System.Collections.Generic.List[string]'
+    $latest = $null
+    foreach ($rawLine in $Lines) {
+        if ([string]::IsNullOrWhiteSpace($rawLine)) { continue }
+        $displayLine = Update-AMRInstallProgressFromLogLine -Line $rawLine
+        [void]$displayLines.Add([string]$displayLine)
+        $latest = [string]$displayLine
+    }
+    if ($displayLines.Count -eq 0) { return }
+
+    try {
+        Add-Content -LiteralPath $script:LogFile -Value $displayLines.ToArray() -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        Write-AMRDiagnostic -Severity 'ERROR' -Area 'Software' -Operation 'AppendInstallLogBatch' -Message 'Could not persist a batch of installer log lines.' -ErrorRecord $_ -Target $script:LogFile
+    }
+
+    foreach ($key in @('All','Software')) {
+        $control = $script:LogControls[$key]
+        if (-not $control) { continue }
+        $wasAtBottom = ($control.GetLastVisibleLineIndex() -ge ($control.LineCount - 2))
+        $control.AppendText(($displayLines -join "`r`n") + "`r`n")
+        Trim-AMRLogTextBox -Control $control -MaxChars $script:LogUIRetentionChars
+        if ($wasAtBottom) { $control.ScrollToEnd() }
+    }
+    if ($latest) {
+        if ($script:Status) { $script:Status.Text = $latest }
+        if ($script:ProgressText) { $script:ProgressText.Text = $latest }
+    }
+}
+
 function Complete-AMRInstallQueue {
     param($Result, [string]$ErrorText = '')
 
@@ -12707,22 +14012,14 @@ function Complete-AMRInstallQueue {
         $script:InstallTimer = $null
     }
 
+    $completionLogBatch = New-Object 'System.Collections.Generic.List[string]'
     $line = $null
     while ($script:InstallLogQueue.TryDequeue([ref]$line)) {
-        if ($line) {
-            $line = Update-AMRInstallProgressFromLogLine -Line $line
-            try { Add-Content -LiteralPath $script:LogFile -Value $line -Encoding UTF8 -ErrorAction Stop } catch { Write-AMRDiagnostic -Severity 'ERROR' -Area 'Software' -Operation 'AppendInstallQueueLog' -Message 'Could not persist an installer worker log line.' -ErrorRecord $_ -Target $script:LogFile }
-            foreach ($key in @('All','Software')) {
-                $control = $script:LogControls[$key]
-                if ($control) {
-                    $control.AppendText("$line`r`n")
-                    $control.ScrollToEnd()
-                }
-            }
-            $script:Status.Text = $line
-            $script:ProgressText.Text = $line
-        }
+        if ($line) { [void]$completionLogBatch.Add([string]$line) }
         $line = $null
+    }
+    if ($completionLogBatch.Count -gt 0) {
+        Write-AMRInstallLogBatch -Lines $completionLogBatch.ToArray()
     }
 
     if ($script:InstallPowerShell) {
@@ -12860,22 +14157,15 @@ function Execute-SmartMultiTierInstallAsync {
         $script:InstallTimer = New-Object System.Windows.Threading.DispatcherTimer
         $script:InstallTimer.Interval = [TimeSpan]::FromMilliseconds(150)
         $script:InstallTimer.Add_Tick({
+            $installLogBatch = New-Object 'System.Collections.Generic.List[string]'
             $queuedLine = $null
-            while ($script:InstallLogQueue.TryDequeue([ref]$queuedLine)) {
-                if ($queuedLine) {
-                    $queuedLine = Update-AMRInstallProgressFromLogLine -Line $queuedLine
-                    try { Add-Content -LiteralPath $script:LogFile -Value $queuedLine -Encoding UTF8 -ErrorAction Stop } catch { Write-AMRDiagnostic -Severity 'ERROR' -Area 'Software' -Operation 'AppendInstallTimerLog' -Message 'Could not persist an installer progress log line.' -ErrorRecord $_ -Target $script:LogFile }
-                    foreach ($key in @('All','Software')) {
-                        $control = $script:LogControls[$key]
-                        if ($control) {
-                            $control.AppendText("$queuedLine`r`n")
-                            $control.ScrollToEnd()
-                        }
-                    }
-                    $script:Status.Text = $queuedLine
-                    $script:ProgressText.Text = $queuedLine
-                }
+            $installBatchLimit = 120
+            while ($installLogBatch.Count -lt $installBatchLimit -and $script:InstallLogQueue.TryDequeue([ref]$queuedLine)) {
+                if ($queuedLine) { [void]$installLogBatch.Add([string]$queuedLine) }
                 $queuedLine = $null
+            }
+            if ($installLogBatch.Count -gt 0) {
+                Write-AMRInstallLogBatch -Lines $installLogBatch.ToArray()
             }
 
             if ($script:InstallAsyncResult -and $script:InstallAsyncResult.IsCompleted) {
@@ -14281,12 +15571,82 @@ function Invoke-AMROptimizeTool {
   }
  } catch { Show-AMRMessage ("Could not complete the selected optimization: " + $_.Exception.Message) 'Optimize' OK Error | Out-Null; Write-AMRLog ("Optimize tool failed [$Key]: " + $_.Exception.Message) ERROR Optimize }
 }
+function Get-AMRToolInfoText {
+ param([Parameter(Mandatory=$true)]$Tool,[string]$Area='Tool')
+ $name=[string]$Tool.Name; $category=[string]$Tool.Category; $key=[string]$Tool.Key
+ $detail = switch -Regex ($name) {
+  '^Open ' { 'Opens the related Windows settings page or management console. It does not apply a change by itself; review the options in the window that opens.'; break }
+  '^(Show|Display|List|Review|Check) ' { 'Reads the current Windows configuration or status and displays the result. This is intended for inspection; it does not intentionally change the setting.'; break }
+  '^(Enable|Activate) ' { 'Changes the related Windows feature or protection setting to the enabled/performance state. Review the confirmation/result and note that administrator rights or a restart may be required.'; break }
+  '^Disable ' { 'Changes the related Windows feature, service, policy, or startup behavior to a disabled state. This can affect Windows behavior; review the result and use the corresponding enable/restore option if needed.'; break }
+  '^(Run|Start) ' { 'Starts the requested Windows scan, diagnostic, or maintenance operation. Some operations can take time and may require administrator privileges.'; break }
+  '^(Generate|Export|Create) ' { 'Creates a diagnostic or status report using Windows information. The report is intended to help inspect the current system and does not itself optimize or repair Windows.'; break }
+  '^(Clear|Flush|Reset|Renew|Release|Restart) ' { 'Runs a Windows maintenance or network command that clears, renews, restarts, or resets the named component. This can temporarily interrupt the related service or connection.'; break }
+  '^Empty ' { 'Removes temporary files from the named temporary folder. Files in use may be skipped; review the result carefully because this action deletes data from that location.'; break }
+  '^Ping ' { 'Sends a small set of network echo requests to the named destination and displays response time or packet-loss information.'; break }
+  '^Trace ' { 'Runs a route trace to the named destination to show the network hops along the path. Some routers may not respond to trace probes.'; break }
+  '^Test ' { 'Performs a connectivity or service test against the named destination and displays whether the requested connection succeeded.'; break }
+  default { 'Runs the Windows utility associated with this item. The information below identifies its purpose; the main card performs the action.' }
+ }
+ $extra = switch ($key) {
+  'TelemetryOff' { 'It targets the DiagTrack diagnostic service and the Windows diagnostic-data policy where supported.'; break }
+  'BackgroundOff' { 'It changes the global background-app permission; availability and effect vary by Windows version.'; break }
+  'Ultimate' { 'It requests the Ultimate Performance power scheme; Windows may not expose this scheme on every device.'; break }
+  'FastStartupOff' { 'It disables Fast Startup by changing the hibernation/boot configuration.'; break }
+  'FastStartupOn' { 'It enables Fast Startup through the Windows hibernation/boot configuration.'; break }
+  'ClearUserTemp' { 'Only the current user temporary directory is targeted.'; break }
+  'ClearWindowsTemp' { 'The Windows temporary directory is targeted; elevated permissions may be needed.'; break }
+  'RestorePoint' { 'Windows System Protection must be enabled, and Windows may limit restore-point creation frequency.'; break }
+  'DISMRepair' { 'DISM RestoreHealth may use Windows Update as a repair source and can take several minutes.'; break }
+  'SFC' { 'SFC /scannow checks protected Windows system files and attempts to repair corrupted copies.'; break }
+  'DefenderOn' { 'This asks Microsoft Defender Antivirus to turn real-time monitoring on.'; break }
+  'FirewallOn' { 'This enables Windows Firewall for Domain, Private, and Public profiles.'; break }
+  'ActivityOff' { 'This writes policy values that disable publishing and uploading Windows Activity History.'; break }
+  'QuickScan' { 'A confirmation is shown before Microsoft Defender starts a quick scan.'; break }
+  'FullScan' { 'A confirmation is shown before Microsoft Defender starts a full scan; it may take a long time.'; break }
+  'DefenderUpdate' { 'This requests the latest Microsoft Defender security intelligence definitions.'; break }
+  'ResetTCP' { 'This resets the TCP/IP stack; a restart may be needed before all effects take place.'; break }
+  'ResetWinsock' { 'This resets the Winsock catalog and may affect network software until Windows is restarted.'; break }
+  'ResetBoth' { 'This resets both TCP/IP and Winsock; expect to restart Windows to complete recovery.'; break }
+  'ReleaseIP' { 'This releases the current DHCP IPv4 lease and can temporarily disconnect the device.'; break }
+  'RenewIP' { 'This asks the DHCP server for a renewed IP lease.'; break }
+  default { '' }
+ }
+ $text = '{0}  Category: {1}. {2}' -f $name,$category,$detail
+ if($extra){$text += "`r`n`r`n$extra"}
+ return $text
+}
+function New-AMRCompactToolCard {
+ param([string]$Name,[string]$Key,[string]$Icon,[string]$Description,[scriptblock]$OnAction)
+ $border=New-Object System.Windows.Controls.Border
+ $border.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#202A35')
+ $border.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#344455')
+ $border.BorderThickness='1'; $border.CornerRadius='7'; $border.Padding='4'; $border.Margin='0,0,7,7'; $border.MinHeight=42
+ $layout=New-Object System.Windows.Controls.Grid
+ $colA=New-Object System.Windows.Controls.ColumnDefinition; $colA.Width=[System.Windows.GridLength]::new(1,[System.Windows.GridUnitType]::Star)
+ $colB=New-Object System.Windows.Controls.ColumnDefinition; $colB.Width=[System.Windows.GridLength]::new(28)
+ [void]$layout.ColumnDefinitions.Add($colA); [void]$layout.ColumnDefinitions.Add($colB)
+ $action=New-Object System.Windows.Controls.Button; $action.Content=('{0}  {1}' -f $Icon,$Name); $action.Tag=$Key
+ $action.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#263646'); $action.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#E7EDF3')
+ $action.BorderThickness='0'; $action.Padding='7,5'; $action.FontSize=11; $action.FontWeight='SemiBold'; $action.MinHeight=32; $action.HorizontalContentAlignment='Left'; $action.VerticalContentAlignment='Center'
+ # Keep hover surfaces silent: all explanatory text is available only from the gold info button.
+ $action.ToolTip=$null; $action.Add_Click($OnAction)
+ [System.Windows.Controls.Grid]::SetColumn($action,0); [void]$layout.Children.Add($action)
+ $info=New-Object System.Windows.Controls.Button; $info.Content='i'; $info.Width=23; $info.Height=23; $info.Padding='0'; $info.FontSize=12; $info.FontWeight='Bold'
+ $info.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62'); $info.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#17212B')
+ $info.BorderThickness='0'; $info.ToolTip=$null; $info.HorizontalAlignment='Center'; $info.VerticalAlignment='Center'
+ $info.Tag=$Description; $info.Add_Click({ Show-AMRMessage ([string]$this.Tag) 'Tool Information' OK Information | Out-Null }.GetNewClosure())
+ [System.Windows.Controls.Grid]::SetColumn($info,1); [void]$layout.Children.Add($info)
+ $border.Child=$layout
+ return $border
+}
+
 function Update-AMROptimizeView {
  $query = ''; if ($null -ne (C 'OptSearchBox')) { $query = (C 'OptSearchBox').Text }
  $category = 'All Categories'; if ($null -ne (C 'OptCategoryFilter') -and (C 'OptCategoryFilter').SelectedItem) { $category = ([string](C 'OptCategoryFilter').SelectedItem.Content) -replace '^⚙️\s*','' }
  $grid = C 'OptToolsGrid'; if ($null -eq $grid) { return }; $grid.Children.Clear()
  $items = @($script:AMROptimizeTools | Where-Object { ($category -eq 'All Categories' -or $_.Category -eq $category) -and (($_.Name + ' ' + $_.Keywords + ' ' + $_.Category) -match [regex]::Escape($query)) })
- foreach ($tool in $items) { $button = New-Object System.Windows.Controls.Button; $button.Content = "⚙️  $($tool.Name)"; $button.Tag = $tool.Key; $button.Margin = '0,0,10,10'; $button.Padding = '12,10'; $button.HorizontalContentAlignment = 'Left'; $button.MinHeight = 48; $button.FontSize = 13; $button.Add_Click({ Invoke-AMROptimizeTool -Key ([string]$this.Tag) }.GetNewClosure()); [void]$grid.Children.Add($button) }
+ foreach ($tool in $items) { $info=Get-AMRToolInfoText -Tool $tool -Area 'Optimize'; $card=New-AMRCompactToolCard -Name $tool.Name -Key $tool.Key -Icon '⚙' -Description $info -OnAction ({ Invoke-AMROptimizeTool -Key $tool.Key }.GetNewClosure()); [void]$grid.Children.Add($card) }
  (C 'OptResultsCount').Text = "Showing $($items.Count) of $($script:AMROptimizeTools.Count) optimization tools"
 }
 (C 'OptSearchBox').Add_TextChanged({ Update-AMROptimizeView })
@@ -14417,8 +15777,7 @@ function Update-AMRSecurityView {
   if($category -ne 'All Categories' -and $tool.Category -ne $category){continue}
   $haystack=('{0} {1} {2}' -f $tool.Name,$tool.Category,$tool.Keywords)
   if(-not [string]::IsNullOrWhiteSpace($search) -and $haystack -notlike "*$search*"){continue}
-  $button=New-Object System.Windows.Controls.Button; $button.Content=('🛡️  ' + $tool.Name); $button.Tag=$tool.Key; $button.Margin='0,0,10,10'; $button.Padding='12,10'; $button.MinHeight=48; $button.HorizontalContentAlignment='Left'; $button.ToolTip=("{0} • {1}" -f $tool.Category,$tool.Keywords)
-  $button.Add_Click({Invoke-AMRSecurityTool -Key ([string]$this.Tag)}.GetNewClosure()); [void]$grid.Children.Add($button); $visible++
+  $info=Get-AMRToolInfoText -Tool $tool -Area 'Security'; $card=New-AMRCompactToolCard -Name $tool.Name -Key $tool.Key -Icon '🛡' -Description $info -OnAction ({ Invoke-AMRSecurityTool -Key $tool.Key }.GetNewClosure()); [void]$grid.Children.Add($card); $visible++
  }
  (C 'SecResultsCount').Text=('{0} security tools shown' -f $visible)
 }
@@ -14551,8 +15910,7 @@ function Update-AMRSystemView {
   if($category -ne 'All Categories' -and $tool.Category -ne $category){continue}
   $haystack=('{0} {1} {2}' -f $tool.Name,$tool.Category,$tool.Keywords)
   if(-not [string]::IsNullOrWhiteSpace($search) -and $haystack -notlike "*$search*"){continue}
-  $button=New-Object System.Windows.Controls.Button; $button.Content=('⚙️  ' + $tool.Name); $button.Tag=$tool.Key; $button.Margin='0,0,10,10'; $button.Padding='12,10'; $button.MinHeight=48; $button.HorizontalContentAlignment='Left'; $button.ToolTip=("{0} • {1}" -f $tool.Category,$tool.Keywords)
-  $button.Add_Click({Invoke-AMRSystemTool -Key ([string]$this.Tag)}.GetNewClosure()); [void]$grid.Children.Add($button); $visible++
+  $info=Get-AMRToolInfoText -Tool $tool -Area 'System'; $card=New-AMRCompactToolCard -Name $tool.Name -Key $tool.Key -Icon '⚙' -Description $info -OnAction ({ Invoke-AMRSystemTool -Key $tool.Key }.GetNewClosure()); [void]$grid.Children.Add($card); $visible++
  }
  (C 'SysResultsCount').Text=('{0} system tools shown' -f $visible)
 }
@@ -14689,8 +16047,7 @@ function Update-AMRNetworkView {
   if($category -ne 'All Categories' -and $tool.Category -ne $category){continue}
   $haystack=('{0} {1} {2}' -f $tool.Name,$tool.Category,$tool.Keywords)
   if(-not [string]::IsNullOrWhiteSpace($search) -and $haystack -notlike "*$search*"){continue}
-  $button=New-Object System.Windows.Controls.Button; $button.Content=('🌐  ' + $tool.Name); $button.Tag=$tool.Key; $button.Margin='0,0,10,10'; $button.Padding='12,10'; $button.MinHeight=48; $button.HorizontalContentAlignment='Left'; $button.ToolTip=("{0} • {1}" -f $tool.Category,$tool.Keywords)
-  $button.Add_Click({ Invoke-AMRNetworkTool -Key ([string]$this.Tag) }.GetNewClosure()); [void]$grid.Children.Add($button); $visible++
+  $info=Get-AMRToolInfoText -Tool $tool -Area 'Networks'; $card=New-AMRCompactToolCard -Name $tool.Name -Key $tool.Key -Icon '🌐' -Description $info -OnAction ({ Invoke-AMRNetworkTool -Key $tool.Key }.GetNewClosure()); [void]$grid.Children.Add($card); $visible++
  }
  (C 'NetResultsCount').Text=('{0} network tools shown' -f $visible)
 }
@@ -14720,15 +16077,13 @@ function Get-AMRFolderBytes {
             Write-AMRLog ("Drive {0}: total {1:N2} GB, free {2:N2} GB, used {3:N2} GB." -f $drive.DeviceID,($size/1GB),($free/1GB),(($size-$free)/1GB)) INFO Cleanup
             $oldPath = Join-Path ($drive.DeviceID + '\') 'Windows.old'
             if (Test-Path -LiteralPath $oldPath -PathType Container) {
-                $oldBytes = Get-AMRFolderBytes -Path $oldPath
-                $report.Add(('  Windows.old: {0:N2} GB (review only; removal must use Windows Settings)' -f ($oldBytes/1GB)))
-                Write-AMRLog ("Found Windows.old on {0}: {1:N2} GB (report only; not deleted)." -f $drive.DeviceID,($oldBytes/1GB)) INFO Cleanup
+                $report.Add('  Windows.old: present (size scan intentionally omitted here; use Windows Storage settings to review)')
+                Write-AMRLog ("Found Windows.old on {0}; deep recursive size enumeration was skipped to keep the WPF interface responsive." -f $drive.DeviceID) INFO Cleanup
             }
             $binPath = Join-Path ($drive.DeviceID + '\') '$Recycle.Bin'
             if (Test-Path -LiteralPath $binPath -PathType Container) {
-                $binBytes = Get-AMRFolderBytes -Path $binPath
-                $report.Add(('  Recycle Bin data: {0:N2} GB (review only; empty separately after confirmation)' -f ($binBytes/1GB)))
-                Write-AMRLog ("Found Recycle Bin data on {0}: {1:N2} GB (report only; not deleted)." -f $drive.DeviceID,($binBytes/1GB)) INFO Cleanup
+                $report.Add('  Recycle Bin data: present (size scan intentionally omitted here; review separately before emptying)')
+                Write-AMRLog ("Found Recycle Bin data on {0}; deep recursive size enumeration was skipped to keep the WPF interface responsive." -f $drive.DeviceID) INFO Cleanup
             }
         }
         $report.Add('')
@@ -14773,10 +16128,10 @@ function Start-AMRDISMOperation {
         $script:AMRDISMState.Current = $null
     }
 
-    $analyzeButton = C 'CleanupComponentAnalyzeBtn'
-    $cleanButton = C 'CleanupComponentRunBtn'
-    if ($analyzeButton) { $analyzeButton.IsEnabled = $false }
-    if ($cleanButton) { $cleanButton.IsEnabled = $false }
+    $analyzeButtons = @((C 'CleanupComponentAnalyzeBtn'),(C 'CleanupComponentAnalyzeNewBtn'))
+    $cleanButtons = @((C 'CleanupComponentRunBtn'),(C 'CleanupComponentRunNewBtn'))
+    foreach ($button in $analyzeButtons) { if ($button) { $button.IsEnabled = $false } }
+    foreach ($button in $cleanButtons) { if ($button) { $button.IsEnabled = $false } }
 
     $stamp = [Guid]::NewGuid().ToString('N')
     $stdoutPath = Join-Path $env:TEMP ("AMR-DISM-{0}.out.txt" -f $stamp)
@@ -14799,9 +16154,11 @@ function Start-AMRDISMOperation {
         $jobState = $script:AMRDISMState
         if ($Operation -eq 'Analyze') {
             Update-AMRCleanupProgress 10 'DISM analysis is running in the background...'
+            if ((C 'CleanupComponentStatusNew')) { (C 'CleanupComponentStatusNew').Text = 'DISM analysis is running in the background. The interface remains available.' }
             Write-AMRLog 'DISM component store analysis started asynchronously.' INFO Cleanup
         } else {
             Update-AMRCleanupProgress 10 'DISM component cleanup is running in the background...'
+            if ((C 'CleanupComponentStatusNew')) { (C 'CleanupComponentStatusNew').Text = 'DISM component cleanup is running. Do not interrupt the operation.' }
             Write-AMRLog 'DISM StartComponentCleanup started asynchronously.' INFO Cleanup
         }
         $timer.Add_Tick({
@@ -14824,13 +16181,15 @@ function Start-AMRDISMOperation {
                     $job.Timer.Stop()
                     $job.Completed = $true
                     (C 'CleanupAdvancedReport').Text = ('DISM {0} process ended or became unavailable, but its exit code could not be read. Check C:\Windows\Logs\DISM\dism.log.' -f $job.Operation)
+                    if ((C 'CleanupComponentReportNew')) { (C 'CleanupComponentReportNew').Text = [string](C 'CleanupAdvancedReport').Text }
+                    if ((C 'CleanupComponentStatusNew')) { (C 'CleanupComponentStatusNew').Text = 'DISM ended, but Windows did not provide a readable exit code. Review the report and DISM log.' }
                     Update-AMRCleanupProgress 0 'DISM result could not be read. Check Cleanup Logs and the Windows DISM log.'
                     Write-AMRLog 'DISM process handle became unavailable before its exit code could be read.' ERROR Cleanup
                     foreach ($path in @($job.StdOut,$job.StdErr)) { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
                     try { $job.Process.Dispose() } catch {}
                     if ($jobState.Current -eq $job) { $jobState.Current = $null }
-                    if ((C 'CleanupComponentAnalyzeBtn')) { (C 'CleanupComponentAnalyzeBtn').IsEnabled = $true }
-                    if ((C 'CleanupComponentRunBtn')) { (C 'CleanupComponentRunBtn').IsEnabled = $false }
+                    foreach ($button in @((C 'CleanupComponentAnalyzeBtn'),(C 'CleanupComponentAnalyzeNewBtn'))) { if ($button) { $button.IsEnabled = $true } }
+                    foreach ($button in @((C 'CleanupComponentRunBtn'),(C 'CleanupComponentRunNewBtn'))) { if ($button) { $button.IsEnabled = $false } }
                     return
                 }
             }
@@ -14854,11 +16213,11 @@ function Start-AMRDISMOperation {
                 if ($job.Operation -eq 'Analyze') {
                     (C 'CleanupAdvancedReport').Text = (('DISM Component Store Analysis (exit code {0})' -f $exitCode) + [Environment]::NewLine + $combined)
                     if ($exitCode -eq 0) {
-                        (C 'CleanupComponentRunBtn').IsEnabled = $true
+                        foreach ($button in @((C 'CleanupComponentRunBtn'),(C 'CleanupComponentRunNewBtn'))) { if ($button) { $button.IsEnabled = $true } }
                         Write-AMRLog 'DISM component store analysis completed successfully.' SUCCESS Cleanup
                         Update-AMRCleanupProgress 100 'Component store analysis finished.'
                     } else {
-                        (C 'CleanupComponentRunBtn').IsEnabled = $false
+                        foreach ($button in @((C 'CleanupComponentRunBtn'),(C 'CleanupComponentRunNewBtn'))) { if ($button) { $button.IsEnabled = $false } }
                         Write-AMRLog ("DISM component store analysis returned exit code {0}." -f $exitCode) WARNING Cleanup
                         Update-AMRCleanupProgress 0 'Component store analysis failed. Review the report and Cleanup Logs.'
                     }
@@ -14867,33 +16226,38 @@ function Start-AMRDISMOperation {
                     if ($exitCode -eq 0) {
                         Write-AMRLog 'DISM StartComponentCleanup completed successfully.' SUCCESS Cleanup
                         Update-AMRCleanupProgress 100 'DISM component cleanup finished.'
-                        Show-AMRMessage 'Windows component cleanup completed. Run Analyze Component Store again to review the updated state.' 'Cleanup' OK Information | Out-Null
+                        Show-AMRCleanupSummary -Title 'Windows Component Cleanup' -Status 'Cleanup completed successfully' -Details 'DISM completed the component cleanup operation. Installed updates remain uninstallable; /ResetBase was not used.' -Lines @('Result: Complete successfully','Next step: Analyze Component Store again to review the updated state.') -Kind Success
                     } else {
                         Write-AMRLog ("DISM component cleanup failed with exit code {0}." -f $exitCode) ERROR Cleanup
                         Update-AMRCleanupProgress 0 'DISM cleanup failed. Review the report and Cleanup Logs.'
-                        Show-AMRMessage ("DISM component cleanup returned exit code {0}. Review the report and logs." -f $exitCode) 'Cleanup' OK Warning | Out-Null
+                        Show-AMRCleanupSummary -Title 'Windows Component Cleanup' -Status 'Cleanup completed with errors' -Details ("DISM returned exit code {0}. No success is being reported." -f $exitCode) -Lines @('Review the component report and Cleanup Logs.') -Kind Error
                     }
                 }
+                if ((C 'CleanupComponentReportNew')) { (C 'CleanupComponentReportNew').Text = [string](C 'CleanupAdvancedReport').Text }
+                if ((C 'CleanupComponentStatusNew')) { (C 'CleanupComponentStatusNew').Text = ('DISM {0} finished with exit code {1}.' -f $job.Operation,$exitCode) }
             } catch {
                 (C 'CleanupAdvancedReport').Text = ('DISM result processing failed: ' + $_.Exception.Message)
                 Write-AMRLog ("DISM result processing failed: {0}" -f $_.Exception.Message) ERROR Cleanup
             } finally {
+                if ((C 'CleanupComponentReportNew')) { (C 'CleanupComponentReportNew').Text = [string](C 'CleanupAdvancedReport').Text }
+                if ((C 'CleanupComponentStatusNew') -and $job.Operation -eq 'Analyze' -and $exitCode -ne 0) { (C 'CleanupComponentStatusNew').Text = 'Analysis failed. Review the component report and Cleanup Logs.' }
                 foreach ($path in @($job.StdOut,$job.StdErr)) { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
                 $job.Process.Dispose()
                 if ($jobState.Current -eq $job) { $jobState.Current = $null }
-                if ((C 'CleanupComponentAnalyzeBtn')) { (C 'CleanupComponentAnalyzeBtn').IsEnabled = $true }
-                if ((C 'CleanupComponentRunBtn')) {
-                    if ($job.Operation -eq 'Clean') { (C 'CleanupComponentRunBtn').IsEnabled = $true }
-                    elseif ($exitCode -ne 0) { (C 'CleanupComponentRunBtn').IsEnabled = $false }
+                foreach ($button in @((C 'CleanupComponentAnalyzeBtn'),(C 'CleanupComponentAnalyzeNewBtn'))) { if ($button) { $button.IsEnabled = $true } }
+                foreach ($button in @((C 'CleanupComponentRunBtn'),(C 'CleanupComponentRunNewBtn'))) {
+                    if ($button) { if ($job.Operation -eq 'Clean') { $button.IsEnabled = $true } elseif ($exitCode -ne 0) { $button.IsEnabled = $false } }
                 }
             }
         }.GetNewClosure())
         $timer.Start()
     } catch {
         $script:AMRDISMState.Current = $null
-        if ($analyzeButton) { $analyzeButton.IsEnabled = $true }
-        if ($cleanButton) { $cleanButton.IsEnabled = $false }
+        foreach ($button in @((C 'CleanupComponentAnalyzeBtn'),(C 'CleanupComponentAnalyzeNewBtn'))) { if ($button) { $button.IsEnabled = $true } }
+        foreach ($button in @((C 'CleanupComponentRunBtn'),(C 'CleanupComponentRunNewBtn'))) { if ($button) { $button.IsEnabled = $false } }
         (C 'CleanupAdvancedReport').Text = ('Unable to start DISM: ' + $_.Exception.Message)
+        if ((C 'CleanupComponentReportNew')) { (C 'CleanupComponentReportNew').Text = [string](C 'CleanupAdvancedReport').Text }
+        if ((C 'CleanupComponentStatusNew')) { (C 'CleanupComponentStatusNew').Text = ('Unable to start DISM: ' + $_.Exception.Message) }
         Update-AMRCleanupProgress 0 'Unable to start DISM.'
         Write-AMRLog ("Unable to start DISM {0}: {1}" -f $Operation,$_.Exception.Message) ERROR Cleanup
         Remove-Item -LiteralPath $stdoutPath,$stderrPath -Force -ErrorAction SilentlyContinue
@@ -14910,11 +16274,498 @@ function Start-AMRDISMOperation {
     Start-AMRDISMOperation -Operation Clean -Arguments @('/Online','/Cleanup-Image','/StartComponentCleanup')
 })
 
+# Additional Cleanup workspace actions. These are deliberately read-only or launch
+# Windows/browser-owned settings; they do not assume a particular laptop/PC vendor.
+$script:CleanupDiskOrganizerDrives = @()
+function Update-AMRCleanupDiskOrganizer {
+    $list = C 'CleanupDiskOrganizerList'
+    $status = C 'CleanupDiskOrganizerStatus'
+    if (-not $list) { return }
+    $list.Items.Clear()
+    $rows = New-Object 'System.Collections.Generic.List[object]'
+    try { $availableDrives = [System.IO.DriveInfo]::GetDrives() }
+    catch {
+        if ($status) { $status.Text = ('Could not enumerate volumes: ' + $_.Exception.Message) }
+        Write-AMRLog ("Disk Organizer volume enumeration failed: {0}" -f $_.Exception.Message) ERROR Cleanup
+        return
+    }
+    foreach ($drive in $availableDrives) {
+        try {
+            $ready = $false
+            try { $ready = $drive.IsReady } catch {}
+            if ($ready) {
+                $total = [int64]$drive.TotalSize
+                $free = [int64]$drive.AvailableFreeSpace
+                $used = [Math]::Max([int64]0,($total-$free))
+                $line = ('{0}  {1}  {2}  Total {3:N1} GB  Free {4:N1} GB  Used {5:N1} GB' -f $drive.Name,$drive.DriveType,$drive.DriveFormat,($total/1GB),($free/1GB),($used/1GB))
+                $rows.Add([pscustomobject]@{Root=$drive.RootDirectory.FullName;Text=$line;Name=$drive.Name;Total=$total;Free=$free})
+            } else {
+                $rows.Add([pscustomobject]@{Root=$drive.RootDirectory.FullName;Text=('{0}  {1}  Not ready / media unavailable' -f $drive.Name,$drive.DriveType);Name=$drive.Name;Total=[int64]0;Free=[int64]0})
+            }
+        } catch {
+            Write-AMRLog ("Disk Organizer could not inspect volume {0}: {1}" -f $drive.Name,$_.Exception.Message) WARNING Cleanup
+        }
+    }
+    $script:CleanupDiskOrganizerDrives = $rows.ToArray()
+    foreach ($row in $script:CleanupDiskOrganizerDrives) { [void]$list.Items.Add($row.Text) }
+    if ($list.Items.Count -gt 0) { $list.SelectedIndex = 0 }
+    if ($status) { $status.Text = ('Detected {0} volume(s). Inventory is read-only; no files were changed.' -f $list.Items.Count) }
+    Write-AMRLog ("Disk Organizer refreshed: {0} volume(s) enumerated." -f $list.Items.Count) INFO Cleanup
+}
+
+(C 'CleanupDiskOrganizerRefreshBtn').Add_Click({ Update-AMRCleanupDiskOrganizer })
+Update-AMRCleanupDiskOrganizer
+(C 'CleanupDiskOrganizerOpenBtn').Add_Click({
+    $list = C 'CleanupDiskOrganizerList'
+    if (-not $list -or $list.SelectedIndex -lt 0 -or $list.SelectedIndex -ge $script:CleanupDiskOrganizerDrives.Count) {
+        Show-AMRMessage 'Select a ready drive first.' 'Disk Tool Organizers' OK Warning | Out-Null
+        return
+    }
+    $selectedDrive = $script:CleanupDiskOrganizerDrives[$list.SelectedIndex]
+    if (-not [System.IO.Directory]::Exists([string]$selectedDrive.Root)) {
+        Show-AMRMessage 'The selected drive is not currently ready.' 'Disk Tool Organizers' OK Warning | Out-Null
+        return
+    }
+    try { Start-Process -FilePath 'explorer.exe' -ArgumentList @([string]$selectedDrive.Root) -ErrorAction Stop }
+    catch { Write-AMRLog ("Could not open drive {0}: {1}" -f $selectedDrive.Root,$_.Exception.Message) ERROR Cleanup; Show-AMRMessage ("Could not open the selected drive:`n{0}" -f $_.Exception.Message) 'Disk Tool Organizers' OK Warning | Out-Null }
+})
+(C 'CleanupDiskOrganizerStorageBtn').Add_Click({
+    try { Start-Process -FilePath 'ms-settings:storagesense' -ErrorAction Stop }
+    catch { Write-AMRLog ("Could not open Windows Storage Settings: {0}" -f $_.Exception.Message) ERROR Cleanup; Show-AMRMessage ("Windows Storage Settings could not be opened:`n{0}" -f $_.Exception.Message) 'Disk Tool Organizers' OK Warning | Out-Null }
+})
+(C 'CleanupDiskOrganizerOptimizeBtn').Add_Click({
+    $toolPath = Join-Path $env:windir 'System32\dfrgui.exe'
+    if (Test-Path -LiteralPath $toolPath -PathType Leaf) {
+        try { Start-Process -FilePath $toolPath -ErrorAction Stop }
+        catch { Write-AMRLog ("Could not launch Optimize Drives: {0}" -f $_.Exception.Message) ERROR Cleanup; Show-AMRMessage ("Optimize Drives could not be opened:`n{0}" -f $_.Exception.Message) 'Disk Tool Organizers' OK Warning | Out-Null }
+    } else { Show-AMRMessage 'Windows Optimize Drives is not available on this installation.' 'Disk Tool Organizers' OK Warning | Out-Null }
+})
+
+$script:AMRBrowserCleanupCatalog = @{
+    'Google Chrome' = @{ Exe=@('chrome.exe'); Relative=@('Google\Chrome\Application\chrome.exe'); Family='Chromium' }
+    'Mozilla Firefox' = @{ Exe=@('firefox.exe'); Relative=@('Mozilla Firefox\firefox.exe','Programs\Mozilla Firefox\firefox.exe'); Family='Firefox' }
+    'Microsoft Edge' = @{ Exe=@('msedge.exe'); Relative=@('Microsoft\Edge\Application\msedge.exe'); Family='Edge' }
+    'Brave Browser' = @{ Exe=@('brave.exe'); Relative=@('BraveSoftware\Brave-Browser\Application\brave.exe'); Family='Brave' }
+    'Opera' = @{ Exe=@('opera.exe','launcher.exe'); Relative=@('Opera\launcher.exe','Opera\opera.exe','Programs\Opera\launcher.exe'); Family='Opera' }
+    'Opera GX' = @{ Exe=@('opera.exe','launcher.exe'); Relative=@('Programs\Opera GX\launcher.exe','Opera GX\launcher.exe'); Family='Opera' }
+    'Vivaldi' = @{ Exe=@('vivaldi.exe'); Relative=@('Vivaldi\Application\vivaldi.exe'); Family='Vivaldi' }
+    'Tor Browser' = @{ Exe=@('firefox.exe'); Relative=@('Tor Browser\Browser\firefox.exe','Tor Browser\firefox.exe'); Family='Firefox' }
+    'LibreWolf' = @{ Exe=@('librewolf.exe'); Relative=@('LibreWolf\librewolf.exe','Programs\LibreWolf\librewolf.exe'); Family='Firefox' }
+    'Waterfox' = @{ Exe=@('waterfox.exe'); Relative=@('Waterfox\waterfox.exe','Programs\Waterfox\waterfox.exe'); Family='Firefox' }
+    'Pale Moon' = @{ Exe=@('palemoon.exe'); Relative=@('Pale Moon\palemoon.exe','Programs\Pale Moon\palemoon.exe'); Family='Firefox' }
+    'Chromium' = @{ Exe=@('chrome.exe','chromium.exe'); Relative=@('Chromium\Application\chrome.exe','Chromium\chrome.exe'); Family='Chromium' }
+    'Maxthon Browser' = @{ Exe=@('傲游.exe','Maxthon.exe','maxthon.exe'); Relative=@('Maxthon\Bin\傲游.exe','Maxthon\Bin\Maxthon.exe'); Family='Chromium' }
+    'Falkon' = @{ Exe=@('falkon.exe'); Relative=@('Falkon\falkon.exe'); Family='Chromium' }
+    'Avast Secure Browser' = @{ Exe=@('AvastBrowser.exe'); Relative=@('AVAST Software\Browser\Application\AvastBrowser.exe'); Family='Chromium' }
+    'Sidekick Browser' = @{ Exe=@('Sidekick.exe'); Relative=@('Sidekick\Application\Sidekick.exe'); Family='Chromium' }
+    'Zen Browser' = @{ Exe=@('zen.exe'); Relative=@('Zen\Application\zen.exe','Programs\Zen Browser\zen.exe'); Family='Firefox' }
+    'Floorp Browser' = @{ Exe=@('floorp.exe'); Relative=@('Ablaze\Floorp\floorp.exe','Floorp\floorp.exe'); Family='Firefox' }
+    'Google Chrome Beta' = @{ Exe=@('chrome.exe'); Relative=@('Google\Chrome Beta\Application\chrome.exe'); Family='Chromium' }
+    'Google Chrome Dev' = @{ Exe=@('chrome.exe'); Relative=@('Google\Chrome Dev\Application\chrome.exe'); Family='Chromium' }
+    'Mozilla Firefox Developer Edition' = @{ Exe=@('firefox.exe'); Relative=@('Firefox Developer Edition\firefox.exe','Programs\Firefox Developer Edition\firefox.exe'); Family='Firefox' }
+    'Microsoft Edge Beta' = @{ Exe=@('msedge.exe'); Relative=@('Microsoft\Edge Beta\Application\msedge.exe'); Family='Edge' }
+    'Microsoft Edge Dev' = @{ Exe=@('msedge.exe'); Relative=@('Microsoft\Edge Dev\Application\msedge.exe'); Family='Edge' }
+    'Microsoft Edge Canary' = @{ Exe=@('msedge.exe'); Relative=@('Microsoft\Edge SxS\Application\msedge.exe'); Family='Edge' }
+    'Chromium (Ungoogled)' = @{ Exe=@('chrome.exe','chromium.exe'); Relative=@('Chromium\Application\chrome.exe','ungoogled-chromium\chrome.exe'); Family='Chromium' }
+    'Midori Browser' = @{ Exe=@('midori.exe'); Relative=@('Midori\midori.exe'); Family='Chromium' }
+    'Brave Beta' = @{ Exe=@('brave.exe'); Relative=@('BraveSoftware\Brave-Browser-Beta\Application\brave.exe'); Family='Brave' }
+    'Vivaldi Snapshot' = @{ Exe=@('vivaldi.exe'); Relative=@('Vivaldi\Application\vivaldi.exe'); Family='Vivaldi' }
+    'Brave Nightly' = @{ Exe=@('brave.exe'); Relative=@('BraveSoftware\Brave-Browser-Nightly\Application\brave.exe'); Family='Brave' }
+    'Mullvad Browser' = @{ Exe=@('mullvadbrowser.exe','firefox.exe'); Relative=@('Mullvad\Browser\mullvadbrowser.exe','Mullvad Browser\Browser\firefox.exe'); Family='Firefox' }
+    'DuckDuckGo Browser' = @{ Exe=@('DuckDuckGo.exe'); Relative=@('DuckDuckGo\DuckDuckGo.exe','Programs\DuckDuckGo\DuckDuckGo.exe'); Family='Chromium' }
+    'Thorium Browser' = @{ Exe=@('thorium.exe','chrome.exe'); Relative=@('Thorium\Application\thorium.exe','Thorium\thorium.exe'); Family='Chromium' }
+    'Arc Browser' = @{ Exe=@('Arc.exe'); Relative=@('Arc\Arc.exe','Programs\Arc\Arc.exe'); Family='Chromium' }
+}
+
+function Get-AMRBrowserExecutable {
+    param([Parameter(Mandatory=$true)][string]$BrowserName)
+    if (-not $script:AMRBrowserCleanupCatalog.ContainsKey($BrowserName)) { return $null }
+    $definition = $script:AMRBrowserCleanupCatalog[$BrowserName]
+    $exeNames = @($definition.Exe)
+
+    # Windows App Paths registrations cover per-user and machine-wide installs.
+    foreach ($exeName in $exeNames) {
+        foreach ($key in @(
+            "HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\$exeName",
+            "HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\$exeName",
+            "HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\App Paths\$exeName"
+        )) {
+            try {
+                $item = Get-Item -LiteralPath $key -ErrorAction Stop
+                $candidate = [string]$item.GetValue('')
+                if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) { return $candidate }
+            } catch { }
+        }
+    }
+
+    $roots = @(
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles),
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86),
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData),
+        $env:APPDATA
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+    foreach ($root in $roots) {
+        foreach ($relative in @($definition.Relative)) {
+            $candidate = Join-Path $root $relative
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+        }
+    }
+
+    # Match uninstall records by exact display-name family; use the executable
+    # only when it is physically present inside the registered install folder.
+    $escapedName = [regex]::Escape($BrowserName)
+    foreach ($hive in @(
+        'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )) {
+        try {
+            foreach ($app in @(Get-ItemProperty -Path $hive -ErrorAction SilentlyContinue)) {
+                $display = [string]$app.DisplayName
+                if (-not $display -or $display -notmatch $escapedName) { continue }
+                $install = [string]$app.InstallLocation
+                if (-not $install) { continue }
+                foreach ($exeName in $exeNames) {
+                    $candidate = Join-Path $install $exeName
+                    if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+                    # A few browsers install the actual browser in a nested Application/Browser folder.
+                    foreach ($sub in @('Application','Browser','app')) {
+                        $nested = Join-Path (Join-Path $install $sub) $exeName
+                        if (Test-Path -LiteralPath $nested -PathType Leaf) { return $nested }
+                    }
+                }
+            }
+        } catch { }
+    }
+    return $null
+}
+
+function Get-AMRBrowserCleanupLaunchArguments {
+    param([Parameter(Mandatory=$true)][string]$BrowserName,[Parameter(Mandatory=$true)][string]$BrowserUrl)
+    $family = [string]$script:AMRBrowserCleanupCatalog[$BrowserName].Family
+    $quotedUrl = '"' + $BrowserUrl.Replace('"','') + '"'
+    if ($family -eq 'Firefox') { return ('-new-window {0}' -f $quotedUrl) }
+    return ('--new-window {0}' -f $quotedUrl)
+}
+
+# Browser cleanup is launched consistently for every browser in the AMR catalog.
+# Internal URLs supplied by an external process are unreliable across browser builds.
+# Instead, open a fresh browser window, activate its process, and send the native
+# Ctrl+Shift+Delete shortcut. This opens the browser's own cleanup UI only; AMR never
+# confirms the dialog or deletes browsing data.
+$script:AMRBrowserCleanupLaunch = [pscustomobject]@{
+    Timer = $null; Shell = $null; Attempts = 0; BrowserName = ''
+    ProcessNames = @(); LaunchProcessId = 0; StartedAt = [datetime]::MinValue
+}
+
+function Start-AMRBrowserCleanupDialog {
+    param([Parameter(Mandatory=$true)][string]$BrowserExe,[Parameter(Mandatory=$true)][string]$BrowserName)
+    $definition = $script:AMRBrowserCleanupCatalog[$BrowserName]
+    if (-not $definition) { throw "Browser metadata is missing for $BrowserName." }
+    $family = [string]$definition.Family
+    if ($family -eq 'Firefox') {
+        $launchArguments = '-new-window about:blank'
+    } else {
+        $launchArguments = '--new-window about:blank'
+    }
+    $startedAt = Get-Date
+    $started = Start-Process -FilePath $BrowserExe -ArgumentList $launchArguments -PassThru -ErrorAction Stop
+    $processNames = @($definition.Exe | ForEach-Object { [IO.Path]::GetFileNameWithoutExtension([string]$_) } | Where-Object { $_ } | Select-Object -Unique)
+    # launcher.exe is a bootstrapper for Opera; the actual window belongs to opera.exe.
+    if ($family -eq 'Opera') { $processNames += 'opera' }
+    $processNames = @($processNames | Select-Object -Unique)
+
+    if ($script:AMRBrowserCleanupLaunch.Timer) { try { $script:AMRBrowserCleanupLaunch.Timer.Stop() } catch { } }
+    if ($script:AMRBrowserCleanupLaunch.Shell) { try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($script:AMRBrowserCleanupLaunch.Shell) } catch { } }
+    $script:AMRBrowserCleanupLaunch.Attempts = 0
+    $script:AMRBrowserCleanupLaunch.BrowserName = $BrowserName
+    $script:AMRBrowserCleanupLaunch.ProcessNames = $processNames
+    $script:AMRBrowserCleanupLaunch.LaunchProcessId = [int]$started.Id
+    $script:AMRBrowserCleanupLaunch.StartedAt = $startedAt
+    $script:AMRBrowserCleanupLaunch.Shell = New-Object -ComObject WScript.Shell
+
+    $timer = New-Object System.Windows.Threading.DispatcherTimer
+    $timer.Interval = [TimeSpan]::FromMilliseconds(350)
+    $script:AMRBrowserCleanupLaunch.Timer = $timer
+    $timer.Add_Tick({
+        $script:AMRBrowserCleanupLaunch.Attempts++
+        $candidateProcesses = @()
+        foreach ($processName in @($script:AMRBrowserCleanupLaunch.ProcessNames)) {
+            $candidateProcesses += @(Get-Process -Name $processName -ErrorAction SilentlyContinue |
+                Where-Object { $_.MainWindowHandle -ne 0 })
+        }
+        # Prefer the process returned by Start-Process; otherwise prefer the newest
+        # visible window among the selected browser's own executable process names.
+        $orderedProcesses = @($candidateProcesses | Sort-Object -Property @{Expression={ if ($_.Id -eq $script:AMRBrowserCleanupLaunch.LaunchProcessId) { 1 } else { 0 } };Descending=$true},@{Expression='StartTime';Descending=$true} -ErrorAction SilentlyContinue)
+        foreach ($browserProcess in $orderedProcesses) {
+            try {
+                if ($script:AMRBrowserCleanupLaunch.Shell.AppActivate([int]$browserProcess.Id)) {
+                    $script:AMRBrowserCleanupLaunch.Shell.SendKeys('^+{DELETE}')
+                    $script:AMRBrowserCleanupLaunch.Timer.Stop()
+                    $name = $script:AMRBrowserCleanupLaunch.BrowserName
+                    Write-AMRLog ("Browser cleanup dialog shortcut sent | Browser={0} | PID={1} | Method=Ctrl+Shift+Delete" -f $name,$browserProcess.Id) INFO Cleanup
+                    try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($script:AMRBrowserCleanupLaunch.Shell) } catch { }
+                    $script:AMRBrowserCleanupLaunch.Shell = $null
+                    return
+                }
+            } catch { }
+        }
+        if ($script:AMRBrowserCleanupLaunch.Attempts -ge 45) {
+            $script:AMRBrowserCleanupLaunch.Timer.Stop()
+            $name = $script:AMRBrowserCleanupLaunch.BrowserName
+            try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($script:AMRBrowserCleanupLaunch.Shell) } catch { }
+            $script:AMRBrowserCleanupLaunch.Shell = $null
+            Write-AMRLog ("Browser cleanup shortcut could not be delivered: {0}" -f $name) ERROR Cleanup
+            Show-AMRCleanupSummary -Title 'Web & Browsers' -Status 'Browser opened, but cleanup dialog did not appear' -Details ("Press Ctrl + Shift + Delete inside {0} to open its cleanup dialog. AMR did not delete anything." -f $name) -Lines @('The browser was opened.','No browsing data was changed.','If this browser uses a different shortcut, open its privacy settings manually.') -Kind Warning
+        }
+    })
+    $timer.Start()
+}
+
+(C 'CleanupBrowserOpenBtn').Add_Click({
+    $choice = C 'CleanupBrowserChoice'
+    if (-not $choice -or -not $choice.SelectedItem) { return }
+    $browserName = [string]$choice.SelectedItem.Content
+    $browserUrl = [string]$choice.SelectedItem.Tag
+    if (-not $script:AMRBrowserCleanupCatalog.ContainsKey($browserName) -or [string]::IsNullOrWhiteSpace($browserUrl)) {
+        Show-AMRMessage 'The selected browser is not in the AMR browser catalog.' 'Web & Browsers' OK Warning | Out-Null
+        Write-AMRLog ("Rejected unknown browser cleanup target: {0}" -f $browserName) WARNING Cleanup
+        return
+    }
+    try {
+        $browserExe = Get-AMRBrowserExecutable -BrowserName $browserName
+        if (-not $browserExe) {
+            Show-AMRCleanupSummary -Title 'Web & Browsers' -Status 'This app is not installed' -Details ("{0} isn't installed on this device. Nothing was changed." -f $browserName) -Lines @('Choose another installed browser from the catalog.','No browser data was scanned or removed.') -Kind Info
+            Write-AMRLog ("Browser cleanup launch skipped; executable not found: {0}" -f $browserName) WARNING Cleanup
+            return
+        }
+        Start-AMRBrowserCleanupDialog -BrowserExe $browserExe -BrowserName $browserName
+        Write-AMRLog ("Browser cleanup dialog launch requested | Browser={0} | Executable={1} | Method=Ctrl+Shift+Delete" -f $browserName,$browserExe) INFO Cleanup
+    } catch {
+        Show-AMRCleanupSummary -Title 'Web & Browsers' -Status 'Could not open settings' -Details ("{0} settings could not be opened. No data was changed." -f $browserName) -Lines @($_.Exception.Message) -Kind Warning
+        Write-AMRLog ("Browser cleanup page launch failed for {0}: {1}" -f $browserName,$_.Exception.Message) ERROR Cleanup
+    }
+})
+(C 'CleanupBrowserGoToScanBtn').Add_Click({
+    $tabs = C 'CleanupSubTabs'
+    if ($tabs) { $tabs.SelectedIndex = 0 }
+    Write-AMRLog 'User navigated from Web & Browsers to the Clean Up cache scan.' INFO Cleanup
+})
+
+# The dedicated component-cleanup tab shares the existing, already-validated DISM
+# process engine; the original Disk Tools controls remain in place and operational.
+(C 'CleanupComponentAnalyzeNewBtn').Add_Click({
+    Start-AMRDISMOperation -Operation Analyze -Arguments @('/Online','/Cleanup-Image','/AnalyzeComponentStore')
+})
+(C 'CleanupComponentRunNewBtn').Add_Click({
+    $answer = Show-AMRMessage 'Run Microsoft DISM StartComponentCleanup? This removes superseded component versions using Windows servicing rules. AMR does not use /ResetBase, so installed updates remain uninstallable. This can take time. Continue?' 'Confirm Windows Component Cleanup' YesNo Warning
+    if ($answer -ne [System.Windows.MessageBoxResult]::Yes) { Write-AMRLog 'User cancelled the dedicated Windows Component Cleanup action.' INFO Cleanup; return }
+    Start-AMRDISMOperation -Operation Clean -Arguments @('/Online','/Cleanup-Image','/StartComponentCleanup')
+})
+
+# ORPHAN ANALYZER + REVERSIBLE QUARANTINE
+# All enumeration and file moves run in a background runspace. Never targets user-profile data.
+$script:AMROrphanScanState = [pscustomobject]@{ Current = $null }
+$script:AMROrphanQuarantineRoot = Join-Path $env:ProgramData 'AMR-Utility\Quarantine\OrphanedApps'
+
+function Get-AMROrphanQuarantineItems {
+    $items = @()
+    $root = $script:AMROrphanQuarantineRoot
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) { return $items }
+    foreach ($manifest in @(Get-ChildItem -LiteralPath $root -Filter '*.amrq.json' -File -ErrorAction SilentlyContinue)) {
+        try {
+            $data = Get-Content -LiteralPath $manifest.FullName -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $items += [pscustomobject]@{ IsChecked=$false; Display=('{0}  |  {1}  |  {2}' -f $data.Name,$data.QuarantinedAt,$data.OriginalPath); Manifest=$manifest.FullName; Data=$data }
+        } catch { Write-AMRLog ('Unreadable quarantine manifest: ' + $manifest.FullName) WARNING Cleanup }
+    }
+    return $items
+}
+
+function Set-AMROrphanQuarantineList {
+    $list = C 'CleanupOrphanQuarantineList'
+    if (-not $list) { return }
+    $list.Items.Clear()
+    foreach ($item in @(Get-AMROrphanQuarantineItems | Sort-Object { $_.Data.QuarantinedAt } -Descending)) { [void]$list.Items.Add($item) }
+}
+
+function Start-AMROrphanBackgroundTask {
+    param([string]$TaskName,[string]$WorkerScript,[object[]]$Arguments,[scriptblock]$OnComplete)
+    $button = C 'CleanupOrphanScanBtn'; $status = C 'CleanupOrphanStatus'
+    if ($script:AMROrphanScanState.Current) { return }
+    $button.IsEnabled = $false
+    $runspace=$null; $ps=$null
+    try {
+        $queue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'
+        $runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+        $runspace.ApartmentState = [System.Threading.ApartmentState]::MTA
+        $runspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
+        $runspace.Open()
+        $ps=[PowerShell]::Create(); $ps.Runspace=$runspace
+        [void]$ps.AddScript($WorkerScript).AddArgument($queue)
+        foreach ($arg in $Arguments) { [void]$ps.AddArgument($arg) }
+        $async=$ps.BeginInvoke()
+        $timer=New-Object System.Windows.Threading.DispatcherTimer
+        $timer.Interval=[TimeSpan]::FromMilliseconds(250)
+        $state=$script:AMROrphanScanState
+        $job=[pscustomobject]@{Name=$TaskName;PowerShell=$ps;Runspace=$runspace;Async=$async;Queue=$queue;Timer=$timer;OnComplete=$OnComplete}
+        $state.Current=$job
+        $timer.Add_Tick({
+            $active=$state.Current
+            if ($null -eq $active -or $active -ne $job) { $timer.Stop(); return }
+            $msg=$null; $drained=0
+            while ($drained -lt 10 -and $active.Queue.TryDequeue([ref]$msg)) { if ($msg) { $status.Text=[string]$msg }; $msg=$null; $drained++ }
+            if (-not $active.Async.IsCompleted) { return }
+            $timer.Stop()
+            try {
+                $out=$active.PowerShell.EndInvoke($active.Async)
+                if ($active.PowerShell.Streams.Error.Count -gt 0) { foreach ($e in $active.PowerShell.Streams.Error) { Write-AMRLog ($active.Name + ' worker: ' + $e.ToString()) WARNING Cleanup } }
+                if (-not $out -or $null -eq $out[$out.Count-1]) { throw ($active.Name + ' returned no result.') }
+                & $active.OnComplete $out[$out.Count-1]
+            } catch { $status.Text=$active.Name + ' failed: ' + $_.Exception.Message; Write-AMRLog ($active.Name + ' failed: ' + $_.Exception.Message) ERROR Cleanup }
+            finally { try {$active.PowerShell.Dispose()}catch{}; try{$active.Runspace.Dispose()}catch{}; if($state.Current -eq $active){$state.Current=$null}; $button.IsEnabled=$true }
+        }.GetNewClosure())
+        $timer.Start()
+    } catch {
+        if($ps){try{$ps.Dispose()}catch{}}; if($runspace){try{$runspace.Dispose()}catch{}}
+        $script:AMROrphanScanState.Current=$null; $button.IsEnabled=$true
+        $status.Text='Could not start task: ' + $_.Exception.Message
+        Write-AMRLog ('Orphan background task start failed: ' + $_.Exception.Message) ERROR Cleanup
+    }
+}
+
+$orphanAnalyzerWorker = @'
+param($ProgressQueue)
+$ErrorActionPreference='SilentlyContinue'
+$installed=New-Object 'System.Collections.Generic.List[object]'
+$uninstallRoots=@('HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*','HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*')
+foreach($rk in $uninstallRoots){ foreach($e in @(Get-ItemProperty -Path $rk -ErrorAction SilentlyContinue)){ if($e.DisplayName){$installed.Add([pscustomobject]@{Name=[string]$e.DisplayName;Location=[string]$e.InstallLocation;Uninstall=[string]$e.UninstallString})} } }
+$appPaths=New-Object 'System.Collections.Generic.List[string]'
+foreach($rk in @('HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\*','HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\App Paths\*','HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\*')){ foreach($k in @(Get-ChildItem -Path $rk -ErrorAction SilentlyContinue)){try{$v=(Get-ItemProperty -LiteralPath $k.PSPath -ErrorAction Stop).'(default)';if($v){$appPaths.Add([string]$v)}}catch{}} }
+$servicePaths=New-Object 'System.Collections.Generic.List[string]'
+foreach($sv in @(Get-CimInstance Win32_Service -ErrorAction SilentlyContinue)){if($sv.PathName){$servicePaths.Add([string]$sv.PathName)}}
+$processPaths=New-Object 'System.Collections.Generic.List[string]'
+foreach($pr in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)){if($pr.ExecutablePath){$processPaths.Add([string]$pr.ExecutablePath)}}
+$roots=@(); foreach($r in @($env:ProgramFiles,${env:ProgramFiles(x86)})){if($r -and (Test-Path -LiteralPath $r -PathType Container) -and $roots -notcontains $r){$roots+=$r}}
+$results=New-Object 'System.Collections.Generic.List[object]';$checked=0
+foreach($root in $roots){foreach($dir in @(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue)){
+ $checked++; if(($dir.Attributes -band [IO.FileAttributes]::ReparsePoint)-ne 0){continue}
+ if($dir.Name -match '^(Common Files|WindowsApps|Windows Defender|Internet Explorer|ModifiableWindowsApps|Microsoft Shared)$'){continue}
+ $full=$dir.FullName.TrimEnd('\');$nameNorm=($dir.Name -replace '[^a-zA-Z0-9]','').ToLowerInvariant();$signals=New-Object 'System.Collections.Generic.List[string]';$matchedInstall=$false
+ foreach($a in $installed){$an=($a.Name -replace '[^a-zA-Z0-9]','').ToLowerInvariant();if(($an.Length -ge 4 -and ($an.Contains($nameNorm) -or $nameNorm.Contains($an))) -or ($a.Location -and $a.Location.TrimEnd('\').StartsWith($full,[StringComparison]::OrdinalIgnoreCase))){$matchedInstall=$true;[void]$signals.Add('Installed registry match: '+$a.Name)}}
+ foreach($x in $appPaths){if($x -and $x.Contains($full)){[void]$signals.Add('Registered App Path')}}
+ foreach($x in $servicePaths){if($x -match [regex]::Escape($full)){[void]$signals.Add('Windows service references folder');break}}
+ foreach($x in $processPaths){if($x -and $x.StartsWith($full,[StringComparison]::OrdinalIgnoreCase)){[void]$signals.Add('Running process uses folder');break}}
+ $exeCount=0;$signedCount=0;$signatureChecks=0;$bytes=[int64]0;$files=0;$partial=$false;$stack=New-Object 'System.Collections.Generic.Stack[string]';$stack.Push($full)
+ while($stack.Count -gt 0){$cur=$stack.Pop();foreach($it in @(Get-ChildItem -LiteralPath $cur -Force -ErrorAction SilentlyContinue)){if(($it.Attributes -band [IO.FileAttributes]::ReparsePoint)-ne 0){continue};if($it.PSIsContainer){$stack.Push($it.FullName)}else{$files++;try{$bytes += [int64]$it.Length}catch{};if($it.Extension -ieq '.exe'){$exeCount++;if($signatureChecks -lt 20){$signatureChecks++;try{$sig=Get-AuthenticodeSignature -LiteralPath $it.FullName -ErrorAction Stop;if($sig.Status -eq 'Valid'){$signedCount++}}catch{}}}};if($files -ge 12000){$partial=$true;break}};if($partial){break}}
+ $ageDays=[math]::Round(((Get-Date)-$dir.LastWriteTime).TotalDays,0);$score=0;$reasons=New-Object 'System.Collections.Generic.List[string]'
+ if($matchedInstall){$score-=90};if($signals.Count -gt 0){$score-=35;foreach($sg in $signals){[void]$reasons.Add($sg)}}else{$score+=15;[void]$reasons.Add('No install, service, process or App Path reference found')}
+ if($ageDays -ge 180){$score+=20;[void]$reasons.Add('No recent writes (180+ days)')};if($ageDays -ge 365){$score+=10}
+ if($exeCount -eq 0){$score+=20;[void]$reasons.Add('No executable files found')};if($exeCount -gt 0 -and $signedCount -gt 0){$score-=15;[void]$reasons.Add('Contains valid signed executables')};if($partial){[void]$reasons.Add('Size/file scan partial')}
+ if($score -lt 0){$score=0};if($score -gt 100){$score=100}
+ $classification=if($matchedInstall -or $signals.Count -gt 0){'Protected / linked'}elseif($score -ge 55){'Likely leftover · review'}else{'Uncertain · review'}
+ $display=('{0}  |  {1}  |  {2:N1} MB  |  {3}% confidence' -f $dir.Name,$classification,($bytes/1MB),$score)
+ $results.Add([pscustomobject]@{IsChecked=$false;Display=$display;Name=$dir.Name;Path=$full;Bytes=$bytes;Files=$files;Partial=$partial;Score=$score;Classification=$classification;Reasons=@($reasons);AgeDays=$ageDays;ExeCount=$exeCount;SignedExeCount=$signedCount;Signals=@($signals)})
+ if(($checked % 8)-eq 0){[void]$ProgressQueue.Enqueue("Analyzed $checked folders…")}
+}}
+[pscustomobject]@{Candidates=$results.ToArray();Roots=$roots;FoldersChecked=$checked;InstalledCount=$installed.Count}
+'@
+
+$orphanQuarantineWorker = @'
+param($ProgressQueue,$Selected,$QuarantineRoot)
+$ErrorActionPreference='Stop'
+if(-not(Test-Path -LiteralPath $QuarantineRoot)){[void](New-Item -ItemType Directory -Path $QuarantineRoot -Force)}
+$done=New-Object 'System.Collections.Generic.List[object]';$errors=New-Object 'System.Collections.Generic.List[string]'
+foreach($item in $Selected){try{
+ $src=[string]$item.Path;$rootOk=$false;foreach($allowed in @($env:ProgramFiles,${env:ProgramFiles(x86)})){if($allowed -and $src.StartsWith(([string]$allowed).TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)){$rootOk=$true}}
+ if(-not $rootOk){throw 'Path is outside approved Program Files roots.'};if(-not(Test-Path -LiteralPath $src -PathType Container)){throw 'Source folder no longer exists.'}
+ $id=[guid]::NewGuid().ToString('N');$dest=Join-Path $QuarantineRoot ($id+'_'+[IO.Path]::GetFileName($src));$manifestPath=Join-Path $QuarantineRoot ($id+'.amrq.json')
+ $meta=[ordered]@{Version=1;Id=$id;Name=[IO.Path]::GetFileName($src);OriginalPath=$src;QuarantinePath=$dest;QuarantinedAt=(Get-Date).ToString('o');Bytes=[int64]$item.Bytes;AnalysisScore=[int]$item.Score;Classification=[string]$item.Classification;Reasons=@($item.Reasons);FileCount=[int]$item.Files;Status='Pending'}
+ # Directory.Move is atomic on the same volume. Cross-volume moves are deliberately refused.
+ if([IO.Path]::GetPathRoot($src) -ne [IO.Path]::GetPathRoot($QuarantineRoot)){throw 'Quarantine is on another volume; safe atomic move is unavailable.'}
+ # Persist recovery metadata before moving so an interruption cannot strand an unindexed folder.
+ [IO.File]::WriteAllText($manifestPath,($meta|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
+ try {
+  [IO.Directory]::Move($src,$dest)
+  $meta.Status='Quarantined'
+  [IO.File]::WriteAllText($manifestPath,($meta|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
+ } catch {
+  if((Test-Path -LiteralPath $dest -PathType Container) -and -not(Test-Path -LiteralPath $src)){try{[IO.Directory]::Move($dest,$src)}catch{}}
+  if(Test-Path -LiteralPath $manifestPath){try{Remove-Item -LiteralPath $manifestPath -Force}catch{}}
+  throw
+ }
+ $done.Add([pscustomobject]@{Name=$meta.Name;OriginalPath=$src;QuarantinePath=$dest;Manifest=$manifestPath})
+ [void]$ProgressQueue.Enqueue('Quarantined: '+$meta.Name)
+ }catch{$errors.Add(([string]$item.Path)+': '+$_.Exception.Message)}}
+[pscustomobject]@{Done=$done.ToArray();Errors=$errors.ToArray()}
+'@
+
+$orphanRestoreWorker = @'
+param($ProgressQueue,$Selected)
+$ErrorActionPreference='Stop';$done=New-Object 'System.Collections.Generic.List[string]';$errors=New-Object 'System.Collections.Generic.List[string]'
+foreach($item in $Selected){try{
+ $manifest=[string]$item.Manifest;$data=Get-Content -LiteralPath $manifest -Raw -Encoding UTF8 | ConvertFrom-Json
+ $src=[string]$data.QuarantinePath;$dest=[string]$data.OriginalPath
+ if(-not(Test-Path -LiteralPath $src -PathType Container)){throw 'Quarantined folder is missing.'}
+ if(Test-Path -LiteralPath $dest){throw 'Restore conflict: original path already exists. Existing data was not overwritten.'}
+ $parent=Split-Path -Parent $dest;if(-not(Test-Path -LiteralPath $parent -PathType Container)){throw 'Original parent folder no longer exists; manual review required.'}
+ [IO.Directory]::Move($src,$dest)
+ try{Remove-Item -LiteralPath $manifest -Force -ErrorAction Stop}catch{[IO.Directory]::Move($dest,$src);throw}
+ $done.Add($dest);[void]$ProgressQueue.Enqueue('Restored: '+[IO.Path]::GetFileName($dest))
+ }catch{$errors.Add(([string]$item.Display)+': '+$_.Exception.Message)}}
+[pscustomobject]@{Done=$done.ToArray();Errors=$errors.ToArray()}
+'@
+
+(C 'CleanupOrphanScanBtn').Add_Click({
+ $list=C 'CleanupOrphanResults';$list.Items.Clear();$status=C 'CleanupOrphanStatus';$status.Text='Analyzing install folders…'
+ Write-AMRLog 'Orphan Analyzer started in background.' INFO Cleanup
+ Start-AMROrphanBackgroundTask -TaskName 'Orphan analysis' -WorkerScript $orphanAnalyzerWorker -Arguments @() -OnComplete {
+  param($result)
+  foreach($candidate in @($result.Candidates | Sort-Object Score -Descending)){[void]$list.Items.Add($candidate);Write-AMRLog ("ORPHAN ANALYSIS | Path={0} | Score={1} | Class={2} | Signals={3}" -f $candidate.Path,$candidate.Score,$candidate.Classification,(@($candidate.Signals) -join ';')) INFO Cleanup}
+  $status.Text=('Analysis complete: {0} folders checked; {1} require review. Select only folders you want to quarantine.' -f $result.FoldersChecked,@($result.Candidates).Count)
+  if(@($result.Candidates).Count -eq 0){[void]$list.Items.Add([pscustomobject]@{IsChecked=$false;Display='No candidate folders found.'})}
+  Show-AMRCleanupSummary -Title 'Orphan Cleanup' -Status $(if(@($result.Candidates).Count -gt 0){'Analysis completed successfully'}else{'No orphan candidates found'}) -Details 'Analysis only. No files or folders were moved or deleted.' -Lines @(("Folders checked: {0}" -f $result.FoldersChecked),("Candidates for review: {0}" -f @($result.Candidates).Count)) -Kind Info
+ }.GetNewClosure()
+})
+
+(C 'CleanupOrphanQuarantineBtn').Add_Click({
+ $selected=@((C 'CleanupOrphanResults').Items | Where-Object {$_.IsChecked -and $_.Path})
+ if($selected.Count -eq 0){[void][System.Windows.MessageBox]::Show('Select one or more analysis results first.','AMR Orphan Cleanup','OK','Information');return}
+ $unsafe=@($selected | Where-Object {$_.Classification -ne 'Likely leftover · review'})
+ if($unsafe.Count -gt 0){[void][System.Windows.MessageBox]::Show("Only 'Likely leftover' results can be quarantined. Linked or uncertain folders are blocked for safety.",'AMR Safety Check','OK','Warning');return}
+ $confirm=[System.Windows.MessageBox]::Show(('Move {0} selected folder(s) to reversible quarantine? No permanent deletion will occur.' -f $selected.Count),'Confirm Quarantine','YesNo','Warning')
+ if($confirm -ne [System.Windows.MessageBoxResult]::Yes){return}
+ $status=C 'CleanupOrphanStatus';$status.Text='Moving selected folders to quarantine in background…'
+ Start-AMROrphanBackgroundTask -TaskName 'Quarantine' -WorkerScript $orphanQuarantineWorker -Arguments @((,$selected),$script:AMROrphanQuarantineRoot) -OnComplete {
+  param($result);Set-AMROrphanQuarantineList
+  $status.Text=('Quarantined: {0}; errors: {1}' -f @($result.Done).Count,@($result.Errors).Count)
+  foreach($e in $result.Errors){Write-AMRLog ('Quarantine error: '+$e) ERROR Cleanup};foreach($d in $result.Done){Write-AMRLog ('Quarantined folder: '+$d.OriginalPath+' => '+$d.QuarantinePath) WARNING Cleanup}
+  Show-AMRCleanupSummary -Title 'Orphan Cleanup' -Status $(if(@($result.Errors).Count -gt 0){'Quarantine completed with issues'}else{'Quarantine completed successfully'}) -Details 'Selected folders were moved to AMR quarantine. No permanent deletion occurred.' -Lines @(("Moved to quarantine: {0}" -f @($result.Done).Count),("Errors: {0}" -f @($result.Errors).Count),'Use Restore Selected if an application needs a quarantined folder.') -Kind $(if(@($result.Errors).Count -gt 0){'Warning'}else{'Success'})
+ }.GetNewClosure()
+})
+
+(C 'CleanupOrphanRefreshBtn').Add_Click({Set-AMROrphanQuarantineList; (C 'CleanupOrphanStatus').Text='Quarantine list refreshed.'})
+(C 'CleanupOrphanRestoreBtn').Add_Click({
+ $selected=@((C 'CleanupOrphanQuarantineList').Items | Where-Object {$_.IsChecked -and $_.Manifest})
+ if($selected.Count -eq 0){[void][System.Windows.MessageBox]::Show('Select one or more quarantined items first.','AMR Restore','OK','Information');return}
+ $confirm=[System.Windows.MessageBox]::Show(('Restore {0} selected item(s) to their original paths? Existing files will never be overwritten.' -f $selected.Count),'Confirm Restore','YesNo','Question')
+ if($confirm -ne [System.Windows.MessageBoxResult]::Yes){return}
+ $status=C 'CleanupOrphanStatus';$status.Text='Restoring selected folders in background…'
+ Start-AMROrphanBackgroundTask -TaskName 'Restore' -WorkerScript $orphanRestoreWorker -Arguments @((,$selected)) -OnComplete {
+  param($result);Set-AMROrphanQuarantineList
+  $status.Text=('Restored: {0}; errors/conflicts: {1}' -f @($result.Done).Count,@($result.Errors).Count)
+  foreach($e in $result.Errors){Write-AMRLog ('Restore error: '+$e) ERROR Cleanup};foreach($d in $result.Done){Write-AMRLog ('Restored quarantined folder: '+$d) SUCCESS Cleanup}
+  Show-AMRCleanupSummary -Title 'Orphan Cleanup' -Status $(if(@($result.Errors).Count -gt 0){'Restore completed with issues'}else{'Restore completed successfully'}) -Details 'Restore never overwrites an existing destination. Any conflict is reported for manual review.' -Lines @(("Restored: {0}" -f @($result.Done).Count),("Errors / conflicts: {0}" -f @($result.Errors).Count)) -Kind $(if(@($result.Errors).Count -gt 0){'Warning'}else{'Success'})
+ }.GetNewClosure()
+})
+Set-AMROrphanQuarantineList
+
 # CLEANUP ENGINE - scan/review/confirm workflow (no deletion during scan)
 # Only known rebuildable cache folders are included. DriverStore, Windows\Installer,
 # AMD extraction roots (for example C:\AMD), user projects and browser profile data are excluded.
 $script:CleanupScanResults = @{}
-$script:AMRAppCacheRoots = New-Object 'System.Collections.Generic.List[string]'
+$script:AMRAppCacheRoots = New-Object 'System.Collections.Generic.List[string]' # GPU shader-cache roots
+$script:AMRApplicationCacheRoots = New-Object 'System.Collections.Generic.List[string]'
+$script:AMRApplicationCacheInventory = New-Object 'System.Collections.Generic.List[object]'
 $script:AMRDriverArtifactRoots = New-Object 'System.Collections.Generic.List[string]'
 
 # Optional cleanup locations are only registered when they exist on this PC.
@@ -14932,6 +16783,20 @@ function Test-AMRCleanupDirectory {
         # Keep inaccessible locations in the scan list so the scanner can report the real error.
         return $true
     }
+}
+
+function Write-AMRCleanupTrace {
+    param([string]$Message,[string]$Level='INFO')
+    try {
+        $traceDirectory = Join-Path $env:ProgramData 'AMR-Utility\Logs'
+        if (-not [string]::IsNullOrWhiteSpace([string]$script:LogDir)) { $traceDirectory = [string]$script:LogDir }
+        if (-not (Test-Path -LiteralPath $traceDirectory -PathType Container)) {
+            New-Item -ItemType Directory -Path $traceDirectory -Force -ErrorAction Stop | Out-Null
+        }
+        $traceFile = Join-Path $traceDirectory ("AMR_Cleanup_Trace_{0}.log" -f (Get-Date -Format 'yyyyMMdd'))
+        $traceLine = '{0} [{1}] [CleanupTrace] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'),$Level,$Message
+        Add-Content -LiteralPath $traceFile -Value $traceLine -Encoding UTF8 -ErrorAction Stop
+    } catch {}
 }
 
 function Get-AMRExistingCleanupRoots {
@@ -15097,7 +16962,7 @@ function Add-AMRGPUCacheCandidate {
     Write-AMRLog ("GPU cache candidate | Vendor={0} | Type={1} | Status={2} | Path={3}" -f $Vendor,$CacheType,$state,$Path) $(if ($state -eq 'Present') { 'INFO' } elseif ($state -eq 'Missing') { 'INFO' } else { 'WARNING' }) Cleanup
 }
 
-# Phase 6.10.8 | Expanded GPU and browser-profile cache discovery.
+# Phase 6.10.9 | Vendor-agnostic GPU shader discovery + no-progress watchdog + expanded browser-profile cache discovery.
 # Discovery is deliberately broader than the installed GPU inventory so stale caches
 # left by replaced adapters/drivers can still be found. Only explicit, rebuildable cache
 # directories are registered; no driver packages, installer roots, profile databases,
@@ -15112,13 +16977,13 @@ function Add-AMRAppCacheCandidate {
         if (($attributes -band [System.IO.FileAttributes]::Directory) -ne 0) {
             $state = 'Present'
             $full = [System.IO.Path]::GetFullPath($Path).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
-            if (-not $script:AMRAppCacheRoots.Contains($full)) { $script:AMRAppCacheRoots.Add($full) }
+            if (-not $script:AMRApplicationCacheRoots.Contains($full)) { $script:AMRApplicationCacheRoots.Add($full) }
         } else { $state = 'Not a directory' }
     } catch [System.IO.DirectoryNotFoundException] { $state = 'Missing' }
       catch [System.IO.FileNotFoundException] { $state = 'Missing' }
       catch {
         $state = 'Inaccessible or unavailable'
-        Add-AMRKnownGPUCacheRoot -Path $Path
+        if (-not $script:AMRApplicationCacheRoots.Contains([System.IO.Path]::GetFullPath($Path).TrimEnd([System.IO.Path]::DirectorySeparatorChar))) { $script:AMRApplicationCacheRoots.Add([System.IO.Path]::GetFullPath($Path).TrimEnd([System.IO.Path]::DirectorySeparatorChar)) }
       }
     Write-AMRLog ("Application cache candidate | App={0} | Type={1} | Status={2} | Path={3}" -f $Application,$CacheType,$state,$Path) $(if ($state -eq 'Present') { 'INFO' } elseif ($state -eq 'Missing') { 'INFO' } else { 'WARNING' }) Cleanup
 }
@@ -15251,18 +17116,247 @@ foreach ($firefoxProfiles in $firefoxProfileRoots) {
     }
 }
 
-# Explicit application caches with known rebuildable contents. Keep this list narrow:
-# do not add messaging attachments, downloads, media libraries, or app databases.
-$appCacheCandidates = @(
-    [pscustomobject]@{App='CapCut';Type='Application Cache';Path=(Join-Path $env:LOCALAPPDATA 'CapCut\User Data\Cache')},
-    [pscustomobject]@{App='CapCut';Type='Code Cache';Path=(Join-Path $env:LOCALAPPDATA 'CapCut\User Data\Code Cache')},
-    [pscustomobject]@{App='CapCut';Type='GPU Cache';Path=(Join-Path $env:LOCALAPPDATA 'CapCut\User Data\GPUCache')},
-    [pscustomobject]@{App='Discord';Type='Application Cache';Path=(Join-Path $env:APPDATA 'discord\Cache')},
-    [pscustomobject]@{App='Discord';Type='Code Cache';Path=(Join-Path $env:APPDATA 'discord\Code Cache')},
-    [pscustomobject]@{App='Discord';Type='GPU Cache';Path=(Join-Path $env:APPDATA 'discord\GPUCache')}
+# Common desktop apps: inspect only allow-listed, rebuildable cache directories.
+# Detection uses uninstall metadata and known executable locations; a missing app is
+# reported as Not installed and never treated as an error. User data, messages, media,
+# downloads, credentials, profiles and project folders are intentionally excluded.
+$uninstallDisplayNames = New-Object 'System.Collections.Generic.List[string]'
+$uninstallRegistryRoots = @(
+    'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall',
+    'HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
+    'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
 )
-foreach ($candidate in $appCacheCandidates) {
-    Add-AMRAppCacheCandidate -Application $candidate.App -CacheType $candidate.Type -Path $candidate.Path
+foreach ($registryRoot in $uninstallRegistryRoots) {
+    try {
+        foreach ($subKey in @(Get-ChildItem -LiteralPath $registryRoot -ErrorAction SilentlyContinue)) {
+            try {
+                $entry = Get-ItemProperty -LiteralPath $subKey.PSPath -ErrorAction Stop
+                if (-not [string]::IsNullOrWhiteSpace([string]$entry.DisplayName)) { $uninstallDisplayNames.Add([string]$entry.DisplayName) }
+            } catch { }
+        }
+    } catch { }
+}
+function Test-AMRKnownAppInstalled {
+    param([string]$DisplayPattern,[string[]]$ExecutablePaths)
+    $packageNames = @()
+    if ($DisplayPattern -match 'Teams') { $packageNames += 'MSTeams' }
+    if ($DisplayPattern -match 'Spotify') { $packageNames += 'SpotifyAB.SpotifyMusic' }
+    if ($DisplayPattern -match 'Discord') { $packageNames += '*Discord*' }
+    foreach ($packageName in $packageNames) {
+        try { if (@(Get-AppxPackage -Name $packageName -ErrorAction SilentlyContinue).Count -gt 0) { return $true } } catch { }
+    }
+    foreach ($displayName in $uninstallDisplayNames) {
+        if ($displayName -match $DisplayPattern) { return $true }
+    }
+    foreach ($exePath in @($ExecutablePaths)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$exePath)) {
+            try { if (Test-Path -Path $exePath -PathType Leaf -ErrorAction SilentlyContinue) { return $true } } catch { }
+        }
+    }
+    return $false
+}
+$appCacheDefinitions = @(
+    [pscustomobject]@{Name='Discord';Pattern='(?i)^Discord';Executables=@((Join-Path $env:LOCALAPPDATA 'Discord\Update.exe'),(Join-Path $env:LOCALAPPDATA 'Discord\app-*\Discord.exe'));Caches=@([pscustomobject]@{Type='Application Cache';Path=(Join-Path $env:APPDATA 'discord\Cache')},[pscustomobject]@{Type='Code Cache';Path=(Join-Path $env:APPDATA 'discord\Code Cache')},[pscustomobject]@{Type='GPU Cache';Path=(Join-Path $env:APPDATA 'discord\GPUCache')})},
+    [pscustomobject]@{Name='CapCut';Pattern='(?i)^CapCut';Executables=@((Join-Path $env:LOCALAPPDATA 'CapCut\Apps\CapCut.exe'),(Join-Path $env:LOCALAPPDATA 'CapCut\CapCut.exe'));Caches=@([pscustomobject]@{Type='Application Cache';Path=(Join-Path $env:LOCALAPPDATA 'CapCut\User Data\Cache')},[pscustomobject]@{Type='Code Cache';Path=(Join-Path $env:LOCALAPPDATA 'CapCut\User Data\Code Cache')},[pscustomobject]@{Type='GPU Cache';Path=(Join-Path $env:LOCALAPPDATA 'CapCut\User Data\GPUCache')})},
+    [pscustomobject]@{Name='Spotify';Pattern='(?i)^Spotify';Executables=@((Join-Path $env:APPDATA 'Spotify\Spotify.exe'),(Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\Spotify.exe'));Caches=@([pscustomobject]@{Type='Browser Cache';Path=(Join-Path $env:LOCALAPPDATA 'Spotify\Browser\Cache')},[pscustomobject]@{Type='Code Cache';Path=(Join-Path $env:LOCALAPPDATA 'Spotify\Browser\Code Cache')},[pscustomobject]@{Type='GPU Cache';Path=(Join-Path $env:LOCALAPPDATA 'Spotify\GPUCache')})},
+    [pscustomobject]@{Name='Microsoft Teams';Pattern='(?i)^Microsoft Teams|^Teams';Executables=@((Join-Path $env:LOCALAPPDATA 'Microsoft\Teams\current\Teams.exe'),(Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\ms-teams.exe'));Caches=@([pscustomobject]@{Type='Classic Teams Cache';Path=(Join-Path $env:APPDATA 'Microsoft\Teams\Cache')},[pscustomobject]@{Type='Classic Teams Code Cache';Path=(Join-Path $env:APPDATA 'Microsoft\Teams\Code Cache')},[pscustomobject]@{Type='Classic Teams GPU Cache';Path=(Join-Path $env:APPDATA 'Microsoft\Teams\GPUCache')},[pscustomobject]@{Type='New Teams Web Cache';Path=(Join-Path $env:LOCALAPPDATA 'Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Microsoft\MSTeams\EBWebView\Default\Cache')},[pscustomobject]@{Type='New Teams Code Cache';Path=(Join-Path $env:LOCALAPPDATA 'Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Microsoft\MSTeams\EBWebView\Default\Code Cache')})},
+    [pscustomobject]@{Name='Slack';Pattern='(?i)^Slack';Executables=@((Join-Path $env:LOCALAPPDATA 'slack\slack.exe'),(Join-Path $env:APPDATA 'Slack\app-*\slack.exe'));Caches=@([pscustomobject]@{Type='Application Cache';Path=(Join-Path $env:APPDATA 'Slack\Cache')},[pscustomobject]@{Type='Code Cache';Path=(Join-Path $env:APPDATA 'Slack\Code Cache')},[pscustomobject]@{Type='GPU Cache';Path=(Join-Path $env:APPDATA 'Slack\GPUCache')})},
+    [pscustomobject]@{Name='Zoom';Pattern='(?i)^Zoom';Executables=@((Join-Path $env:APPDATA 'Zoom\bin\Zoom.exe'),(Join-Path $env:ProgramFiles 'Zoom\bin\Zoom.exe'));Caches=@([pscustomobject]@{Type='WebView Cache';Path=(Join-Path $env:APPDATA 'Zoom\data\WebviewCache')})},
+    [pscustomobject]@{Name='Visual Studio Code';Pattern='(?i)^Microsoft Visual Studio Code|^Visual Studio Code';Executables=@((Join-Path $env:LOCALAPPDATA 'Programs\Microsoft VS Code\Code.exe'),(Join-Path $env:ProgramFiles 'Microsoft VS Code\Code.exe'));Caches=@([pscustomobject]@{Type='Application Cache';Path=(Join-Path $env:APPDATA 'Code\Cache')},[pscustomobject]@{Type='Code Cache';Path=(Join-Path $env:APPDATA 'Code\Code Cache')},[pscustomobject]@{Type='GPU Cache';Path=(Join-Path $env:APPDATA 'Code\GPUCache')},[pscustomobject]@{Type='Dawn Cache';Path=(Join-Path $env:APPDATA 'Code\DawnCache')})},
+    [pscustomobject]@{Name='Epic Games Launcher';Pattern='(?i)^Epic Games Launcher';Executables=@((Join-Path $env:LOCALAPPDATA 'EpicGamesLauncher\Portal\Binaries\Win64\EpicGamesLauncher.exe'),(Join-Path $env:ProgramFiles 'Epic Games\Launcher\Portal\Binaries\Win64\EpicGamesLauncher.exe'));Caches=@([pscustomobject]@{Type='Web Cache';Path=(Join-Path $env:LOCALAPPDATA 'EpicGamesLauncher\Saved\webcache')},[pscustomobject]@{Type='Web Cache 4430';Path=(Join-Path $env:LOCALAPPDATA 'EpicGamesLauncher\Saved\webcache_4430')},[pscustomobject]@{Type='Web Cache 4147';Path=(Join-Path $env:LOCALAPPDATA 'EpicGamesLauncher\Saved\webcache_4147')})}
+)
+# Steam can be installed outside the default location. Read its own install path,
+# then add only the disposable web/http cache subfolders (never game libraries).
+$steamRoots = New-Object 'System.Collections.Generic.List[string]'
+try {
+    $steamKey = Get-Item -LiteralPath 'HKCU:\Software\Valve\Steam' -ErrorAction Stop
+    $steamRegistryPath = [string]$steamKey.GetValue('SteamPath')
+    if ($steamRegistryPath) { $steamRoots.Add(($steamRegistryPath -replace '/', '\\')) }
+} catch { }
+$pf86Steam = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)
+foreach ($steamRoot in @((Join-Path $env:ProgramFiles 'Steam'),$(if ($pf86Steam) { Join-Path $pf86Steam 'Steam' }), (Join-Path $env:LOCALAPPDATA 'Steam'))) {
+    if (-not [string]::IsNullOrWhiteSpace([string]$steamRoot)) {
+        $fullSteamRoot = [System.IO.Path]::GetFullPath([string]$steamRoot).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
+        if (-not $steamRoots.Contains($fullSteamRoot)) { $steamRoots.Add($fullSteamRoot) }
+    }
+}
+$steamExePaths = @($steamRoots | ForEach-Object { Join-Path $_ 'steam.exe' })
+$steamCachePaths = New-Object 'System.Collections.Generic.List[object]'
+foreach ($steamRoot in $steamRoots) {
+    $steamCachePaths.Add([pscustomobject]@{Type='Steam Web Cache';Path=(Join-Path $steamRoot 'htmlcache')})
+    $steamCachePaths.Add([pscustomobject]@{Type='Steam HTTP Cache';Path=(Join-Path $steamRoot 'appcache\httpcache')})
+}
+$appCacheDefinitions += [pscustomobject]@{Name='Steam';Pattern='(?i)^Steam';Executables=$steamExePaths;Caches=$steamCachePaths.ToArray()}
+foreach ($app in $appCacheDefinitions) {
+    $installed = Test-AMRKnownAppInstalled -DisplayPattern $app.Pattern -ExecutablePaths $app.Executables
+    $cacheCount = 0
+    if ($installed) {
+        foreach ($cache in $app.Caches) {
+            $before = $script:AMRApplicationCacheRoots.Count
+            Add-AMRAppCacheCandidate -Application $app.Name -CacheType $cache.Type -Path $cache.Path
+            if ($script:AMRApplicationCacheRoots.Count -gt $before) { $cacheCount++ }
+        }
+        $appStatus = 'Installed'
+    } else {
+        $appStatus = 'Not installed'
+        Write-AMRLog ("Application cache discovery skipped; app not installed: {0}" -f $app.Name) INFO Cleanup
+    }
+    $script:AMRApplicationCacheInventory.Add([pscustomobject]@{Name=$app.Name;Status=$appStatus;CacheFolders=$cacheCount})
+}
+
+# Cross-volume application-cache discovery (bounded to known user-data roots).
+# Search every fixed local volume for Windows user profiles, then register only
+# recognized rebuildable cache folder names under each profile's AppData trees.
+# We never recurse through the entire disk or enter reparse points / user documents.
+$script:AMRCacheDiscoveryVolumes = New-Object 'System.Collections.Generic.List[string]'
+try {
+    foreach ($volume in @(Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction Stop)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$volume.DeviceID)) { $script:AMRCacheDiscoveryVolumes.Add(([string]$volume.DeviceID).TrimEnd('\')) }
+    }
+} catch {
+    foreach ($volume in [System.IO.DriveInfo]::GetDrives()) {
+        try { if ($volume.DriveType -eq [System.IO.DriveType]::Fixed -and $volume.IsReady) { $script:AMRCacheDiscoveryVolumes.Add($volume.RootDirectory.FullName.TrimEnd('\')) } } catch { }
+    }
+}
+$knownCacheDirectoryNames = @('Cache','Cache_Data','Code Cache','GPUCache','DawnCache','DawnGraphiteCache','DawnWebGPUCache','GraphiteDawnCache','GrShaderCache','ShaderCache','NV_Cache','DxCache','DxcCache','VkCache','httpcache','htmlcache','webcache','WebCache','WebviewCache','cache2')
+$crossVolumeProfiles = New-Object 'System.Collections.Generic.List[string]'
+foreach ($volumeRoot in $script:AMRCacheDiscoveryVolumes) {
+    $usersRoot = Join-Path $volumeRoot 'Users'
+    try {
+        if ([System.IO.Directory]::Exists($usersRoot)) {
+            foreach ($profileDir in [System.IO.Directory]::GetDirectories($usersRoot)) {
+                $profileName = [System.IO.Path]::GetFileName($profileDir)
+                if ($profileName -in @('Public','Default','Default User','All Users')) { continue }
+                $crossVolumeProfiles.Add($profileDir)
+            }
+        }
+    } catch { Write-AMRLog ("Cross-volume profile discovery warning | Root={0} | {1}" -f $usersRoot,$_.Exception.Message) WARNING Cleanup }
+}
+# Include the active profile even if Windows has redirected it outside <drive>\Users.
+if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE) -and -not $crossVolumeProfiles.Contains($env:USERPROFILE)) { $crossVolumeProfiles.Add($env:USERPROFILE) }
+$crossVolumeCacheHits = 0
+foreach ($profileRoot in $crossVolumeProfiles) {
+    foreach ($appDataName in @('AppData\Local','AppData\Roaming','AppData\LocalLow')) {
+        $appDataRoot = Join-Path $profileRoot $appDataName
+        if (-not [System.IO.Directory]::Exists($appDataRoot)) { continue }
+        # Exact high-value known application paths are checked first, including Discord
+        # even when it is not currently running or its install was moved to another drive.
+        $knownRelativeCaches = @(
+            'discord\Cache','discord\Code Cache','discord\GPUCache',
+            'Code\Cache','Code\Code Cache','Code\GPUCache','Code\DawnCache',
+            'Slack\Cache','Slack\Code Cache','Slack\GPUCache',
+            'Spotify\Browser\Cache','Spotify\Browser\Code Cache','Spotify\GPUCache',
+            'Microsoft\Teams\Cache','Microsoft\Teams\Code Cache','Microsoft\Teams\GPUCache',
+            'CapCut\User Data\Cache','CapCut\User Data\Code Cache','CapCut\User Data\GPUCache',
+            'Google\Chrome\User Data\Default\Cache\Cache_Data','Microsoft\Edge\User Data\Default\Cache\Cache_Data',
+            'BraveSoftware\Brave-Browser\User Data\Default\Cache\Cache_Data',
+            'Mozilla\Firefox\Profiles'
+        )
+        foreach ($relativeCache in $knownRelativeCaches) {
+            $candidatePath = Join-Path $appDataRoot $relativeCache
+            if ([System.IO.Directory]::Exists($candidatePath)) {
+                Add-AMRAppCacheCandidate -Application ('Discovered profile cache: ' + [System.IO.Path]::GetFileName($profileRoot)) -CacheType $relativeCache -Path $candidatePath
+                $crossVolumeCacheHits++
+            }
+        }
+        # One-level application-folder pass: only folders whose own name is a known
+        # cache type are accepted; no unrestricted recursive walk is performed.
+        try {
+            foreach ($appFolder in [System.IO.Directory]::GetDirectories($appDataRoot)) {
+                $appFolderName = [System.IO.Path]::GetFileName($appFolder)
+                if ($appFolderName -in @('Packages','Microsoft','Google','Mozilla','BraveSoftware','discord','Discord','Code','Slack','Spotify','CapCut','Zoom','EpicGamesLauncher','Opera Software','NVIDIA','AMD','Intel')) {
+                    foreach ($child in [System.IO.Directory]::GetDirectories($appFolder)) {
+                        foreach ($cacheName in $knownCacheDirectoryNames) {
+                            if ([string]::Equals([System.IO.Path]::GetFileName($child),$cacheName,[System.StringComparison]::OrdinalIgnoreCase)) {
+                                Add-AMRAppCacheCandidate -Application ('Discovered cache: ' + $appFolderName) -CacheType $cacheName -Path $child
+                                $crossVolumeCacheHits++
+                            }
+                        }
+                    }
+                }
+            }
+        } catch { Write-AMRLog ("Cross-volume cache discovery warning | Profile={0} | Root={1} | {2}" -f $profileRoot,$appDataRoot,$_.Exception.Message) WARNING Cleanup }
+    }
+}
+Write-AMRLog ("Cross-volume cache discovery completed | FixedVolumes={0} | Profiles={1} | CandidateHits={2}" -f $script:AMRCacheDiscoveryVolumes.Count,$crossVolumeProfiles.Count,$crossVolumeCacheHits) INFO Cleanup
+
+# Phase 6.10.9 | Vendor-agnostic GPU shader cache discovery.
+# Do not infer cache locations only from the currently installed adapter: old GPU
+# drivers may have been removed or replaced. Search all discovered user profiles on
+# every fixed local volume, but only register exact shader-cache directory names
+# underneath recognizable graphics-vendor folders. Never register a driver/package root.
+$gpuShaderCacheNames = @(
+    'DXCache','DxCache','GLCache','NV_Cache','ShaderCache','GrShaderCache',
+    'DxcCache','VkCache','VulkanCache','ComputeCache','DX9Cache','OglCache',
+    'OpenGLCache','PipelineCache','D3DSCache'
+)
+$gpuVendorFolderPattern = '(?i)^(NVIDIA(?: Corporation)?|AMD|ATI|Advanced Micro Devices|Intel|Qualcomm|ARM|Imagination Technologies|Matrox|S3 Graphics|SiS|VIA|ASPEED|DisplayLink|Mesa|Khronos|Vulkan|PowerVR|Radeon|Broadcom|Apple|Microsoft|VMware|VirtualBox|QEMU|Parallels|VirtIO)(?:$|[\s._-])'
+$gpuShaderCandidateHits = 0
+foreach ($profileRoot in $crossVolumeProfiles) {
+    foreach ($appDataName in @('AppData\Local','AppData\LocalLow','AppData\Roaming')) {
+        $appDataRoot = Join-Path $profileRoot $appDataName
+        if (-not [System.IO.Directory]::Exists($appDataRoot)) { continue }
+        if ($appDataName -eq 'AppData\Local') {
+            $directDxCache = Join-Path $appDataRoot 'D3DSCache'
+            Add-AMRGPUCacheCandidate -Vendor 'Microsoft DirectX (vendor-independent)' -CacheType 'DirectX Shader Cache' -Path $directDxCache
+        }
+        try {
+            foreach ($vendorRoot in [System.IO.Directory]::GetDirectories($appDataRoot)) {
+                $vendorFolderName = [System.IO.Path]::GetFileName($vendorRoot)
+                if ($vendorFolderName -notmatch $gpuVendorFolderPattern) { continue }
+                foreach ($cacheFolder in [System.IO.Directory]::GetDirectories($vendorRoot)) {
+                    $cacheName = [System.IO.Path]::GetFileName($cacheFolder)
+                    if ($gpuShaderCacheNames -contains $cacheName) {
+                        Add-AMRGPUCacheCandidate -Vendor ('Legacy/other GPU vendor: ' + $vendorFolderName) -CacheType $cacheName -Path $cacheFolder
+                        $gpuShaderCandidateHits++
+                        continue
+                    }
+                    # A few driver branches nest the cache under a version/container folder.
+                    if ($cacheName -match '(?i)^(PerDriverVersion|DriverCache|CacheData|D3D|Vulkan|OpenGL)$') {
+                        foreach ($nestedCache in [System.IO.Directory]::GetDirectories($cacheFolder)) {
+                            $nestedName = [System.IO.Path]::GetFileName($nestedCache)
+                            if ($gpuShaderCacheNames -contains $nestedName) {
+                                Add-AMRGPUCacheCandidate -Vendor ('Legacy/other GPU vendor: ' + $vendorFolderName) -CacheType $nestedName -Path $nestedCache
+                                $gpuShaderCandidateHits++
+                            }
+                        }
+                    }
+                }
+            }
+        } catch {
+            Write-AMRLog ("Vendor-agnostic GPU cache discovery warning | Profile={0} | Root={1} | {2}" -f $profileRoot,$appDataRoot,$_.Exception.Message) WARNING Cleanup
+        }
+    }
+}
+# Machine-wide cache locations are also checked on each fixed local volume. These are
+# exact cache leaves, not broad ProgramData or driver-installation directories.
+foreach ($volumeRoot in $script:AMRCacheDiscoveryVolumes) {
+    foreach ($machineCache in @(
+        [pscustomobject]@{Vendor='NVIDIA (legacy machine cache)';Relative='ProgramData\NVIDIA Corporation\NV_Cache';Type='NV_Cache'},
+        [pscustomobject]@{Vendor='AMD (legacy machine cache)';Relative='ProgramData\AMD\DxCache';Type='DxCache'},
+        [pscustomobject]@{Vendor='Intel (machine shader cache)';Relative='ProgramData\Intel\ShaderCache';Type='ShaderCache'}
+    )) {
+        $machinePath = Join-Path $volumeRoot $machineCache.Relative
+        Add-AMRGPUCacheCandidate -Vendor $machineCache.Vendor -CacheType $machineCache.Type -Path $machinePath
+    }
+}
+Write-AMRLog ("Vendor-agnostic GPU shader discovery completed | Profiles={0} | CandidateHits={1} | CacheTypes={2}" -f $crossVolumeProfiles.Count,$gpuShaderCandidateHits,($gpuShaderCacheNames -join ',')) INFO Cleanup
+
+# Browser profiles also contribute only their explicit disposable cache directories.
+# Mark a browser installed from its executable/registry metadata for the final summary.
+$browserInventoryDefinitions = @(
+    [pscustomobject]@{Name='Google Chrome';Pattern='(?i)^Google Chrome';Exe=@((Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe'),(Join-Path $env:LOCALAPPDATA 'Google\Chrome\Application\chrome.exe'))},
+    [pscustomobject]@{Name='Microsoft Edge';Pattern='(?i)^Microsoft Edge';Exe=@((Join-Path $env:ProgramFiles 'Microsoft\Edge\Application\msedge.exe'))},
+    [pscustomobject]@{Name='Mozilla Firefox';Pattern='(?i)^Mozilla Firefox';Exe=@((Join-Path $env:ProgramFiles 'Mozilla Firefox\firefox.exe'))},
+    [pscustomobject]@{Name='Brave Browser';Pattern='(?i)^Brave';Exe=@((Join-Path $env:LOCALAPPDATA 'BraveSoftware\Brave-Browser\Application\brave.exe'),(Join-Path $env:ProgramFiles 'BraveSoftware\Brave-Browser\Application\brave.exe'))},
+    [pscustomobject]@{Name='Vivaldi';Pattern='(?i)^Vivaldi';Exe=@((Join-Path $env:LOCALAPPDATA 'Vivaldi\Application\vivaldi.exe'),(Join-Path $env:ProgramFiles 'Vivaldi\Application\vivaldi.exe'))},
+    [pscustomobject]@{Name='Opera';Pattern='(?i)^Opera';Exe=@((Join-Path $env:LOCALAPPDATA 'Programs\Opera\opera.exe'),(Join-Path $env:ProgramFiles 'Opera\launcher.exe'))},
+    [pscustomobject]@{Name='Yandex Browser';Pattern='(?i)^Yandex Browser';Exe=@((Join-Path $env:LOCALAPPDATA 'Yandex\YandexBrowser\Application\browser.exe'),(Join-Path $env:ProgramFiles 'Yandex\YandexBrowser\Application\browser.exe'))},
+    [pscustomobject]@{Name='Chromium';Pattern='(?i)^Chromium';Exe=@((Join-Path $env:LOCALAPPDATA 'Chromium\Application\chrome.exe'),(Join-Path $env:ProgramFiles 'Chromium\Application\chrome.exe'))}
+)
+foreach ($browserDef in $browserInventoryDefinitions) {
+    $installed = Test-AMRKnownAppInstalled -DisplayPattern $browserDef.Pattern -ExecutablePaths $browserDef.Exe
+    $script:AMRApplicationCacheInventory.Add([pscustomobject]@{Name=$browserDef.Name;Status=$(if ($installed) {'Installed'} else {'Not installed'});CacheFolders=0})
 }
 
 # NVIDIA App OTA download artifacts only; restrict to files older than 30 days.
@@ -15270,12 +17364,13 @@ $nvidiaOtaPath = Join-Path $env:ProgramData 'NVIDIA Corporation\NVIDIA app\Updat
 if (Test-AMRCleanupDirectory -Path $nvidiaOtaPath) { $script:AMRDriverArtifactRoots.Add([System.IO.Path]::GetFullPath($nvidiaOtaPath).TrimEnd([System.IO.Path]::DirectorySeparatorChar)) }
 
 $script:CleanupCategories = @(
-    [pscustomobject]@{ Key='UserTemp'; Check='CleanupUserTempCheck'; Info='CleanupUserTempInfo'; Label='User temporary files'; Paths=@(Get-AMRExistingCleanupRoots -Roots @($env:TEMP)); MinAgeDays=0 },
-    [pscustomobject]@{ Key='WindowsTemp'; Check='CleanupWindowsTempCheck'; Info='CleanupWindowsTempInfo'; Label='Windows temporary files'; Paths=@(Get-AMRExistingCleanupRoots -Roots @((Join-Path $env:windir 'Temp'))); MinAgeDays=0 },
-    [pscustomobject]@{ Key='Update'; Check='CleanupUpdateCheck'; Info='CleanupUpdateInfo'; Label='Windows and NVIDIA update leftovers'; Paths=@(Get-AMRExistingCleanupRoots -Roots (@((Join-Path $env:windir 'SoftwareDistribution\Download')) + @($script:AMRDriverArtifactRoots.ToArray()))); MinAgeDays=30 },
-    [pscustomobject]@{ Key='WER'; Check='CleanupWerCheck'; Info='CleanupWerInfo'; Label='Windows error reports'; Paths=@(Get-AMRExistingCleanupRoots -Roots @((Join-Path $env:ProgramData 'Microsoft\Windows\WER\ReportArchive'),(Join-Path $env:ProgramData 'Microsoft\Windows\WER\ReportQueue'))); MinAgeDays=0 },
-    [pscustomobject]@{ Key='Shader'; Check='CleanupShaderCheck'; Info='CleanupShaderInfo'; Label='GPU and application cache'; Paths=@(Get-AMRExistingCleanupRoots -Roots @($script:AMRAppCacheRoots.ToArray())); MinAgeDays=7 },
-    [pscustomobject]@{ Key='Delivery'; Check='CleanupDeliveryCheck'; Info='CleanupDeliveryInfo'; Label='Delivery Optimization cache'; Paths=@(Get-AMRExistingCleanupRoots -Roots @((Join-Path $env:ProgramData 'Microsoft\Windows\DeliveryOptimization\Cache'))); MinAgeDays=0 }
+    [pscustomobject]@{ Key='WER'; Check='CleanupWerCheck'; Info='CleanupWerInfo'; Label='Windows error reports'; Paths=@(Get-AMRExistingCleanupRoots -Roots @((Join-Path $env:ProgramData 'Microsoft\Windows\WER\ReportArchive'),(Join-Path $env:ProgramData 'Microsoft\Windows\WER\ReportQueue'))); MinAgeDays=0; Weight=8 },
+    [pscustomobject]@{ Key='Shader'; Check='CleanupShaderCheck'; Info='CleanupShaderInfo'; Label='GPU shader cache'; Paths=@(Get-AMRExistingCleanupRoots -Roots @($script:AMRAppCacheRoots.ToArray())); MinAgeDays=7; Weight=10 },
+    [pscustomobject]@{ Key='Delivery'; Check='CleanupDeliveryCheck'; Info='CleanupDeliveryInfo'; Label='Delivery Optimization cache'; Paths=@(Get-AMRExistingCleanupRoots -Roots @((Join-Path $env:ProgramData 'Microsoft\Windows\DeliveryOptimization\Cache'))); MinAgeDays=0; Weight=12 },
+    [pscustomobject]@{ Key='WindowsTemp'; Check='CleanupWindowsTempCheck'; Info='CleanupWindowsTempInfo'; Label='Windows temporary files'; Paths=@(Get-AMRExistingCleanupRoots -Roots @((Join-Path $env:windir 'Temp'))); MinAgeDays=0; Weight=14 },
+    [pscustomobject]@{ Key='Update'; Check='CleanupUpdateCheck'; Info='CleanupUpdateInfo'; Label='Windows and graphics-driver update leftovers'; Paths=@(Get-AMRExistingCleanupRoots -Roots (@((Join-Path $env:windir 'SoftwareDistribution\Download')) + @($script:AMRDriverArtifactRoots.ToArray()))); MinAgeDays=30; Weight=16 },
+    [pscustomobject]@{ Key='AppCache'; Check='CleanupAppCacheCheck'; Info='CleanupAppCacheInfo'; Label='Application caches'; Paths=@(Get-AMRExistingCleanupRoots -Roots @($script:AMRApplicationCacheRoots.ToArray())); MinAgeDays=7; Weight=18 },
+    [pscustomobject]@{ Key='UserTemp'; Check='CleanupUserTempCheck'; Info='CleanupUserTempInfo'; Label='User temporary files'; Paths=@(Get-AMRExistingCleanupRoots -Roots @($env:TEMP)); MinAgeDays=0; Weight=22 }
 )
 
 function Get-AMRCleanupFiles {
@@ -15349,15 +17444,21 @@ function Get-AMRCleanupFiles {
 }
 
 function Update-AMRCleanupProgress {
-    param([int]$Value,[string]$Message)
+    param([int]$Value,[string]$Message,[switch]$NoPump)
     $ctl = C 'CleanupProgress'
     $txt = C 'CleanupProgressText'
-    if ($ctl) { $ctl.Value = [Math]::Max(0,[Math]::Min(100,$Value)) }
+    $pct = C 'CleanupProgressPercent'
+    $safeValue = [Math]::Max(0,[Math]::Min(100,$Value))
+    if ($ctl) { $ctl.Value = $safeValue }
+    if ($pct) { $pct.Text = ('{0}%' -f $safeValue) }
     if ($txt) { $txt.Text = $Message }
-    [System.Windows.Forms.Application]::DoEvents()
+    # DispatcherTimer callbacks already run on the WPF UI thread. Avoid nested
+    # DoEvents pumping during background scan updates to prevent re-entrancy.
+    if (-not $NoPump) { [System.Windows.Forms.Application]::DoEvents() }
 }
 
 function Update-AMRCleanupSelectedSummary {
+    if ($null -eq $script:CleanupScanResults -or $script:CleanupScanResults -isnot [System.Collections.IDictionary]) { $script:CleanupScanResults = @{} }
     $selectedBytes = [int64]0
     $selectedFiles = 0
     foreach ($category in $script:CleanupCategories) {
@@ -15406,121 +17507,454 @@ if ($cancelCleanupSelectionButton) {
     })
 }
 
+# Cleanup scan runs in an isolated MTA runspace. The WPF dispatcher only drains
+# small progress batches and applies the completed result, so large volumes do not
+# monopolize the UI thread or rely on Application.DoEvents().
+$script:AMRCleanupScanState = [pscustomobject]@{ Current=$null }
+
 (C 'CleanupScanBtn').Add_Click({
     $scanButton = C 'CleanupScanBtn'
     $runButton = C 'CleanupRunBtn'
+    $current = $script:AMRCleanupScanState.Current
+    if ($current) {
+        # Scan Now is an explicit request for a fresh inventory. Never silently
+        # attach to an old worker just because the user left and reopened Cleanup.
+        $oldSessionId = [string]$current.ScanId
+        try { if ($current.Timer) { $current.Timer.Stop() } } catch {}
+        try {
+            if ($current.PowerShell) {
+                try { $current.PowerShell.Stop() } catch {}
+                try { $current.PowerShell.Dispose() } catch {}
+            }
+        } catch {}
+        try { if ($current.Runspace) { $current.Runspace.Close() } } catch {}
+        try { if ($current.Runspace) { $current.Runspace.Dispose() } } catch {}
+        try { Write-AMRLog ("Previous Cleanup scan session {0} was cancelled because Scan Now was pressed; a new scan is starting from category 1." -f $oldSessionId) WARNING Cleanup } catch {}
+        try { Write-AMRCleanupTrace ("Previous session cancelled by a fresh Scan Now request. Session=" + $oldSessionId) 'WARNING' } catch {}
+        $script:AMRCleanupScanState.Current = $null
+    }
+
     $scanButton.IsEnabled = $false
     $runButton.IsEnabled = $false
     $script:CleanupScanResults = @{}
-    $totalBytes = [int64]0
-    $totalFiles = 0
-    $totalScanErrors = 0
-    $totalMissingRoots = 0
-    $totalRootsScanned = 0
-    $totalReparseSkipped = 0
-    $index = 0
+    $script:CleanupScanProgressValue = 0
+    foreach ($category in $script:CleanupCategories) {
+        $info = C $category.Info
+        if ($info) { $info.Text = 'Queued • waiting for its scan stage' }
+    }
+    $summaryControl = C 'CleanupScanSummary'
+    if ($summaryControl) { $summaryControl.Text = 'Starting lightweight checks first. Completed categories will appear here as they finish.' }
+    Update-AMRCleanupProgress 0 'Preparing scan • 0/7 categories complete' -NoPump
+    $scanSessionId = [guid]::NewGuid().ToString('N')
+    Write-AMRLog ("Cleanup scan session {0} started fresh in an isolated background runspace. Categories={1}; UserTempRoots={2}." -f $scanSessionId,$script:CleanupCategories.Count,(@($script:CleanupCategories | Where-Object { $_.Key -eq 'UserTemp' } | ForEach-Object { $_.Paths }).Count)) INFO Cleanup
+    Write-AMRCleanupTrace ('Scan started. Session=' + $scanSessionId + '; Categories=' + $script:CleanupCategories.Count + '; order=' + (($script:CleanupCategories | ForEach-Object { $_.Key }) -join ' > '))
 
-    try {
-        Write-AMRLog 'Cleanup category scan started.' INFO Cleanup
-        foreach ($gpuRoot in @($script:CleanupCategories | Where-Object { $_.Key -eq 'Shader' } | ForEach-Object { $_.Paths })) {
-            Write-AMRLog ("GPU/application cache scan root registered: {0}" -f $gpuRoot) INFO Cleanup
+    $workerScript = @'
+param($Categories,$ProgressQueue)
+$results = New-Object 'System.Collections.Generic.List[object]'
+$totalFiles = 0
+$totalBytes = [int64]0
+$totalErrors = 0
+$totalMissing = 0
+$totalRoots = 0
+$totalReparse = 0
+$categoryIndex = 0
+$totalWeight = [double](($Categories | Measure-Object -Property Weight -Sum).Sum)
+if ($totalWeight -le 0) { $totalWeight = [double][Math]::Max(1,$Categories.Count) }
+$completedWeight = [double]0
+foreach ($category in $Categories) {
+    $categoryIndex++
+    $categoryCount = [Math]::Max(1,[int]$Categories.Count)
+    $categoryWeight = if ([double]$category.Weight -gt 0) { [double]$category.Weight } else { 1.0 }
+    $completedPercent = [int][Math]::Floor(100.0 * $completedWeight / $totalWeight)
+    [void]$ProgressQueue.Enqueue([pscustomobject]@{Type='CategoryStart';Key=[string]$category.Key;Category=[string]$category.Label;CategoryIndex=$categoryIndex;CategoryCount=$categoryCount;LocalPercent=0;OverallPercent=$completedPercent;Message=('Scanning {0} ({1}/{2})' -f $category.Label,$categoryIndex,$categoryCount)})
+    $found = New-Object 'System.Collections.Generic.List[System.IO.FileInfo]'
+    $errors = New-Object 'System.Collections.Generic.List[object]'
+    $missingRoots = New-Object 'System.Collections.Generic.List[string]'
+    $scannedRoots = New-Object 'System.Collections.Generic.List[string]'
+    $stack = New-Object 'System.Collections.Generic.Stack[string]'
+    $reparseSkipped = 0
+    $bytes = [int64]0
+    $sizeUnknown = 0
+    $visited = 0
+    $progressClock = [System.Diagnostics.Stopwatch]::StartNew()
+    $nextProgressAt = 0.0
+    foreach ($root in @($category.Paths)) {
+        if ([string]::IsNullOrWhiteSpace([string]$root)) { continue }
+        try {
+            if ([System.IO.Directory]::Exists([string]$root)) {
+                $scannedRoots.Add([string]$root)
+                [void]$ProgressQueue.Enqueue([pscustomobject]@{Type='RootStart';Key=[string]$category.Key;Category=[string]$category.Label;CategoryIndex=$categoryIndex;CategoryCount=$categoryCount;CurrentPath=[string]$root;Visited=$visited;Files=$found.Count;Message=('Opening cache root: ' + [string]$root)})
+                $stack.Push([string]$root)
+            } else { $missingRoots.Add([string]$root); [void]$ProgressQueue.Enqueue([pscustomobject]@{Type='RootMissing';Key=[string]$category.Key;Category=[string]$category.Label;CurrentPath=[string]$root;Message=('Missing cache root: ' + [string]$root)}) }
+        } catch {
+            $errors.Add([pscustomobject]@{Path=[string]$root;Stage='RootCheck';Message=$_.Exception.Message})
         }
-        foreach ($category in $script:CleanupCategories) {
-            $index++
-            Update-AMRCleanupProgress ([int](($index - 1) * 100 / $script:CleanupCategories.Count)) ("Scanning: {0}" -f $category.Label)
+    }
+    $ageCutoff = if ([int]$category.MinAgeDays -gt 0) { (Get-Date).AddDays(-[int]$category.MinAgeDays) } else { [datetime]::MinValue }
+    while ($stack.Count -gt 0) {
+        $currentPath = $stack.Pop()
+        [void]$ProgressQueue.Enqueue([pscustomobject]@{Type='DirectoryStart';Key=[string]$category.Key;Category=[string]$category.Label;CategoryIndex=$categoryIndex;CategoryCount=$categoryCount;LocalPercent=0;OverallPercent=$completedPercent;Visited=$visited;Files=$found.Count;CurrentPath=[string]$currentPath;Message=('Scanning {0} • {1:N0} entries checked' -f $category.Label,$visited)})
 
-            $scan = Get-AMRCleanupFiles -Roots $category.Paths
-            $files = @($scan.Files)
-            if ([int]$category.MinAgeDays -gt 0) {
-                $ageCutoff = (Get-Date).AddDays(-[int]$category.MinAgeDays)
-                $files = @($files | Where-Object { try { $_.LastWriteTime -lt $ageCutoff } catch { $false } })
-            }
-            $bytes = [int64]0
-            $sizeUnknown = 0
-            foreach ($file in $files) {
-                try {
-                    $file.Refresh()
-                    if ($file.Exists) { $bytes += [int64]$file.Length }
-                    else { $sizeUnknown++ }
-                } catch {
-                    $sizeUnknown++
+        # Inspect a directory in an isolated worker. The timeout covers the whole
+        # operation, including per-entry attributes and file metadata; any timeout
+        # marks this category partial and allows the next category to run.
+        $entryInfos = $null
+        $inspectionError = $null
+        $inspectionOk = [AMRCleanupDirectoryEnumeratorV10]::TryInspectDirectory([string]$currentPath,5000,$ageCutoff,[ref]$entryInfos,[ref]$inspectionError)
+        if ($inspectionOk) { [void]$ProgressQueue.Enqueue([pscustomobject]@{Type='DirectoryInspectComplete';Key=[string]$category.Key;Category=[string]$category.Label;CategoryIndex=$categoryIndex;CategoryCount=$categoryCount;CurrentPath=[string]$currentPath;Visited=$visited;Files=$found.Count;EntryCount=@($entryInfos).Count;OverallPercent=$completedPercent}) }
+        if (-not $inspectionOk) {
+            $stage = if ([string]$inspectionError -match '(?i)timed out') { 'InspectDirectoryTimeout' } else { 'InspectDirectory' }
+            $errors.Add([pscustomobject]@{Path=[string]$currentPath;Stage=$stage;Message=[string]$inspectionError})
+            [void]$ProgressQueue.Enqueue([pscustomobject]@{Type='DirectorySkipped';Key=[string]$category.Key;Category=[string]$category.Label;CategoryIndex=$categoryIndex;CategoryCount=$categoryCount;CurrentPath=[string]$currentPath;Visited=$visited;Files=$found.Count;ErrorMessage=[string]$inspectionError;OverallPercent=$completedPercent;Message=('Skipped an unresponsive folder in {0}; continuing with the next category' -f $category.Label)})
+            # The failed directory has already been popped from the stack.
+            # Keep queued siblings and other cache roots; one bad cache folder
+            # must never abort the entire Application caches category.
+            continue
+        }
+        foreach ($entryInfo in @($entryInfos)) {
+            $visited++
+            try {
+                if (-not [string]::IsNullOrWhiteSpace([string]$entryInfo.ErrorMessage)) {
+                    $errors.Add([pscustomobject]@{Path=[string]$entryInfo.Path;Stage='InspectEntry';Message=[string]$entryInfo.ErrorMessage})
+                } elseif ($entryInfo.IsReparsePoint) {
+                    $reparseSkipped++
+                } elseif ($entryInfo.IsDirectory) {
+                    $stack.Push([string]$entryInfo.Path)
+                } elseif ($entryInfo.IsEligible) {
+                    $fileInfo = New-Object -TypeName System.IO.FileInfo -ArgumentList ([string]$entryInfo.Path)
+                    $found.Add($fileInfo)
+                    $bytes += [int64]$entryInfo.Length
                 }
+            } catch {
+                $errors.Add([pscustomobject]@{Path=[string]$entryInfo.Path;Stage='ProcessEntry';Message=$_.Exception.Message})
             }
-
-            $script:CleanupScanResults[$category.Key] = [pscustomobject]@{
-                Files = $files
-                Bytes = $bytes
-                Count = $files.Count
-                Errors = @($scan.Errors)
-                MissingRoots = @($scan.MissingRoots)
-                RootsScanned = @($scan.RootsScanned)
-                ReparsePointsSkipped = [int]$scan.ReparsePointsSkipped
-                SizeUnknown = [int]$sizeUnknown
-                Complete = [bool]$scan.Complete
-            }
-
-            $totalBytes += $bytes
-            $totalFiles += $files.Count
-            $totalScanErrors += @($scan.Errors).Count
-            $totalMissingRoots += @($scan.MissingRoots).Count
-            $totalRootsScanned += @($scan.RootsScanned).Count
-            $totalReparseSkipped += [int]$scan.ReparsePointsSkipped
-
-            $info = C $category.Info
-            if ($info) {
-                if (-not $scan.Complete) { $status = 'PARTIAL SCAN' }
-                elseif (@($scan.RootsScanned).Count -eq 0) { $status = 'Not applicable on this PC' }
-                else { $status = 'Scanned' }
-                $ageNote = if ([int]$category.MinAgeDays -gt 0) { ' • older than {0}d' -f $category.MinAgeDays } else { '' }
-                $info.Text = ('{0} • {1:N0} files • {2:N2} MB{3} • {4} roots • {5} errors' -f $status,$files.Count,($bytes / 1MB),$ageNote,@($scan.RootsScanned).Count,@($scan.Errors).Count)
-            }
-
-            Write-AMRLog ("Scanned {0}: {1:N0} files, {2:N2} MB; roots scanned={3}; errors={4}; roots missing after registration={5}; reparse points skipped={6}; size unknown={7}." -f $category.Label,$files.Count,($bytes/1MB),@($scan.RootsScanned).Count,@($scan.Errors).Count,@($scan.MissingRoots).Count,$scan.ReparsePointsSkipped,$sizeUnknown) $(if ($scan.Complete) { 'INFO' } else { 'WARNING' }) Cleanup
-
-            $errorLogLimit = [Math]::Min(20,@($scan.Errors).Count)
-            for ($errorIndex = 0; $errorIndex -lt $errorLogLimit; $errorIndex++) {
-                $scanError = $scan.Errors[$errorIndex]
-                Write-AMRLog ("SCAN ERROR | Category={0} | Stage={1} | Path={2} | Error={3}" -f $category.Label,$scanError.Stage,$scanError.Path,$scanError.Message) WARNING Cleanup
-            }
-            if (@($scan.Errors).Count -gt $errorLogLimit) {
-                Write-AMRLog ("Additional scan errors not individually logged for {0}: {1}." -f $category.Label,(@($scan.Errors).Count - $errorLogLimit)) WARNING Cleanup
+            if ((($visited % 250) -eq 0) -or ($progressClock.Elapsed.TotalSeconds -ge $nextProgressAt)) {
+                [void]$ProgressQueue.Enqueue([pscustomobject]@{
+                    Type='Progress'; Key=[string]$category.Key; Category=[string]$category.Label
+                    CategoryIndex=$categoryIndex; CategoryCount=$categoryCount
+                    LocalPercent=0; OverallPercent=$completedPercent
+                    Files=$found.Count; Bytes=$bytes; Visited=$visited; CurrentPath=[string]$currentPath
+                    Message=('Scanning {0} • {1:N0} entries checked • {2:N0} files found' -f $category.Label,$visited,$found.Count)
+                })
+                $nextProgressAt = $progressClock.Elapsed.TotalSeconds + 0.5
             }
         }
+    }
+    $progressClock.Stop()
+    $complete = (($errors.Count -eq 0) -and ($missingRoots.Count -eq 0))
+    $result = [pscustomobject]@{
+        Key=[string]$category.Key; Label=[string]$category.Label; Files=$found.ToArray(); Bytes=$bytes; Count=$found.Count
+        Errors=$errors.ToArray(); MissingRoots=$missingRoots.ToArray(); RootsScanned=$scannedRoots.ToArray()
+        ReparsePointsSkipped=$reparseSkipped; SizeUnknown=$sizeUnknown; Complete=$complete
+    }
+    $results.Add($result)
+    $totalFiles += $found.Count; $totalBytes += $bytes; $totalErrors += $errors.Count
+    $totalMissing += $missingRoots.Count; $totalRoots += $scannedRoots.Count; $totalReparse += $reparseSkipped
+    $completedWeight += $categoryWeight
+    $weightedOverall = [int][Math]::Min(100,[Math]::Floor(100.0 * $completedWeight / $totalWeight))
+    [void]$ProgressQueue.Enqueue([pscustomobject]@{Type='CategoryComplete';Key=[string]$category.Key;Category=[string]$category.Label;CategoryIndex=$categoryIndex;CategoryCount=$categoryCount;LocalPercent=100;OverallPercent=$weightedOverall;Files=$found.Count;Bytes=$bytes;Visited=$visited;Result=$result;ElapsedSeconds=[Math]::Round($progressClock.Elapsed.TotalSeconds,1);Message=('Finished {0}: {1:N0} files • {2:N2} MB • {3} errors' -f $category.Label,$found.Count,($bytes/1MB),$errors.Count)})
+}
+[pscustomobject]@{Results=$results.ToArray();TotalFiles=$totalFiles;TotalBytes=$totalBytes;TotalErrors=$totalErrors;TotalMissingRoots=$totalMissing;TotalRoots=$totalRoots;TotalReparseSkipped=$totalReparse}
+'@
 
-        $scanState = if (($totalScanErrors -gt 0) -or ($totalMissingRoots -gt 0)) { 'PARTIAL SCAN' } else { 'Scan complete' }
-        $scanNote = "{0}: {1:N0} files • {2:N2} MB potentially recoverable • {3} roots checked • {4} scan errors • {5} roots disappeared during scan • {6} reparse points skipped." -f $scanState,$totalFiles,($totalBytes / 1MB),$totalRootsScanned,$totalScanErrors,$totalMissingRoots,$totalReparseSkipped
-        (C 'CleanupScanSummary').Text = $scanNote
-        $runButton.IsEnabled = $true
-        Update-AMRCleanupSelectedSummary
-        Update-AMRCleanupProgress 100 $scanNote
-        Write-AMRLog ("Cleanup scan finished: {0} files, {1:N2} MB, roots checked={2}, scan errors={3}, roots disappeared during scan={4}, reparse points skipped={5}." -f $totalFiles,($totalBytes / 1MB),$totalRootsScanned,$totalScanErrors,$totalMissingRoots,$totalReparseSkipped) $(if (($totalScanErrors -gt 0) -or ($totalMissingRoots -gt 0)) { 'WARNING' } else { 'INFO' }) Cleanup
+    $runspace = $null
+    $powerShell = $null
+    try {
+        $queue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
+        $runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+        $runspace.ApartmentState = [System.Threading.ApartmentState]::MTA
+        $runspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
+        $runspace.Open()
+        $powerShell = [PowerShell]::Create()
+        $powerShell.Runspace = $runspace
+        [void]$powerShell.AddScript($workerScript).AddArgument([object[]]$script:CleanupCategories).AddArgument($queue)
+        Write-AMRLog ('Cleanup worker initialized. Session=' + $scanSessionId + '; Categories=' + $script:CleanupCategories.Count + '; order=' + (($script:CleanupCategories | ForEach-Object { $_.Key }) -join ' > ') + '.') INFO Cleanup
+        $async = $powerShell.BeginInvoke()
+        if ($null -eq $async) { throw 'Cleanup scan worker did not return an asynchronous handle.' }
+        $timerInstance = New-Object System.Windows.Threading.DispatcherTimer
+        $timerInstance.Interval = [TimeSpan]::FromMilliseconds(150)
+        $jobState = $script:AMRCleanupScanState
+        $job = [pscustomobject]@{ScanId=$scanSessionId;PowerShell=$powerShell;Runspace=$runspace;Async=$async;Queue=$queue;Timer=$timerInstance;StartedAt=(Get-Date);LastProgressAt=(Get-Date);LastStallNoticeAt=[datetime]::MinValue;LastCategory='Preparing scan';LastPath='';StopRequested=$false;StopRequestedAt=$null}
+        $jobState.Current = $job
+        $timerInstance.Add_Tick({
+            try {
+                if ($null -eq $jobState) { try { $timerInstance.Stop() } catch {}; return }
+                $activeJob = $jobState.Current
+                if ($null -eq $activeJob -or $activeJob -ne $job) { try { $timerInstance.Stop() } catch {}; return }
+            } catch {
+                $timerInitRecord = $_
+                $timerInitError = [string]$timerInitRecord.Exception.Message
+                try { Write-AMRLog ("Cleanup timer preflight failed: {0}" -f $timerInitError) ERROR Cleanup } catch {}
+                try { Write-AMRCleanupTrace (('Timer preflight failed: {0}; Position={1}; Stack={2}' -f $timerInitError,$timerInitRecord.InvocationInfo.PositionMessage,$timerInitRecord.ScriptStackTrace)) 'ERROR' } catch {}
+                try { $timerInstance.Stop() } catch {}
+                try { if ($job.PowerShell) { $job.PowerShell.Stop(); $job.PowerShell.Dispose() } } catch {}
+                try { if ($job.Runspace) { $job.Runspace.Dispose() } } catch {}
+                try { if ($jobState.Current -eq $job) { $jobState.Current = $null } } catch {}
+                try { $scanButton.IsEnabled = $true } catch {}
+                try { $runButton.IsEnabled = $false } catch {}
+                try { $summaryControl = C 'CleanupScanSummary'; if ($summaryControl) { $summaryControl.Text = ('Cleanup scan stopped by a timer error: ' + $timerInitError) } } catch {}
+                return
+            }
+            try {
+                $progressItem = $null
+                $drained = 0
+                while ($drained -lt 100 -and $activeJob.Queue.TryDequeue([ref]$progressItem)) {
+                    if ($progressItem) {
+                        try {
+                            $activeJob.LastProgressAt = Get-Date
+                        if (-not [string]::IsNullOrWhiteSpace([string]$progressItem.Category)) { $activeJob.LastCategory = [string]$progressItem.Category }
+                        if ($progressItem.PSObject.Properties['CurrentPath'] -and -not [string]::IsNullOrWhiteSpace([string]$progressItem.CurrentPath)) { $activeJob.LastPath = [string]$progressItem.CurrentPath }
+                        $categoryInfo = $script:CleanupCategories | Where-Object { $_.Key -eq [string]$progressItem.Key } | Select-Object -First 1
+                        $infoControl = if ($categoryInfo) { C $categoryInfo.Info } else { $null }
+                        $percent = [int]$progressItem.OverallPercent
+                        $script:CleanupScanProgressValue = [Math]::Max([int]$script:CleanupScanProgressValue,$percent)
+                        if ([string]$progressItem.Type -eq 'CategoryStart') {
+                            if ($infoControl) { $infoControl.Text = 'Starting scan…' }
+                            Write-AMRLog ('Cleanup category started: ' + [string]$progressItem.Category + ' (' + [string]$progressItem.CategoryIndex + '/' + [string]$progressItem.CategoryCount + ').') INFO Cleanup
+                            Write-AMRCleanupTrace ('Category started: ' + [string]$progressItem.Category + ' (' + [string]$progressItem.CategoryIndex + '/' + [string]$progressItem.CategoryCount + ').')
+                            Update-AMRCleanupProgress $percent (([string]$progressItem.Category) + ' • starting • ' + $percent + '%') -NoPump
+                        } elseif ([string]$progressItem.Type -eq 'RootStart') {
+                            if ($infoControl) { $infoControl.Text = 'Opening cache root…' }
+                            Write-AMRLog ('Cleanup root opened for scan: ' + [string]$progressItem.CurrentPath) INFO Cleanup
+                            Write-AMRCleanupTrace ('Root started: Category=' + [string]$progressItem.Category + '; Path=' + [string]$progressItem.CurrentPath)
+                            Update-AMRCleanupProgress $percent (('Scanning {0} ({1}/{2}) • opening folder • {3}%' -f [string]$progressItem.Category,[int]$progressItem.CategoryIndex,[int]$progressItem.CategoryCount,$percent)) -NoPump
+                        } elseif ([string]$progressItem.Type -eq 'RootMissing') {
+                            Write-AMRLog ('Cleanup root missing: ' + [string]$progressItem.CurrentPath) WARNING Cleanup
+                            Write-AMRCleanupTrace ('Root missing: Category=' + [string]$progressItem.Category + '; Path=' + [string]$progressItem.CurrentPath) 'WARNING'
+                        } elseif ([string]$progressItem.Type -eq 'DirectoryInspectComplete') {
+                            Write-AMRLog (('Directory inspection completed | Category={0} | Path={1} | Entries={2}' -f $progressItem.Category,$progressItem.CurrentPath,$progressItem.EntryCount)) INFO Cleanup
+                            Write-AMRCleanupTrace (('Directory inspection completed: Category={0}; Path={1}; Entries={2}' -f $progressItem.Category,$progressItem.CurrentPath,$progressItem.EntryCount))
+                        } elseif ([string]$progressItem.Type -eq 'DirectorySkipped') {
+                            $timeoutMessage = ('Cleanup skipped a folder that could not be enumerated: {0} | Reason: {1}' -f [string]$progressItem.CurrentPath,[string]$progressItem.ErrorMessage)
+                            Write-AMRLog $timeoutMessage WARNING Cleanup
+                            Write-AMRCleanupTrace (('Directory enumeration skipped: Category={0}; Path={1}; Reason={2}; Entries={3}; Files={4}' -f $progressItem.Category,$progressItem.CurrentPath,$progressItem.ErrorMessage,$progressItem.Visited,$progressItem.Files)) 'WARNING'
+                            Update-AMRCleanupProgress $percent (('Scanning {0} ({1}/{2}) • folder skipped • {3}%' -f [string]$progressItem.Category,[int]$progressItem.CategoryIndex,[int]$progressItem.CategoryCount,$percent)) -NoPump
+                        } elseif ([string]$progressItem.Type -eq 'DirectoryStart') {
+                            if ($infoControl) { $infoControl.Text = ('Scanning • {0:N0} entries • {1:N0} files' -f [int]$progressItem.Visited,[int]$progressItem.Files) }
+                            Write-AMRLog (('Directory scan started | Category={0} | Path={1} | Entries={2} | Files={3}' -f $progressItem.Category,$progressItem.CurrentPath,$progressItem.Visited,$progressItem.Files)) INFO Cleanup
+                            Write-AMRCleanupTrace (('Directory started: Category={0}; Path={1}; Entries={2}; Files={3}' -f $progressItem.Category,$progressItem.CurrentPath,$progressItem.Visited,$progressItem.Files))
+                            Update-AMRCleanupProgress $percent (('Scanning {0} ({1}/{2}) • {3:N0} entries checked' -f [string]$progressItem.Category,[int]$progressItem.CategoryIndex,[int]$progressItem.CategoryCount,[int]$progressItem.Visited)) -NoPump
+                        } elseif ([string]$progressItem.Type -eq 'Progress') {
+                            $liveFiles = [int]$progressItem.Files
+                            $liveBytes = [int64]$progressItem.Bytes
+                            if ($infoControl) { $infoControl.Text = ('Scanning • {0:N0} files • {1:N2} MB • {2:N0} checked' -f $liveFiles,($liveBytes/1MB),[int]$progressItem.Visited) }
+                            $liveMessage = ('Scanning {0} ({1}/{2}) • {3:N0} entries checked • {4:N0} files found' -f [string]$progressItem.Category,[int]$progressItem.CategoryIndex,[int]$progressItem.CategoryCount,[int]$progressItem.Visited,$liveFiles)
+                            $liveCompletedFiles = [int64]0; $liveCompletedBytes = [int64]0
+                            foreach ($completedResult in $script:CleanupScanResults.Values) { $liveCompletedFiles += [int64]$completedResult.Count; $liveCompletedBytes += [int64]$completedResult.Bytes }
+                            $liveSummary = C 'CleanupScanSummary'
+                            if ($liveSummary) { $liveSummary.Text = ('{0}/{1} categories complete • {2:N0} files • {3:N2} MB completed; currently scanning {4}: {5:N0} files • {6:N2} MB so far.' -f @($script:CleanupScanResults.Keys).Count,[int]$progressItem.CategoryCount,($liveCompletedFiles+$liveFiles),(($liveCompletedBytes+$liveBytes)/1MB),[string]$progressItem.Category,$liveFiles,($liveBytes/1MB)) }
+                            $selectedSummary = C 'CleanupSelectedSummary'
+                            if ($selectedSummary) {
+                                $selectedFilesLive = [int64]0; $selectedBytesLive = [int64]0
+                                foreach ($selectedCategory in $script:CleanupCategories) {
+                                    $selectedBox = C $selectedCategory.Check
+                                    if ($selectedBox -and $selectedBox.IsChecked -eq $true) {
+                                        if ($script:CleanupScanResults.ContainsKey($selectedCategory.Key)) {
+                                            $selectedFilesLive += [int64]$script:CleanupScanResults[$selectedCategory.Key].Count
+                                            $selectedBytesLive += [int64]$script:CleanupScanResults[$selectedCategory.Key].Bytes
+                                        }
+                                        if ($selectedCategory.Key -eq [string]$progressItem.Key) { $selectedFilesLive += $liveFiles; $selectedBytesLive += $liveBytes }
+                                    }
+                                }
+                                $selectedSummary.Text = ('Selected: {0:N0} files • {1:N2} MB' -f $selectedFilesLive,($selectedBytesLive/1MB))
+                            }
+                            Update-AMRCleanupProgress $percent $liveMessage -NoPump
+                            if (([int]$progressItem.Visited -gt 0) -and (([int]$progressItem.Visited % 500) -eq 0)) {
+                                Write-AMRLog (('Cleanup scan heartbeat: {0}; entries={1}; files={2}; current folder={3}' -f $progressItem.Category,$progressItem.Visited,$progressItem.Files,$progressItem.CurrentPath)) INFO Cleanup
+                            }
+                        } elseif ([string]$progressItem.Type -eq 'CategoryComplete') {
+                            $categoryResultLive = $progressItem.Result
+                            if ($categoryResultLive) {
+                                if ($null -eq $script:CleanupScanResults -or $script:CleanupScanResults -isnot [System.Collections.IDictionary]) { $script:CleanupScanResults = @{} }
+                                $script:CleanupScanResults[[string]$categoryResultLive.Key] = $categoryResultLive
+                                Write-AMRLog (('Cleanup category completed: {0}; files={1}; bytes={2}; errors={3}; elapsed={4:N1}s.' -f $categoryResultLive.Label,$categoryResultLive.Count,$categoryResultLive.Bytes,@($categoryResultLive.Errors).Count,[double]$progressItem.ElapsedSeconds)) INFO Cleanup
+                                Write-AMRCleanupTrace (('Category completed: {0}; files={1}; bytes={2}; errors={3}; elapsed={4:N1}s.' -f $categoryResultLive.Label,$categoryResultLive.Count,$categoryResultLive.Bytes,@($categoryResultLive.Errors).Count,[double]$progressItem.ElapsedSeconds))
+                                $liveStatus = if (-not $categoryResultLive.Complete) { 'PARTIAL • review logs' } elseif ($categoryResultLive.Key -eq 'AppCache' -and @($script:AMRApplicationCacheInventory | Where-Object { $_.Status -eq 'Installed' }).Count -eq 0) { 'No supported apps installed • 100%' } elseif ($categoryResultLive.Key -eq 'AppCache' -and @($categoryResultLive.RootsScanned).Count -eq 0) { 'No cache folders found • 100%' } elseif (@($categoryResultLive.RootsScanned).Count -eq 0) { 'Not applicable • 100%' } else { 'Complete • 100%' }
+                                $liveAge = if ($categoryInfo -and [int]$categoryInfo.MinAgeDays -gt 0) { ' • older than {0}d' -f [int]$categoryInfo.MinAgeDays } else { '' }
+                                if ($infoControl) { $infoControl.Text = ('{0} • {1:N0} files • {2:N2} MB{3} • {4} roots • {5} errors' -f $liveStatus,$categoryResultLive.Count,($categoryResultLive.Bytes/1MB),$liveAge,@($categoryResultLive.RootsScanned).Count,@($categoryResultLive.Errors).Count) }
+                                $completedCount = @($script:CleanupScanResults.Keys).Count
+                                $completedFiles = [int64]0; $completedBytes = [int64]0
+                                foreach ($completedResult in $script:CleanupScanResults.Values) { $completedFiles += [int64]$completedResult.Count; $completedBytes += [int64]$completedResult.Bytes }
+                                $summaryControl = C 'CleanupScanSummary'
+                                if ($summaryControl) { $summaryControl.Text = ('{0}/{1} categories complete • {2:N0} files • {3:N2} MB estimated so far. Remaining categories are still scanning.' -f $completedCount,$progressItem.CategoryCount,$completedFiles,($completedBytes/1MB)) }
+                                Update-AMRCleanupSelectedSummary
+                            }
+                            Update-AMRCleanupProgress $percent ([string]$progressItem.Message + ' • Overall ' + $percent + '%') -NoPump
+                        }
+                        } catch {
+                            $progressEventError = $_
+                            try {
+                                Write-AMRCleanupTrace (('Progress event rendering failed: {0}; Stack={1}' -f $progressEventError.Exception.Message,$progressEventError.ScriptStackTrace)) 'WARNING'
+                            } catch {}
+                            try { Write-AMRLog ('Cleanup progress event was skipped after a UI update error: ' + $progressEventError.Exception.Message) WARNING Cleanup } catch {}
+                        }
+                    }
+                    $progressItem = $null
+                    $drained++
+                }
+                if ($activeJob.Async.IsCompleted -and $activeJob.Queue -and -not $activeJob.Queue.IsEmpty) {
+                    # Drain every final worker event before consuming EndInvoke; otherwise
+                    # a fast scan can finish with >100 queued events that never reach Logs/UI.
+                    return
+                }
+                if (-not $activeJob.Async.IsCompleted) {
+                    $quietSeconds = ((Get-Date) - [datetime]$activeJob.LastProgressAt).TotalSeconds
+                    if ($quietSeconds -ge 60 -and -not $activeJob.StopRequested) {
+                        $activeJob.StopRequested = $true
+                        $activeJob.StopRequestedAt = Get-Date
+                        $watchdogMessage = ('Cleanup scan watchdog: no worker progress for {0:N0}s. Requesting a safe stop. Last category={1}; last folder={2}.' -f $quietSeconds,$activeJob.LastCategory,$activeJob.LastPath)
+                        Write-AMRLog $watchdogMessage ERROR Cleanup
+                        Write-AMRCleanupTrace $watchdogMessage 'ERROR'
+                        $summaryControl = C 'CleanupScanSummary'
+                        if ($summaryControl) { $summaryControl.Text = $watchdogMessage + ' Completed categories will be retained as a partial result.' }
+                        try { [void]$activeJob.PowerShell.BeginStop($null,$null) } catch { try { Write-AMRLog ('Cleanup watchdog stop request failed: ' + $_.Exception.Message) ERROR Cleanup } catch {} }
+                    }
+                    if ($quietSeconds -ge 5 -and (((Get-Date) - [datetime]$activeJob.LastStallNoticeAt).TotalSeconds -ge 15)) {
+                        $activeJob.LastStallNoticeAt = Get-Date
+                        $quietMessage = ('Cleanup scan has not received a filesystem progress event for {0:N0}s. Category={1}; folder={2}; the current folder enumeration may be blocked.' -f $quietSeconds,$activeJob.LastCategory,$activeJob.LastPath)
+                        Write-AMRLog $quietMessage WARNING Cleanup
+                        $summaryControl = C 'CleanupScanSummary'
+                        if ($summaryControl) { $summaryControl.Text = $quietMessage + '. The scan is still running; no files have been changed.' }
+                        Update-AMRCleanupProgress ([int]$script:CleanupScanProgressValue) ($quietMessage + ' • no files changed') -NoPump
+                    }
+                    return
+                }
+                $timerInstance.Stop()
+                if ($activeJob.StopRequested) {
+                    try { $null = $activeJob.PowerShell.EndInvoke($activeJob.Async) } catch {}
+                    $partialResults = @($script:CleanupScanResults.Values)
+                    $partialFiles = [int64]0; $partialBytes = [int64]0; $partialErrors = 0
+                    foreach ($partialResult in $partialResults) {
+                        $partialFiles += [int64]$partialResult.Count
+                        $partialBytes += [int64]$partialResult.Bytes
+                        $partialErrors += @($partialResult.Errors).Count
+                    }
+                    $partialMessage = ('Scan stopped by the no-progress watchdog. Partial results retained: {0}/{1} categories, {2:N0} files, {3:N2} MB, {4} errors. Last category={5}; last folder={6}.' -f $partialResults.Count,$script:CleanupCategories.Count,$partialFiles,($partialBytes/1MB),$partialErrors,$activeJob.LastCategory,$activeJob.LastPath)
+                    Write-AMRLog $partialMessage WARNING Cleanup
+                    Write-AMRCleanupTrace $partialMessage 'WARNING'
+                    $summaryControl = C 'CleanupScanSummary'
+                    if ($summaryControl) { $summaryControl.Text = $partialMessage }
+                    Update-AMRCleanupProgress ([int]$script:CleanupScanProgressValue) 'Partial scan • stopped safely after no progress' -NoPump
+                    $runButton.IsEnabled = ($partialResults.Count -gt 0)
+                    return
+                }
+                $output = $activeJob.PowerShell.EndInvoke($activeJob.Async)
+                $outputCount = 0
+                if ($null -ne $output) { try { $outputCount = [int]$output.Count } catch { $outputCount = 1 } }
+                if ($activeJob.PowerShell.Streams.Error.Count -gt 0) {
+                    $workerErrors = @($activeJob.PowerShell.Streams.Error | ForEach-Object { $_.ToString() })
+                    foreach ($workerErrorText in $workerErrors) { Write-AMRCleanupTrace ('Worker stream error: ' + [string]$workerErrorText) 'WARNING' }
+                    if ($outputCount -eq 0) { throw ('Background scan worker failed: ' + ($workerErrors -join ' | ')) }
+                    foreach ($workerError in $workerErrors) { Write-AMRLog ('Background scan worker warning: ' + $workerError) WARNING Cleanup }
+                }
+                $outputItems = @()
+                if ($null -ne $output) { $outputItems = @($output | Where-Object { $null -ne $_ }) }
+                if ($outputItems.Count -eq 0) { throw 'Background scan completed without publishing a result.' }
+                $scanResult = $outputItems[$outputItems.Count - 1]
+                if ($null -eq $scanResult) { throw 'Background scan published a null result object.' }
+                $categoryResults = @()
+                if ($scanResult.PSObject.Properties['Results'] -and $null -ne $scanResult.Results) { $categoryResults = @($scanResult.Results | Where-Object { $null -ne $_ }) }
+                if ($categoryResults.Count -eq 0) { throw 'Background scan result did not contain any category results.' }
+                $script:CleanupScanResults = @{}
+                foreach ($categoryResult in $categoryResults) {
+                    if ($null -eq $categoryResult) { continue }
+                    $script:CleanupScanResults[[string]$categoryResult.Key] = $categoryResult
+                    $matchedCategory = $script:CleanupCategories | Where-Object { $_.Key -eq [string]$categoryResult.Key } | Select-Object -First 1
+                    $infoControl = if ($matchedCategory) { C $matchedCategory.Info } else { $null }
+                    if ($infoControl) {
+                        $statusText = if (-not $categoryResult.Complete) { 'PARTIAL SCAN • review logs' } elseif ($categoryResult.Key -eq 'AppCache' -and @($script:AMRApplicationCacheInventory | Where-Object { $_.Status -eq 'Installed' }).Count -eq 0) { 'No supported apps installed • 100%' } elseif ($categoryResult.Key -eq 'AppCache' -and @($categoryResult.RootsScanned).Count -eq 0) { 'No cache folders found • 100%' } elseif (@($categoryResult.RootsScanned).Count -eq 0) { 'Not applicable on this PC • 100%' } else { 'Complete • 100%' }
+                        $ageNote = ''
+                        if ($matchedCategory -and [int]$matchedCategory.MinAgeDays -gt 0) { $ageNote = ' • older than {0}d' -f $matchedCategory.MinAgeDays }
+                        $infoControl.Text = ('{0} • {1:N0} files • {2:N2} MB{3} • {4} roots • {5} errors' -f $statusText,$categoryResult.Count,($categoryResult.Bytes/1MB),$ageNote,@($categoryResult.RootsScanned).Count,@($categoryResult.Errors).Count)
+                    }
+                    $logLevel = if ($categoryResult.Complete) { 'INFO' } else { 'WARNING' }
+                    Write-AMRLog ("Scanned {0}: {1:N0} files, {2:N2} MB; roots scanned={3}; errors={4}; missing roots={5}; reparse points skipped={6}; size unknown={7}." -f $categoryResult.Label,$categoryResult.Count,($categoryResult.Bytes/1MB),@($categoryResult.RootsScanned).Count,@($categoryResult.Errors).Count,@($categoryResult.MissingRoots).Count,$categoryResult.ReparsePointsSkipped,$categoryResult.SizeUnknown) $logLevel Cleanup
+                    $scanErrors = @()
+                    if ($categoryResult.PSObject.Properties['Errors'] -and $null -ne $categoryResult.Errors) { $scanErrors = @($categoryResult.Errors | Where-Object { $null -ne $_ }) }
+                    $loggedErrorCount = 0
+                    foreach ($scanError in $scanErrors) {
+                        if ($loggedErrorCount -ge 20) { break }
+                        if ($null -eq $scanError) { continue }
+                        Write-AMRLog ("SCAN ERROR | Category={0} | Stage={1} | Path={2} | Error={3}" -f $categoryResult.Label,$scanError.Stage,$scanError.Path,$scanError.Message) WARNING Cleanup
+                        Write-AMRCleanupTrace ("SCAN ERROR | Category={0} | Stage={1} | Path={2} | Error={3}" -f $categoryResult.Label,$scanError.Stage,$scanError.Path,$scanError.Message) 'WARNING'
+                        $loggedErrorCount++
+                    }
+                }
+                $scanStateText = if (($scanResult.TotalErrors -gt 0) -or ($scanResult.TotalMissingRoots -gt 0)) { 'PARTIAL SCAN' } else { 'Scan complete' }
+                $elapsedTotal = if ($activeJob.StartedAt) { [Math]::Round(((Get-Date) - $activeJob.StartedAt).TotalSeconds,1) } else { 0 }
+                $scanNote = "{0}: {1:N0} files • {2:N2} MB potentially recoverable • {3} roots checked • {4} scan errors • {5} roots missing • {6} reparse points skipped • {7:N1}s." -f $scanStateText,$scanResult.TotalFiles,($scanResult.TotalBytes/1MB),$scanResult.TotalRoots,$scanResult.TotalErrors,$scanResult.TotalMissingRoots,$scanResult.TotalReparseSkipped,$elapsedTotal
+                (C 'CleanupScanSummary').Text = $scanNote
+                $runButton.IsEnabled = $true
+                Update-AMRCleanupSelectedSummary
+                Update-AMRCleanupProgress 100 $scanNote
+                Write-AMRLog ("Cleanup scan finished: {0} files, {1:N2} MB, roots checked={2}, scan errors={3}, missing roots={4}, reparse points skipped={5}." -f $scanResult.TotalFiles,($scanResult.TotalBytes/1MB),$scanResult.TotalRoots,$scanResult.TotalErrors,$scanResult.TotalMissingRoots,$scanResult.TotalReparseSkipped) $(if (($scanResult.TotalErrors -gt 0) -or ($scanResult.TotalMissingRoots -gt 0)) { 'WARNING' } else { 'SUCCESS' }) Cleanup
+                Write-AMRCleanupTrace (('Scan completed: files={0}; bytes={1}; roots={2}; errors={3}; missingRoots={4}; reparseSkipped={5}.' -f $scanResult.TotalFiles,$scanResult.TotalBytes,$scanResult.TotalRoots,$scanResult.TotalErrors,$scanResult.TotalMissingRoots,$scanResult.TotalReparseSkipped))
+                $appCacheResult = @($scanResult.Results | Where-Object { $_.Key -eq 'AppCache' } | Select-Object -First 1)
+                $installedApps = @($script:AMRApplicationCacheInventory | Where-Object { $_.Status -eq 'Installed' })
+                $notInstalledApps = @($script:AMRApplicationCacheInventory | Where-Object { $_.Status -eq 'Not installed' })
+                $appCacheFiles = if ($appCacheResult.Count -gt 0) { [int]$appCacheResult[0].Count } else { 0 }
+                $appCacheBytes = if ($appCacheResult.Count -gt 0) { [int64]$appCacheResult[0].Bytes } else { [int64]0 }
+                $notInstalledText = if ($notInstalledApps.Count -gt 0) { 'Not installed on this PC: ' + ((@($notInstalledApps | Select-Object -First 4 | ForEach-Object { $_.Name }) -join ', ')) + $(if ($notInstalledApps.Count -gt 4) { ' +' + ($notInstalledApps.Count - 4) + ' more' } else { '' }) } else { 'All checked app families were detected.' }
+                $scanKind = if (($scanResult.TotalErrors -gt 0) -or ($scanResult.TotalMissingRoots -gt 0)) { 'Warning' } else { 'Success' }
+                $scanStatus = if ($scanKind -eq 'Warning') { 'Scan completed with warnings' } elseif ($scanResult.TotalFiles -eq 0) { 'Scan complete — nothing to clean' } else { 'Scan completed successfully' }
+                $scanDetails = if ($installedApps.Count -eq 0 -and $appCacheFiles -eq 0) { 'No supported browser or desktop cache apps are installed on this device. No application cache was found or changed.' } elseif ($installedApps.Count -eq 0 -and $appCacheFiles -gt 0) { 'No supported cache app is currently installed, but cache folders from previous app use were found. Review them before cleanup.' } else { ('Detected {0} supported app families. Review the estimated cache size before choosing what to clean.' -f $installedApps.Count) }
+                $scanLines = @(("Application caches: {0:N0} files • {1:N2} MB" -f $appCacheFiles,($appCacheBytes/1MB)),$notInstalledText,("Overall scan: {0:N0} files • {1:N2} MB • {2} scan errors" -f $scanResult.TotalFiles,($scanResult.TotalBytes/1MB),$scanResult.TotalErrors))
+                Show-AMRCleanupSummary -Title 'AMR | Cleanup Scan' -Status $scanStatus -Details $scanDetails -Lines $scanLines -Kind $scanKind
+            } catch {
+                $cleanupTimerError = $_
+                $summaryControl = C 'CleanupScanSummary'
+                if ($summaryControl) { try { $summaryControl.Text = ('Background cleanup scan failed: ' + $cleanupTimerError.Exception.Message) } catch {} }
+                try { Update-AMRCleanupProgress 0 'Scan failed. Review Cleanup logs.' -NoPump } catch {}
+                try { Write-AMRLog ("Cleanup DispatcherTimer callback failed: {0}; Script={1}; Line={2}; Position={3}; Stack={4}." -f $cleanupTimerError.Exception.Message,$cleanupTimerError.InvocationInfo.ScriptName,$cleanupTimerError.InvocationInfo.ScriptLineNumber,$cleanupTimerError.InvocationInfo.PositionMessage,$cleanupTimerError.ScriptStackTrace) ERROR Cleanup } catch {}
+                try {
+                    $traceDetails = @(
+                        ('Message: ' + [string]$cleanupTimerError.Exception.Message),
+                        ('Script: ' + [string]$cleanupTimerError.InvocationInfo.ScriptName),
+                        ('Line: ' + [string]$cleanupTimerError.InvocationInfo.ScriptLineNumber),
+                        ('Position: ' + [string]$cleanupTimerError.InvocationInfo.PositionMessage),
+                        ('Stack: ' + [string]$cleanupTimerError.ScriptStackTrace)
+                    ) -join ' | '
+                    Write-AMRCleanupTrace $traceDetails 'ERROR'
+                } catch {}
+                try { Show-AMRMessage ("Cleanup scan failed:`n{0}" -f $cleanupTimerError.Exception.Message) 'Cleanup' OK Error | Out-Null } catch {}
+            } finally {
+                try { $activeJob.PowerShell.Dispose() } catch {}
+                try { $activeJob.Runspace.Dispose() } catch {}
+                if ($jobState.Current -eq $activeJob) { $jobState.Current = $null }
+                $scanButton.IsEnabled = $true
+            }
+        }.GetNewClosure())
+        $timerInstance.Start()
     } catch {
-        Update-AMRCleanupProgress 0 'Scan failed. Check the application log.'
-        Write-AMRLog ("Cleanup scan failed: {0}" -f $_.Exception.Message) ERROR Cleanup
-        Show-AMRMessage ("Cleanup scan failed:`n{0}" -f $_.Exception.Message) 'Cleanup' OK Error | Out-Null
-    } finally {
+        if ($powerShell) { try { $powerShell.Dispose() } catch {} }
+        if ($runspace) { try { $runspace.Dispose() } catch {} }
+        $script:AMRCleanupScanState.Current = $null
         $scanButton.IsEnabled = $true
+        (C 'CleanupScanSummary').Text = ('Unable to start background scan: ' + $_.Exception.Message)
+        Update-AMRCleanupProgress 0 'Unable to start background scan.'
+        Write-AMRLog ("Unable to start background Cleanup scan: {0}" -f $_.Exception.Message) ERROR Cleanup
     }
 })
 
 (C 'CleanupRunBtn').Add_Click({
     $selected = @($script:CleanupCategories | Where-Object { (C $_.Check).IsChecked -eq $true })
     if ($selected.Count -eq 0) {
-        Show-AMRMessage 'Select at least one scanned category first.' 'Cleanup' OK Warning | Out-Null
+        Show-AMRCleanupSummary -Title 'AMR | Cleanup' -Status 'No category selected' -Details 'Choose at least one cleanup category, then run Scan Now before cleaning.' -Kind Info
         return
     }
 
     $notScanned = @($selected | Where-Object { -not $script:CleanupScanResults.ContainsKey($_.Key) })
     if ($notScanned.Count -gt 0) {
         $names = ($notScanned | ForEach-Object { $_.Label }) -join ', '
-        Show-AMRMessage ("Run Scan Now before cleaning these categories:`n$names") 'Cleanup' OK Warning | Out-Null
+        Show-AMRCleanupSummary -Title 'AMR | Cleanup' -Status 'Scan required' -Details 'These categories have not been scanned yet. No files were changed.' -Lines @($names) -Kind Warning
         return
     }
 
     $incompleteScans = @($selected | Where-Object { -not [bool]$script:CleanupScanResults[$_.Key].Complete })
     if ($incompleteScans.Count -gt 0) {
         $names = ($incompleteScans | ForEach-Object { $_.Label }) -join "`n• "
-        Show-AMRMessage ("Cleanup was blocked because these categories were only partially scanned. This prevents deleting an incomplete or misleading selection:`n`n• $names`n`nReview the Cleanup log, resolve the access or scan errors, and run Scan Now again.") 'Incomplete Cleanup Scan' OK Warning | Out-Null
+        Show-AMRCleanupSummary -Title 'AMR | Cleanup Safety Check' -Status 'Cleanup blocked for safety' -Details 'One or more selected categories were only partially scanned. AMR will not clean from an incomplete inventory.' -Lines @($names,'Review Cleanup Logs, resolve access errors, then scan again. No files were changed.') -Kind Warning
         Write-AMRLog ("Cleanup blocked because selected categories have incomplete scans: {0}." -f (($incompleteScans | ForEach-Object { $_.Label }) -join ', ')) WARNING Cleanup
         return
     }
@@ -15724,6 +18158,13 @@ if ($cancelCleanupSelectionButton) {
             $categoryLevel = if ($categoryFailed -gt 0) { 'WARNING' } else { 'INFO' }
             Write-AMRLog ("CLEANUP CATEGORY SUMMARY | {0} | Verified Deleted: {1} | Skipped: {2} | Failed / Not Verified: {3} | Verified File Bytes: {4}" -f $cat.Label,$categoryDeleted,$categorySkipped,$categoryFailed,$categoryBytesFreed) $categoryLevel Cleanup
         }
+
+        # Publish the verified file-operation counts before slower service restoration
+        # and free-space measurement. Update-AMRCleanupProgress pumps the existing UI
+        # message loop so the summary becomes visible without changing cleanup order.
+        $preliminarySummary = "Cleanup actions finished: {0} verified deleted, {1} skipped, {2} failed files. Final service and disk-space verification is still running..." -f $deleted,$skipped,$failed
+        (C 'CleanupScanSummary').Text = $preliminarySummary
+        Update-AMRCleanupProgress 96 'Cleanup actions finished. Verifying Windows service state and final free space...'
     } catch {
         $systemFailures++
         Write-AMRLog ("Cleanup operation encountered an unexpected error: {0}" -f $_.Exception.Message) ERROR Cleanup
@@ -15831,8 +18272,18 @@ if ($cancelCleanupSelectionButton) {
     Update-AMRCleanupSelectedSummary
 
     Write-AMRLog ("CLEANUP FINAL SUMMARY | Verified Deleted: {0} | Skipped: {1} | Failed Files: {2} | System/Service Failures: {3} | Verified File Bytes: {4} | Measured Free Space Delta: {5} | Windows Update: {6}" -f $deleted,$skipped,$failed,$systemFailures,$bytesFreed,$actualFreeSpaceDelta,$updateServiceRestoreState) $finalLevel Cleanup
-    $messageIcon = if ($totalFailures -gt 0) { Warning } else { Information }
-    Show-AMRMessage $summary 'Cleanup Results' OK $messageIcon | Out-Null
+    $summaryKind = if ($totalFailures -gt 0) { 'Warning' } else { 'Success' }
+    $summaryStatus = if ($totalFailures -gt 0) { 'Completed with issues' } elseif ($deleted -eq 0 -and $skipped -eq 0) { 'Completed successfully — nothing to clean' } else { 'Cleanup completed successfully' }
+    $summaryLines = @(
+        ("Verified removed: {0:N0} files • {1:N2} MB" -f $deleted,($bytesFreed/1MB)),
+        ("Skipped: {0:N0} • Failed / not verified: {1:N0}" -f $skipped,$failed),
+        ("System / service failures: {0:N0}" -f $systemFailures),
+        $diskLine,$serviceLine
+    )
+    if (@($selected | Where-Object { $_.Key -eq 'AppCache' }).Count -gt 0 -and @($script:AMRApplicationCacheInventory | Where-Object { $_.Status -eq 'Installed' }).Count -eq 0 -and $deleted -eq 0) {
+        $summaryLines += 'No supported cache apps are installed on this device. No application cache was changed.'
+    }
+    Show-AMRCleanupSummary -Title 'AMR | Cleanup Results' -Status $summaryStatus -Details 'The cleanup operation has finished. Results below are based on verified file operations.' -Lines $summaryLines -Kind $summaryKind
 })
 
 # BACKUP ENGINE - searchable catalog; all actions export/report unless explicitly creating restore point
@@ -16009,6 +18460,35 @@ function Invoke-AMRBackupAction {
  }
 }
 
+function Get-AMRBackupInfoText {
+ param([object]$Action)
+ $detail = switch ([string]$Action.Key) {
+  'RestorePoint' { 'Creates a Windows System Restore Point so supported system settings and drivers can be rolled back if a later change causes problems. Windows may limit how frequently restore points can be created.'; break }
+  'Registry' { 'Exports the current user software registry branch to a .reg file. Keep the file in a safe location; importing it later changes registry settings.'; break }
+  'HKCU' { 'Exports the complete current-user registry hive to a .reg file for reference or recovery.'; break }
+  'HKLMSoftware' { 'Exports the machine-wide SOFTWARE registry hive. Administrative permission may be required to restore parts of this backup.'; break }
+  'DriverExport' { 'Exports third-party driver packages from the Windows Driver Store so they can be referenced or reinstalled later.'; break }
+  'DriversList' { 'Creates an inventory of installed drivers and their details. This is a report, not a driver-package backup.'; break }
+  'WifiProfiles' { 'Exports saved wireless profile information for backup and troubleshooting. Protect this file because wireless profile data can be sensitive.'; break }
+  'WifiXml' { 'Exports saved Wi-Fi profiles in XML format for compatible Windows netsh import workflows. Protect these files as sensitive configuration data.'; break }
+  'Firewall' { 'Exports the current Windows Firewall rules so they can be reviewed or imported on a compatible Windows installation.'; break }
+  'FirewallCfg' { 'Captures the broader Windows Firewall configuration, including profile-level settings.'; break }
+  'BitLocker' { 'Creates a report of BitLocker protection status for available volumes. It does not export recovery keys.'; break }
+  'OpenFolder' { 'Opens the AMR backup folder where generated exports and reports are stored.'; break }
+  default {
+   switch ([string]$Action.Category) {
+    'Recovery' { 'Creates a recovery and system-state report that can help review Windows recovery configuration before troubleshooting or maintenance.'; break }
+    'Registry & System' { 'Exports system or registry configuration information to the AMR backup folder for documentation and recovery reference.'; break }
+    'Drivers & Hardware' { 'Collects hardware, device, disk, audio, printer, or driver inventory information for diagnostics and future reference.'; break }
+    'Network' { 'Exports network configuration details such as adapters, routes, DNS, proxy, profiles, or shared-resource settings.'; break }
+    'Security' { 'Exports Windows security configuration or status information for auditing and troubleshooting. Sensitive information should be stored securely.'; break }
+    default { 'Generates a configuration or system report and saves it in the AMR backup folder for review and troubleshooting.' }
+   }
+  }
+ }
+ return ("{0}`r`nCategory: {1}`r`n`r`n{2}" -f [string]$Action.Name,[string]$Action.Category,$detail)
+}
+
 function Update-AMRBackupView {
  $grid=C 'BackupActionsGrid'; $grid.Children.Clear(); $search=[string](C 'BackupSearchBox').Text
  $selected=(C 'BackupCategoryFilter').SelectedItem; $category='All Categories'; if($selected){$category=([string]$selected.Content -replace '^[^A-Za-z0-9]+\s*','')}
@@ -16016,13 +18496,73 @@ function Update-AMRBackupView {
  foreach($a in $script:BackupActions){
   if($category -ne 'All Categories' -and $a.Category -ne $category){continue}
   if(-not [string]::IsNullOrWhiteSpace($search) -and ($a.Name -notlike "*$search*" -and $a.Category -notlike "*$search*")){continue}
-  $b=New-Object System.Windows.Controls.Button; $b.Content=('💾  ' + $a.Name); $b.Tag=$a.Key; $b.Margin='0,0,10,10'; $b.Padding='12,10'; $b.MinHeight=48; $b.HorizontalContentAlignment='Left'; $b.ToolTip=("Category: {0}" -f $a.Category)
-  $b.Add_Click({ Invoke-AMRBackupAction -Key ([string]$this.Tag) }.GetNewClosure()); [void]$grid.Children.Add($b); $visible++
+
+  $card=New-Object System.Windows.Controls.Border
+  $card.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#202A35')
+  $card.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#344455')
+  $card.BorderThickness='1'; $card.CornerRadius='7'; $card.Padding='4'; $card.Margin='0,0,8,8'; $card.MinHeight=48
+
+  $layout=New-Object System.Windows.Controls.Grid
+  $colMain=New-Object System.Windows.Controls.ColumnDefinition
+  $colMain.Width=[System.Windows.GridLength]::new(1,[System.Windows.GridUnitType]::Star)
+  $colInfo=New-Object System.Windows.Controls.ColumnDefinition
+  $colInfo.Width=[System.Windows.GridLength]::new(28)
+  [void]$layout.ColumnDefinitions.Add($colMain); [void]$layout.ColumnDefinitions.Add($colInfo)
+
+  $actionButton=New-Object System.Windows.Controls.Button
+  $actionButton.Content=('💾  ' + [string]$a.Name); $actionButton.Tag=[string]$a.Key
+  $actionButton.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#263646')
+  $actionButton.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#E7EDF3')
+  $actionButton.BorderThickness='0'; $actionButton.Padding='7,5'; $actionButton.FontSize=11
+  $actionButton.FontWeight='SemiBold'; $actionButton.MinHeight=34; $actionButton.Width=[double]::NaN
+  $actionButton.HorizontalAlignment='Stretch'; $actionButton.HorizontalContentAlignment='Left'
+  $actionButton.VerticalContentAlignment='Center'; $actionButton.ToolTip=$null
+  $actionButton.Add_Click({ Invoke-AMRBackupAction -Key ([string]$this.Tag) }.GetNewClosure())
+  [System.Windows.Controls.Grid]::SetColumn($actionButton,0); [void]$layout.Children.Add($actionButton)
+
+  $infoButton=New-Object System.Windows.Controls.Button
+  $infoButton.Content='i'; $infoButton.Width=23; $infoButton.Height=23; $infoButton.Padding='0'
+  $infoButton.FontSize=12; $infoButton.FontWeight='Bold'; $infoButton.BorderThickness='0'
+  $infoButton.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62')
+  $infoButton.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#17212B')
+  $infoButton.ToolTip=$null; $infoButton.HorizontalAlignment='Center'; $infoButton.VerticalAlignment='Center'
+  $infoButton.Tag=(Get-AMRBackupInfoText -Action $a)
+  $infoButton.Add_Click({ Show-AMRMessage ([string]$this.Tag) 'Backup Tool Information' OK Information | Out-Null }.GetNewClosure())
+  [System.Windows.Controls.Grid]::SetColumn($infoButton,1); [void]$layout.Children.Add($infoButton)
+
+  $card.Child=$layout
+  [void]$grid.Children.Add($card); $visible++
  }
  (C 'BackupResultsCount').Text=('{0} backup actions shown' -f $visible)
 }
 (C 'BackupSearchBox').Add_TextChanged({ Update-AMRBackupView })
 (C 'BackupCategoryFilter').Add_SelectionChanged({ Update-AMRBackupView })
+
+function Set-AMRBackupSubTab {
+ param([int]$Index)
+ $tabs=C 'BackupSubTabs'
+ if(-not $tabs){return}
+ $tabs.SelectedIndex=$Index
+ $backupButton=C 'BackupCenterChoiceBtn'; $driverButton=C 'DriverBackupChoiceBtn'
+ if($Index -eq 0){
+  $backupButton.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#29384A')
+  $backupButton.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#D9BD8B')
+  $backupButton.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62')
+  $driverButton.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#263646')
+  $driverButton.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#E7EAF0')
+  $driverButton.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#34465B')
+ } else {
+  $driverButton.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#29384A')
+  $driverButton.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#D9BD8B')
+  $driverButton.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62')
+  $backupButton.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#263646')
+  $backupButton.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#E7EAF0')
+  $backupButton.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#34465B')
+ }
+}
+(C 'BackupCenterChoiceBtn').Add_Click({ Set-AMRBackupSubTab 0 })
+(C 'DriverBackupChoiceBtn').Add_Click({ Set-AMRBackupSubTab 1 })
+Set-AMRBackupSubTab 0
 Update-AMRBackupView
 
 # UTILITIES ENGINE
@@ -16089,26 +18629,118 @@ function Start-AMRUtility {
 (C 'UtilFontsBtn').Add_Click({ Start-AMRUtility 'Fonts' 'control.exe' 'fonts' })
 (C 'UtilColorMgmtBtn').Add_Click({ Start-AMRUtility 'Color Management' 'colorcpl.exe' })
 
-# Utilities search and category filtering (only affects Utilities tab)
-$script:UtilityButtons = @((C 'UtilButtonsPanel').Children | Where-Object { $_ -is [System.Windows.Controls.Button] })
+# Utilities compact-card presentation, gold info buttons, search and category filtering.
+# Existing utility buttons and their original Click handlers are retained; they are hosted inside compact cards.
+$script:UtilityCardEntries = @()
+$utilityPanel = C 'UtilButtonsPanel'
+$utilityButtons = @($utilityPanel.Children | Where-Object { $_ -is [System.Windows.Controls.Button] })
+foreach ($utilityButton in $utilityButtons) {
+    $utilityName = ([string]$utilityButton.Content -replace '^🛠\s*','').Trim()
+    $utilityCategory = [string]$utilityButton.Tag
+    if ([string]::IsNullOrWhiteSpace($utilityCategory)) {
+        if ($utilityName -match 'Device|Sound|Memory Diagnostic|TPM|Bluetooth|Display|Mouse|Keyboard|Printers|Color Management') { $utilityCategory = 'Hardware & Devices' }
+        elseif ($utilityName -match 'Firewall|Network|Credential|Certificate|Privacy|Proxy|Security|TPM') { $utilityCategory = 'Network & Security' }
+        elseif ($utilityName -match 'Task Manager|Services|Event Viewer|Performance|System|Control Panel|Registry|Programs|Features|Power|Windows Update|Storage|Indexing') { $utilityCategory = 'System & Performance' }
+        else { $utilityCategory = 'Administration' }
+    }
+
+    $utilityDescription = switch -Regex ($utilityName) {
+        'Control Panel' { 'Opens the classic Windows Control Panel, where traditional system settings and applets can be managed.'; break }
+        'Registry Editor' { 'Opens Registry Editor for advanced Windows configuration. Editing registry values can affect system stability; review changes carefully.'; break }
+        'Device Manager' { 'Opens Device Manager to inspect hardware devices, check driver status, and manage device properties.'; break }
+        'System Information' { 'Displays a detailed summary of Windows, hardware resources, components, and software environment.'; break }
+        'Task Manager' { 'Opens Task Manager to review running apps, processes, performance, startup apps, and resource usage.'; break }
+        'Services' { 'Opens the Windows Services console to inspect service status and startup configuration. Changing services can affect Windows and installed apps.'; break }
+        'Event Viewer' { 'Opens Event Viewer to inspect Windows application, security, setup, and system event logs.'; break }
+        'Resource Monitor' { 'Displays live CPU, memory, disk, and network resource activity for troubleshooting performance.'; break }
+        'Performance Monitor' { 'Opens Performance Monitor for Windows performance counters, monitoring, and diagnostic reports.'; break }
+        'Disk Management' { 'Opens Disk Management to view disks, partitions, and volumes. Disk formatting or partition changes can cause data loss.'; break }
+        'Computer Management' { 'Opens the combined Computer Management console for system tools such as disks, shared folders, devices, and services.'; break }
+        'Task Scheduler' { 'Opens Task Scheduler to review and manage scheduled tasks and automated Windows jobs.'; break }
+        'Firewall' { 'Opens the advanced Windows Defender Firewall console to inspect firewall rules and network profiles.'; break }
+        'Network Connections' { 'Opens the network adapter connections panel to inspect adapter status and configure connection properties.'; break }
+        'System Properties' { 'Opens classic System Properties for computer name, hardware, performance, remote access, and system protection settings.'; break }
+        'Programs and Features' { 'Opens the classic installed-programs panel to view, change, or uninstall desktop applications.'; break }
+        'Windows Features' { 'Opens the Windows Features dialog to review optional Windows components. Enabling or disabling features may require a restart.'; break }
+        'Power Options' { 'Opens Power Options to review and configure Windows power plans and related sleep settings.'; break }
+        'Sound' { 'Opens Windows sound settings to review output, input, volume, and audio device options.'; break }
+        'Memory Diagnostic' { 'Opens Windows Memory Diagnostic, which can test system RAM after a restart. Save your work before scheduling the test.'; break }
+        'Certificate Manager' { 'Opens the certificate management console to inspect certificates stored for the current user.'; break }
+        'Credential Manager' { 'Opens Credential Manager to view and manage saved Windows and web credentials.'; break }
+        'Group Policy' { 'Opens Local Group Policy Editor, where supported Windows editions expose advanced policy settings.'; break }
+        'Local Users' { 'Opens Local Users and Groups management for local accounts and groups, where supported by the Windows edition.'; break }
+        'TPM' { 'Opens Trusted Platform Module management to inspect TPM availability and status. It does not clear or reset the TPM.'; break }
+        'System Configuration' { 'Opens System Configuration (msconfig) to inspect startup, boot, and service troubleshooting options.'; break }
+        'About Windows' { 'Displays Windows version and build information.'; break }
+        'Advanced Startup' { 'Opens Windows recovery startup options. Some choices restart the PC into the recovery environment.'; break }
+        'Recovery' { 'Opens Windows Recovery settings to review available reset and recovery options.'; break }
+        'Windows Update' { 'Opens Windows Update settings to check update status and manage available update options.'; break }
+        'Storage Settings' { 'Opens Storage settings to review disk usage, temporary files, and storage management options.'; break }
+        'Installed Apps' { 'Opens the installed applications settings page to review, modify, or uninstall applications.'; break }
+        'Privacy' { 'Opens Windows Privacy settings to review app permissions and privacy-related controls.'; break }
+        'Proxy' { 'Opens Proxy settings to inspect automatic and manual proxy configuration for network connections.'; break }
+        'Bluetooth' { 'Opens Bluetooth settings to manage Bluetooth availability and paired devices.'; break }
+        'Display' { 'Opens Display settings to configure monitors, resolution, scaling, and related display options.'; break }
+        'Mouse' { 'Opens mouse properties and settings for pointer behavior, buttons, and scrolling.'; break }
+        'Keyboard' { 'Opens keyboard properties and related keyboard configuration.'; break }
+        'Printers' { 'Opens Printers & scanners to review installed printers and add or manage printing devices.'; break }
+        'Date & Time' { 'Opens date and time configuration for clock, time zone, and synchronization settings.'; break }
+        'Region' { 'Opens regional settings for country/region, formats, and locale-related options.'; break }
+        'Environment Variables' { 'Opens the Environment Variables editor. Changing system variables can affect applications and command-line tools.'; break }
+        'Windows Security' { 'Opens the Windows Security application to review antivirus, firewall, account, and device protection status.'; break }
+        'Reliability Monitor' { 'Opens Reliability Monitor to review application failures, Windows errors, and system stability history.'; break }
+        'Steps Recorder' { 'Opens Steps Recorder when available, allowing a sequence of user actions to be captured for troubleshooting.'; break }
+        'Disk Cleanup' { 'Opens the Windows Disk Cleanup utility to review removable temporary and system files before cleanup.'; break }
+        'Network Status' { 'Opens Network Status settings to inspect connectivity and access available network troubleshooting options.'; break }
+        'Indexing Options' { 'Opens Windows Search Indexing Options to review indexed locations and search indexing behavior.'; break }
+        '^Fonts$' { 'Opens the Windows Fonts manager to view and manage installed fonts.'; break }
+        'Color Management' { 'Opens Color Management to review display and printer color profiles.'; break }
+        default { ('Opens {0} in Windows. This shortcut launches the related built-in management or settings tool; it does not apply a change by itself.' -f $utilityName); break }
+    }
+
+    [void]$utilityPanel.Children.Remove($utilityButton)
+    $card = New-Object System.Windows.Controls.Border
+    $card.Width = [double]::NaN; $card.MinHeight = 42; $card.Padding = '4'; $card.Margin = '0,0,7,7'
+    $card.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#202A35')
+    $card.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#344455')
+    $card.BorderThickness = '1'; $card.CornerRadius = '7'
+    $cardGrid = New-Object System.Windows.Controls.Grid
+    $cardColA = New-Object System.Windows.Controls.ColumnDefinition; $cardColA.Width = [System.Windows.GridLength]::new(1,[System.Windows.GridUnitType]::Star)
+    $cardColB = New-Object System.Windows.Controls.ColumnDefinition; $cardColB.Width = [System.Windows.GridLength]::new(28)
+    [void]$cardGrid.ColumnDefinitions.Add($cardColA); [void]$cardGrid.ColumnDefinitions.Add($cardColB)
+
+    $utilityButton.Content = ('🛠  ' + $utilityName)
+    $utilityButton.Width = [double]::NaN; $utilityButton.Height = 32; $utilityButton.MinHeight = 32
+    $utilityButton.Margin = '0'; $utilityButton.Padding = '7,5'; $utilityButton.FontSize = 11; $utilityButton.FontWeight = 'SemiBold'
+    $utilityButton.HorizontalAlignment = 'Stretch'; $utilityButton.HorizontalContentAlignment = 'Left'; $utilityButton.VerticalContentAlignment = 'Center'
+    $utilityButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#263646')
+    $utilityButton.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#E7EDF3')
+    $utilityButton.BorderThickness = '0'; $utilityButton.ToolTip = $null
+    [System.Windows.Controls.Grid]::SetColumn($utilityButton,0); [void]$cardGrid.Children.Add($utilityButton)
+
+    $infoButton = New-Object System.Windows.Controls.Button
+    $infoButton.Content = 'i'; $infoButton.Width = 23; $infoButton.Height = 23; $infoButton.Padding = '0'
+    $infoButton.FontSize = 12; $infoButton.FontWeight = 'Bold'; $infoButton.BorderThickness = '0'
+    $infoButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62')
+    $infoButton.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#17212B')
+    $infoButton.ToolTip = $null; $infoButton.HorizontalAlignment = 'Center'; $infoButton.VerticalAlignment = 'Center'
+    $infoButton.Tag = $utilityDescription
+    $infoButton.Add_Click({ Show-AMRMessage ([string]$this.Tag) 'Utility Information' OK Information | Out-Null }.GetNewClosure())
+    [System.Windows.Controls.Grid]::SetColumn($infoButton,1); [void]$cardGrid.Children.Add($infoButton)
+    $card.Child = $cardGrid
+    [void]$utilityPanel.Children.Add($card)
+    $script:UtilityCardEntries += [pscustomobject]@{ Button=$utilityButton; Card=$card; Category=$utilityCategory; Name=$utilityName }
+}
 function Update-AMRUtilitiesView {
     $query = [string](C 'UtilSearchBox').Text
     $selected = (C 'UtilCategoryFilter').SelectedItem
     $category = if ($selected -and $selected.Content) { [string]$selected.Content } else { 'All Categories' }
     $visible = 0
-    foreach ($button in $script:UtilityButtons) {
-        $name = [string]$button.Content
-        $tag = [string]$button.Tag
-        if ([string]::IsNullOrWhiteSpace($tag)) {
-            if ($name -match 'Device|Sound|Memory Diagnostic|TPM|Bluetooth|Display|Mouse|Keyboard|Printers|Color Management') { $tag = 'Hardware & Devices' }
-            elseif ($name -match 'Firewall|Network|Credential|Certificate|Privacy|Proxy|Security|TPM') { $tag = 'Network & Security' }
-            elseif ($name -match 'Task Manager|Services|Event Viewer|Performance|System|Control Panel|Registry|Programs|Features|Power|Windows Update|Storage|Indexing') { $tag = 'System & Performance' }
-            else { $tag = 'Administration' }
-        }
-        $categoryMatch = ($category -eq 'All Categories' -or $tag -eq $category)
-        $searchMatch = ([string]::IsNullOrWhiteSpace($query) -or $name.IndexOf($query,[System.StringComparison]::OrdinalIgnoreCase) -ge 0)
-        $button.Visibility = if ($categoryMatch -and $searchMatch) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
-        if ($button.Visibility -eq [System.Windows.Visibility]::Visible) { $visible++ }
+    foreach ($entry in $script:UtilityCardEntries) {
+        $categoryMatch = ($category -eq 'All Categories' -or $entry.Category -eq $category)
+        $searchMatch = ([string]::IsNullOrWhiteSpace($query) -or $entry.Name.IndexOf($query,[System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+        $entry.Card.Visibility = if ($categoryMatch -and $searchMatch) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
+        if ($entry.Card.Visibility -eq [System.Windows.Visibility]::Visible) { $visible++ }
     }
     (C 'UtilResultsCount').Text = ('{0} utilities shown' -f $visible)
 }
@@ -16618,12 +19250,27 @@ function Start-AMRBackgroundIconRefresh {
     }
 }
 
-$script:Window.Add_Loaded({ Start-AMRBackgroundIconRefresh })
+$script:Window.Add_Loaded({
+    # Hydrate the last completed snapshot first so installed dots and Show Installed
+    # are immediately available; then refresh the snapshot without blocking WPF.
+    $cacheReady = Import-AMRInstalledInventoryCache
+    if ($cacheReady) {
+        try {
+            if ($script:AppsView) {
+                $script:AppsView.Refresh()
+                Reset-AMRSoftwareGridPages -View $script:AppsView
+            }
+        } catch {
+            Write-AMRLog "Could not apply cached installed indicators: $($_.Exception.Message)" WARNING Software
+        }
+    }
+    Start-AMRBackgroundIconRefresh
+    Start-AMRInstalledCatalogScan -Refresh
+})
 $script:Window.Add_ContentRendered({ Start-AMRBackgroundIconRefresh })
 
-# Warm the installed-app inventory before the user opens Show Installed.
-# This scan is asynchronous and never blocks the WPF startup thread.
-Start-AMRInstalledCatalogScan
+# Inventory is warmed in a dedicated background runspace at startup. The UI only
+# consumes the last cached snapshot and the completed refresh payload.
 [void]$script:Window.ShowDialog()
 
 
