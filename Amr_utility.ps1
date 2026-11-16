@@ -1530,7 +1530,7 @@ function Set-AMRRegistryKey {
     return [bool]($success -and $verified)
 }
 
-# --- 3. EXPANDED SOFTWARE CATALOG (1000 APPLICATIONS; 589 BASE + 411 VERIFIED WINGET ADDITIONS) ---
+# --- 3. EXPANDED SOFTWARE CATALOG (engineering catalog additions included) ---
 $RawApps = @(
     # 01. Web Browsers (16 Apps)
     [pscustomobject]@{ Name='Google Chrome'; Category='01. Web Browsers'; Id='Google.Chrome'; ChocoId='googlechrome'; DirectUrl='https://dl.google.com/chrome/install/standalonesetup64.exe'; DirectArgs='/silent /install'; Publisher='Google LLC' },
@@ -2542,6 +2542,39 @@ $RawApps = @(
     [pscustomobject]@{ Name='SolveSpace'; Category='33. CAD, BIM & Engineering'; Id='SolveSpace.SolveSpace'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='SolveSpace' }
     [pscustomobject]@{ Name='BRL-CAD'; Category='33. CAD, BIM & Engineering'; Id='BRL-CAD.BRL-CAD'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='BRL-CAD' }
     [pscustomobject]@{ Name='OpenModelica'; Category='33. CAD, BIM & Engineering'; Id='OpenModelica.OpenModelica'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='OpenModelica' }
+
+    # Additional CSI BIM / plant design companions.
+    [pscustomobject]@{ Name='CSiXRevit'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Computers and Structures, Inc.'; IconAliases=@('CSiXRevit'); BrowserUrl='https://account.csiamerica.com'; CatalogUrl='https://www.csiamerica.com/products'; GoogleUrl='https://www.google.com/search?q=CSiXRevit+CSI+official+download' }
+    [pscustomobject]@{ Name='CSiXCAD'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Computers and Structures, Inc.'; IconAliases=@('CSiXCAD'); BrowserUrl='https://account.csiamerica.com'; CatalogUrl='https://www.csiamerica.com/products'; GoogleUrl='https://www.google.com/search?q=CSiXCAD+CSI+official+download' }
+    [pscustomobject]@{ Name='CSiPlant'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Computers and Structures, Inc.'; IconAliases=@('CSiPlant'); BrowserUrl='https://account.csiamerica.com'; CatalogUrl='https://www.csiamerica.com/products'; GoogleUrl='https://www.google.com/search?q=CSiPlant+CSI+official+download' }
+
+    # --- Engineering catalog additions (official vendor portal for account-gated products) ---
+    [pscustomobject]@{ Name='AutoCAD'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Autodesk'; IconAliases=@('autocad'); BrowserUrl='https://manage.autodesk.com/products'; CatalogUrl='https://www.autodesk.com/products'; GoogleUrl='https://www.google.com/search?q=AutoCAD+official+download' }
+    [pscustomobject]@{ Name='AutoCAD Civil 3D'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Autodesk'; IconAliases=@('autocad-civil-3d'); BrowserUrl='https://manage.autodesk.com/products'; CatalogUrl='https://www.autodesk.com/products'; GoogleUrl='https://www.google.com/search?q=AutoCAD+Civil+3D+official+download' }
+    [pscustomobject]@{ Name='Autodesk Revit'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Autodesk'; IconAliases=@('autodesk-revit'); BrowserUrl='https://manage.autodesk.com/products'; CatalogUrl='https://www.autodesk.com/products'; GoogleUrl='https://www.google.com/search?q=Autodesk+Revit+official+download' }
+    [pscustomobject]@{ Name='Autodesk Navisworks'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Autodesk'; IconAliases=@('autodesk-navisworks'); BrowserUrl='https://manage.autodesk.com/products'; CatalogUrl='https://www.autodesk.com/products'; GoogleUrl='https://www.google.com/search?q=Autodesk+Navisworks+official+download' }
+    [pscustomobject]@{ Name='Robot Structural Analysis Professional'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Autodesk'; IconAliases=@('robot-structural-analysis-professional'); BrowserUrl='https://manage.autodesk.com/products'; CatalogUrl='https://www.autodesk.com/products'; GoogleUrl='https://www.google.com/search?q=Robot+Structural+Analysis+Professional+official+download' }
+    [pscustomobject]@{ Name='InfraWorks'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Autodesk'; IconAliases=@('infraworks'); BrowserUrl='https://manage.autodesk.com/products'; CatalogUrl='https://www.autodesk.com/products'; GoogleUrl='https://www.google.com/search?q=InfraWorks+official+download' }
+    [pscustomobject]@{ Name='Autodesk Docs'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Autodesk'; IconAliases=@('autodesk-docs'); BrowserUrl='https://manage.autodesk.com/products'; CatalogUrl='https://www.autodesk.com/products'; GoogleUrl='https://www.google.com/search?q=Autodesk+Docs+official+download' }
+    [pscustomobject]@{ Name='BIM Collaborate Pro'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Autodesk'; IconAliases=@('bim-collaborate-pro'); BrowserUrl='https://manage.autodesk.com/products'; CatalogUrl='https://www.autodesk.com/products'; GoogleUrl='https://www.google.com/search?q=BIM+Collaborate+Pro+official+download' }
+    [pscustomobject]@{ Name='Autodesk Inventor'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Autodesk'; IconAliases=@('autodesk-inventor'); BrowserUrl='https://manage.autodesk.com/products'; CatalogUrl='https://www.autodesk.com/products'; GoogleUrl='https://www.google.com/search?q=Autodesk+Inventor+official+download' }
+    [pscustomobject]@{ Name='Fusion 360'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Autodesk'; IconAliases=@('fusion-360'); BrowserUrl='https://manage.autodesk.com/products'; CatalogUrl='https://www.autodesk.com/products'; GoogleUrl='https://www.google.com/search?q=Fusion+360+official+download' }
+    [pscustomobject]@{ Name='AutoCAD Mechanical'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Autodesk'; IconAliases=@('autocad-mechanical'); BrowserUrl='https://manage.autodesk.com/products'; CatalogUrl='https://www.autodesk.com/products'; GoogleUrl='https://www.google.com/search?q=AutoCAD+Mechanical+official+download' }
+    [pscustomobject]@{ Name='PowerMill'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Autodesk'; IconAliases=@('powermill'); BrowserUrl='https://manage.autodesk.com/products'; CatalogUrl='https://www.autodesk.com/products'; GoogleUrl='https://www.google.com/search?q=PowerMill+official+download' }
+    [pscustomobject]@{ Name='Autodesk Vault'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Autodesk'; IconAliases=@('autodesk-vault'); BrowserUrl='https://manage.autodesk.com/products'; CatalogUrl='https://www.autodesk.com/products'; GoogleUrl='https://www.google.com/search?q=Autodesk+Vault+official+download' }
+    [pscustomobject]@{ Name='Autodesk 3ds Max'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Autodesk'; IconAliases=@('autodesk-3ds-max'); BrowserUrl='https://manage.autodesk.com/products'; CatalogUrl='https://www.autodesk.com/products'; GoogleUrl='https://www.google.com/search?q=Autodesk+3ds+Max+official+download' }
+    [pscustomobject]@{ Name='AutoCAD Architecture'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Autodesk'; IconAliases=@('autocad-architecture'); BrowserUrl='https://manage.autodesk.com/products'; CatalogUrl='https://www.autodesk.com/products'; GoogleUrl='https://www.google.com/search?q=AutoCAD+Architecture+official+download' }
+    [pscustomobject]@{ Name='Maya'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Autodesk'; IconAliases=@('maya'); BrowserUrl='https://manage.autodesk.com/products'; CatalogUrl='https://www.autodesk.com/products'; GoogleUrl='https://www.google.com/search?q=Maya+official+download' }
+    [pscustomobject]@{ Name='MotionBuilder'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Autodesk'; IconAliases=@('motionbuilder'); BrowserUrl='https://manage.autodesk.com/products'; CatalogUrl='https://www.autodesk.com/products'; GoogleUrl='https://www.google.com/search?q=MotionBuilder+official+download' }
+    [pscustomobject]@{ Name='Mudbox'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Autodesk'; IconAliases=@('mudbox'); BrowserUrl='https://manage.autodesk.com/products'; CatalogUrl='https://www.autodesk.com/products'; GoogleUrl='https://www.google.com/search?q=Mudbox+official+download' }
+    [pscustomobject]@{ Name='AutoCAD Map 3D'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Autodesk'; IconAliases=@('autocad-map-3d'); BrowserUrl='https://manage.autodesk.com/products'; CatalogUrl='https://www.autodesk.com/products'; GoogleUrl='https://www.google.com/search?q=AutoCAD+Map+3D+official+download' }
+    [pscustomobject]@{ Name='ETABS'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Computers and Structures, Inc.'; IconAliases=@('etabs'); BrowserUrl='https://account.csiamerica.com'; CatalogUrl='https://www.csiamerica.com/products'; GoogleUrl='https://www.google.com/search?q=ETABS+CSI+official+download' }
+    [pscustomobject]@{ Name='SAP2000'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Computers and Structures, Inc.'; IconAliases=@('sap2000'); BrowserUrl='https://account.csiamerica.com'; CatalogUrl='https://www.csiamerica.com/products'; GoogleUrl='https://www.google.com/search?q=SAP2000+CSI+official+download' }
+    [pscustomobject]@{ Name='CSI SAFE'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Computers and Structures, Inc.'; IconAliases=@('csi-safe'); BrowserUrl='https://account.csiamerica.com'; CatalogUrl='https://www.csiamerica.com/products'; GoogleUrl='https://www.google.com/search?q=CSI+SAFE+CSI+official+download' }
+    [pscustomobject]@{ Name='CSiBridge'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Computers and Structures, Inc.'; IconAliases=@('csibridge'); BrowserUrl='https://account.csiamerica.com'; CatalogUrl='https://www.csiamerica.com/products'; GoogleUrl='https://www.google.com/search?q=CSiBridge+CSI+official+download' }
+    [pscustomobject]@{ Name='Perform-3D'; Category='33. CAD, BIM & Engineering'; Id=''; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='Computers and Structures, Inc.'; IconAliases=@('perform-3d'); BrowserUrl='https://account.csiamerica.com'; CatalogUrl='https://www.csiamerica.com/products'; GoogleUrl='https://www.google.com/search?q=Perform-3D+CSI+official+download' }
+    [pscustomobject]@{ Name='FreeCAD'; Category='33. CAD, BIM & Engineering'; Id='FreeCAD.FreeCAD'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='FreeCAD Team' }
+    [pscustomobject]@{ Name='LibreCAD'; Category='33. CAD, BIM & Engineering'; Id='LibreCAD.LibreCAD'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='LibreCAD' }
     [pscustomobject]@{ Name='PaintTool SAI'; Category='21. Design & Graphics'; Id='SYSTEMAX.PaintToolSAI'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='SYSTEMAX' }
     [pscustomobject]@{ Name='MediBang Paint'; Category='21. Design & Graphics'; Id='MediBang.MediBangPaint'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='MediBang' }
     [pscustomobject]@{ Name='FireAlpaca'; Category='21. Design & Graphics'; Id='FireAlpaca.FireAlpaca'; ChocoId=''; DirectUrl=''; DirectArgs=''; Publisher='FireAlpaca' }
@@ -2701,6 +2734,9 @@ $RawApps | ForEach-Object {
         DirectUrl     = $_.DirectUrl
         DirectArgs    = $_.DirectArgs
         Publisher     = $_.Publisher
+        BrowserUrl    = if ($_.PSObject.Properties['BrowserUrl']) { [string]$_.PSObject.Properties['BrowserUrl'].Value } else { '' }
+        CatalogUrl    = if ($_.PSObject.Properties['CatalogUrl']) { [string]$_.PSObject.Properties['CatalogUrl'].Value } else { '' }
+        GoogleUrl     = if ($_.PSObject.Properties['GoogleUrl']) { [string]$_.PSObject.Properties['GoogleUrl'].Value } else { '' }
         # These fields are optional catalog metadata. Access them through
         # PSObject.Properties so StrictMode does not throw for legacy entries.
         Sha256        = if ($_.PSObject.Properties['Sha256']) { [string]$_.PSObject.Properties['Sha256'].Value } else { '' }
@@ -13812,6 +13848,7 @@ $failedCount  = 0
 $skippedCount = 0
 $rebootNeeded = $false
 $results = New-Object System.Collections.Generic.List[object]
+$openedVendorPortals = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
 
 $totalApps = $Apps.Count
 $appIndex = 0
@@ -13849,6 +13886,47 @@ foreach ($app in $Apps) {
         Write-WorkerLog "[$name] already detected in system registry; skipped." "SUCCESS" -Percent ($appBasePercent + $appStepWeight)
         $skippedCount++
         [void]$results.Add([pscustomobject]@{ Name=$name; Status="Skipped"; ExitCode=0 })
+        continue
+    }
+
+    # Account-gated commercial products are handed off to the vendor portal, including upgrade/repair requests.
+    # This is never reported as an installed app; the main AMR window stays alive.
+    if (-not [string]::IsNullOrWhiteSpace([string]$app.BrowserUrl)) {
+        $opened = $false
+        if ($openedVendorPortals.Contains([string]$app.BrowserUrl)) {
+            $opened = $true
+            Write-WorkerLog "[$name] vendor portal was already opened for another selected product; avoiding a duplicate browser window." 'INFO' -Percent ($appBasePercent + $appStepWeight)
+        }
+        $browserTargets = @([string]$app.BrowserUrl,[string]$app.CatalogUrl,[string]$app.GoogleUrl) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+        foreach ($targetUrl in $browserTargets) {
+            if ($opened) { break }
+            try {
+                $edgePath = $null
+                $edgeCommand = Get-Command msedge.exe -ErrorAction SilentlyContinue
+                if ($edgeCommand) { $edgePath = [string]$edgeCommand.Source }
+                if ([string]::IsNullOrWhiteSpace($edgePath)) {
+                    $edgeCandidates = @(
+                        (Join-Path $env:ProgramFiles 'Microsoft/Edge/Application/msedge.exe'),
+                        (Join-Path ${env:ProgramFiles(x86)} 'Microsoft/Edge/Application/msedge.exe'),
+                        (Join-Path $env:LOCALAPPDATA 'Microsoft/Edge/Application/msedge.exe')
+                    )
+                    $edgePath = @($edgeCandidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -First 1)[0]
+                }
+                if (-not [string]::IsNullOrWhiteSpace([string]$edgePath)) { Start-Process -FilePath $edgePath -ArgumentList @('--new-window',$targetUrl) -ErrorAction Stop | Out-Null }
+                else { Start-Process -FilePath $targetUrl -ErrorAction Stop | Out-Null }
+                $opened = $true
+                [void]$openedVendorPortals.Add([string]$app.BrowserUrl)
+                Write-WorkerLog "[$name] opened vendor download page in the browser: $targetUrl" 'SUCCESS' -Percent ($appBasePercent + $appStepWeight)
+                break
+            } catch { Write-WorkerLog "[$name] could not open fallback URL '$targetUrl': $($_.Exception.Message)" 'WARNING' -Percent $appBasePercent }
+        }
+        if ($opened) {
+            $skippedCount++
+            [void]$results.Add([pscustomobject]@{ Name=$name; Status='ExternalDownloadOpened'; ExitCode=0 })
+        } else {
+            $failedCount++
+            [void]$results.Add([pscustomobject]@{ Name=$name; Status='BrowserOpenFailed'; ExitCode=-1 })
+        }
         continue
     }
 
@@ -14191,6 +14269,9 @@ function Execute-SmartMultiTierInstallAsync {
                 DirectUrl  = [string]$_.DirectUrl
                 DirectArgs = [string]$_.DirectArgs
                 Publisher  = [string]$_.Publisher
+                BrowserUrl = [string]$_.BrowserUrl
+                CatalogUrl = [string]$_.CatalogUrl
+                GoogleUrl  = [string]$_.GoogleUrl
                 Sha256     = [string]$_.Sha256
                 InstallerType = [string]$_.InstallerType
                 InteractiveArgs = [string]$_.InteractiveArgs
