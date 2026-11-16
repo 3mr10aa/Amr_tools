@@ -1,5 +1,5 @@
 <#
-Amr | AMR Windows Utility - Cleanup Workspace & Background Scan Stability
+Amr | AMR Windows Utility - Cleanup Workspace & Isolated Root Scanner V16
 Windows 10/11 | Windows PowerShell 5.1 | WPF | Administrator
 Developer: عمرو أحمد عبد الفتاح | Phone: 01014716301 | Email: 3mr10aa@gmail.com
 #>
@@ -94,89 +94,10 @@ public static class AMRLogDiskWriter {
 '@
 }
 
-# Filesystem inspection is isolated from the Cleanup runspace. The timeout covers
-# enumeration AND per-entry metadata calls (attributes, timestamps and lengths),
-# not just Directory.GetFileSystemEntries(). A timed-out native call cannot be
-# forcefully aborted by .NET, so the helper bounds abandoned inspection threads.
-if (-not ('AMRCleanupDirectoryEnumeratorV10' -as [type])) {
-    Add-Type -Language CSharp -TypeDefinition @'
-using System;
-using System.IO;
-using System.Collections.Generic;
-using System.Threading;
-using System.Threading.Tasks;
-public sealed class AMRCleanupEntryInfoV10 {
-    public string Path;
-    public bool IsDirectory;
-    public bool IsReparsePoint;
-    public bool IsEligible;
-    public long Length;
-    public string ErrorMessage;
-}
-public static class AMRCleanupDirectoryEnumeratorV10 {
-    private static int ActiveInspections = 0;
-    private const int MaxAbandonedOrActiveInspections = 2;
-    public static bool TryInspectDirectory(string path, int timeoutMs, DateTime ageCutoff, out AMRCleanupEntryInfoV10[] entries, out string error) {
-        entries = null; error = null;
-        int active = Interlocked.Increment(ref ActiveInspections);
-        if (active > MaxAbandonedOrActiveInspections) {
-            Interlocked.Decrement(ref ActiveInspections);
-            error = "Filesystem inspection concurrency limit reached because earlier native filesystem calls have not returned.";
-            return false;
-        }
-        Task<AMRCleanupEntryInfoV10[]> task = null;
-        bool scheduled = false;
-        try {
-            task = Task.Factory.StartNew<AMRCleanupEntryInfoV10[]>(delegate {
-                try {
-                    string[] paths = Directory.GetFileSystemEntries(path);
-                    List<AMRCleanupEntryInfoV10> result = new List<AMRCleanupEntryInfoV10>(paths.Length);
-                    foreach (string entryPath in paths) {
-                        AMRCleanupEntryInfoV10 item = new AMRCleanupEntryInfoV10();
-                        item.Path = entryPath;
-                        try {
-                            FileAttributes attributes = File.GetAttributes(entryPath);
-                            item.IsDirectory = (attributes & FileAttributes.Directory) != 0;
-                            item.IsReparsePoint = (attributes & FileAttributes.ReparsePoint) != 0;
-                            item.IsEligible = true;
-                            if (!item.IsDirectory && !item.IsReparsePoint) {
-                                FileInfo info = new FileInfo(entryPath);
-                                DateTime modified = info.LastWriteTime;
-                                item.Length = info.Length;
-                                if (ageCutoff != DateTime.MinValue && modified >= ageCutoff) item.IsEligible = false;
-                            }
-                        } catch (Exception entryError) {
-                            item.ErrorMessage = entryError.GetType().FullName + ": " + entryError.Message;
-                        }
-                        result.Add(item);
-                    }
-                    return result.ToArray();
-                } finally {
-                    Interlocked.Decrement(ref ActiveInspections);
-                }
-            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
-            scheduled = true;
-            int waitMs = Math.Max(1000, timeoutMs);
-            if (!task.Wait(waitMs)) {
-                error = "Filesystem inspection timed out after " + waitMs + " ms. The folder was skipped and the remaining categories will continue.";
-                return false;
-            }
-            entries = task.Result ?? new AMRCleanupEntryInfoV10[0];
-            return true;
-        } catch (AggregateException ex) {
-            if (!scheduled) Interlocked.Decrement(ref ActiveInspections);
-            Exception cause = ex.Flatten().InnerExceptions.Count > 0 ? ex.Flatten().InnerExceptions[0] : ex;
-            error = cause.GetType().FullName + ": " + cause.Message;
-            return false;
-        } catch (Exception ex) {
-            if (!scheduled) Interlocked.Decrement(ref ActiveInspections);
-            error = ex.GetType().FullName + ": " + ex.Message;
-            return false;
-        }
-    }
-}
-'@
-}
+# Cleanup uses the original simple in-process scan/review/confirm workflow.
+
+# Legacy simple Cleanup Engine has no background worker to retain between views.
+$script:AMRCleanupScanState = [pscustomobject]@{ Current = $null }
 
 # --- 2. Environment & Folders Setup ---
 $script:AppRoot     = Join-Path $env:ProgramData 'AMR-Utility'
@@ -4596,33 +4517,33 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
    </TabItem>
  <TabItem Header="Cleanup">
      <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-      <DockPanel Grid.Row="0" Margin="0" LastChildFill="False">
-       
+      <DockPanel Grid.Row="0" Margin="0,0,0,8" LastChildFill="False">
        <TextBox Name="CleanupSearchBox" Visibility="Collapsed" Width="300" Height="34" Padding="10,4" VerticalContentAlignment="Center"
                 Background="#101F35" Foreground="#EAF4FF" BorderBrush="#2874C7"
                 ToolTip="Search cleanup options on this page"/>
       </DockPanel>
       <TabControl Grid.Row="1" Name="CleanupSubTabs" Tag="CLEAN UP CENTER" Style="{StaticResource OverviewSubTabControlStyle}" TabStripPlacement="Right" ItemContainerStyle="{StaticResource OverviewSubTabItemStyle}" Background="#18181B" BorderThickness="0" Margin="0,0,0,0">
       <TabItem Header="Smart" IsSelected="True">
-       <Grid Margin="18">
-        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-        <StackPanel Grid.Row="0" Margin="2,0,2,9">
-         <TextBlock Text="CLEAN UP CENTER" FontSize="21" FontWeight="Bold" Foreground="#F4F4F5"/>
+       <Grid Margin="18,6,18,18">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <StackPanel Grid.Row="0" Margin="2,0,2,5">
+         <TextBlock Text="SMART CLEAN UP CENTER" FontSize="21" FontWeight="Bold" Foreground="#F4F4F5"/>
+         <TextBlock Text="Review temporary files and safe-to-remove cache items to free up storage space." FontSize="11" Foreground="#A1A1AA" Margin="0,3,0,0"/>
         </StackPanel>
-        <Border Grid.Row="1" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="12" Padding="14">
+        <Button Name="CleanupScanBtn" Grid.Row="1" Content="⌕  Scan Now" Width="112" Height="34" Margin="0,0,2,7" HorizontalAlignment="Right"
+                Background="#263B36" Foreground="#A7F3D0" BorderBrush="#36594D" FontWeight="SemiBold"/>
+        <Border Grid.Row="2" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="12" Padding="14">
          <Grid>
           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
           <Grid Grid.Row="0" Margin="0,0,0,10">
-           <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
            <StackPanel>
             <TextBlock Text="SAFE CLEANUP" FontSize="14" FontWeight="SemiBold" Foreground="#E4E4E7"/>
-            <TextBlock Name="CleanupScanSummary" Text="No scan performed yet." Foreground="#D1D5DB" FontSize="11" Margin="0,3,0,0" TextWrapping="Wrap"/>
+            <TextBlock Name="CleanupScanSummary" Visibility="Collapsed" Text=""/>
            </StackPanel>
-           <Button Name="CleanupScanBtn" Grid.Column="1" Content="Scan Now" Width="105" Height="32" Background="#263B36" Foreground="#A7F3D0" BorderBrush="#36594D"/>
           </Grid>
           <Grid Grid.Row="1" Margin="0,0,0,8">
            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-           <TextBlock Grid.Column="0" Text="Select the categories you want to review" FontSize="12" Foreground="#CBD5E1" VerticalAlignment="Center"/>
+           <TextBlock Grid.Column="0" Text="Choose items to clean" FontSize="12" Foreground="#CBD5E1" VerticalAlignment="Center"/>
            <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
             <Button Name="CleanupSelectAllBtn" Content="Select All" Height="28" MinWidth="88" Margin="0,0,6,0" Padding="10,3" Background="#244B3B" Foreground="#D1FAE5" BorderBrush="#3F8B68" FontSize="10" FontWeight="SemiBold"/>
             <Button Name="CleanupCancelSelectionBtn" Content="Cancel Selection" Height="28" MinWidth="112" Padding="10,3" Background="#49313A" Foreground="#FFE4E6" BorderBrush="#8B5363" FontSize="10" FontWeight="SemiBold"/>
@@ -4641,7 +4562,7 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
           </ScrollViewer>
           <StackPanel Grid.Row="3" Margin="0,10,0,8">
            <ProgressBar Name="CleanupProgress" Height="7" Minimum="0" Maximum="100" Value="0" Background="#292933" Foreground="#6FC6A5"/>
-           <Grid Margin="0,5,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Name="CleanupProgressText" Text="Ready" Foreground="#CBD5E1" FontSize="11" TextTrimming="CharacterEllipsis"/><TextBlock Name="CleanupProgressPercent" Grid.Column="1" Text="0%" Foreground="#8BDCC5" FontSize="12" FontWeight="Bold" Margin="10,0,0,0"/><TextBlock Name="CleanupSelectedSummary" Visibility="Collapsed" Text="Selected: 0 files • 0 MB"/></Grid>
+           <Grid Margin="0,5,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Name="CleanupProgressText" Text="Ready" Foreground="#CBD5E1" FontSize="11" TextTrimming="CharacterEllipsis"/><TextBlock Name="CleanupProgressPercent" Grid.Column="1" Text="" Visibility="Collapsed" Foreground="#8BDCC5" FontSize="12" FontWeight="Bold" Margin="10,0,0,0"/><TextBlock Name="CleanupSelectedSummary" Visibility="Collapsed" Text="Selected: 0 files • 0 MB"/></Grid>
           </StackPanel>
           <Button Name="CleanupRunBtn" Grid.Row="4" Content="Clean Selected" Height="36" HorizontalAlignment="Stretch" Background="#28483E" Foreground="#C7F9E8" BorderBrush="#416B5D" IsEnabled="False"/>
          </Grid>
@@ -4993,25 +4914,46 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
       
       <TabControl Grid.Row="1" Background="#18181B">
        <TabItem Header="🌐 All Logs">
-        <TextBox Name="LogConsoleAll" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#09090B" Foreground="#10B981" FontFamily="Consolas" FontSize="13" Padding="15" AcceptsReturn="True"/>
+        <Grid Background="#09090B">
+         <TextBox Name="LogConsoleAll" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#09090B" Foreground="#10B981" FontFamily="Consolas" FontSize="13" Padding="15,44,15,15" AcceptsReturn="True"/>
+         <Button Name="LogCopyAllBtn" Content="▢  Copy" Width="82" Height="28" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8,8,0,0" Padding="8,3" Background="#202B3A" Foreground="#DCE8F5" BorderBrush="#52657B" BorderThickness="1" Opacity="0.90" FontSize="10" FontWeight="SemiBold" Cursor="Hand"/>
+        </Grid>
        </TabItem>
        <TabItem Header="⚙️ System &amp; Utility">
-        <TextBox Name="LogConsoleSystem" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#09090B" Foreground="#3B82F6" FontFamily="Consolas" FontSize="13" Padding="15" AcceptsReturn="True"/>
+        <Grid Background="#09090B">
+         <TextBox Name="LogConsoleSystem" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#09090B" Foreground="#3B82F6" FontFamily="Consolas" FontSize="13" Padding="15,44,15,15" AcceptsReturn="True"/>
+         <Button Name="LogCopySystemBtn" Content="▢  Copy" Width="82" Height="28" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8,8,0,0" Padding="8,3" Background="#202B3A" Foreground="#DCE8F5" BorderBrush="#52657B" BorderThickness="1" Opacity="0.90" FontSize="10" FontWeight="SemiBold" Cursor="Hand"/>
+        </Grid>
        </TabItem>
        <TabItem Header="📊 Overview">
-        <TextBox Name="LogConsoleOverview" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#09090B" Foreground="#F59E0B" FontFamily="Consolas" FontSize="13" Padding="15" AcceptsReturn="True"/>
+        <Grid Background="#09090B">
+         <TextBox Name="LogConsoleOverview" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#09090B" Foreground="#F59E0B" FontFamily="Consolas" FontSize="13" Padding="15,44,15,15" AcceptsReturn="True"/>
+         <Button Name="LogCopyOverviewBtn" Content="▢  Copy" Width="82" Height="28" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8,8,0,0" Padding="8,3" Background="#202B3A" Foreground="#DCE8F5" BorderBrush="#52657B" BorderThickness="1" Opacity="0.90" FontSize="10" FontWeight="SemiBold" Cursor="Hand"/>
+        </Grid>
        </TabItem>
        <TabItem Header="📦 Software Engine">
-        <TextBox Name="LogConsoleSoftware" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#09090B" Foreground="#EC4899" FontFamily="Consolas" FontSize="13" Padding="15" AcceptsReturn="True"/>
+        <Grid Background="#09090B">
+         <TextBox Name="LogConsoleSoftware" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#09090B" Foreground="#EC4899" FontFamily="Consolas" FontSize="13" Padding="15,44,15,15" AcceptsReturn="True"/>
+         <Button Name="LogCopySoftwareBtn" Content="▢  Copy" Width="82" Height="28" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8,8,0,0" Padding="8,3" Background="#202B3A" Foreground="#DCE8F5" BorderBrush="#52657B" BorderThickness="1" Opacity="0.90" FontSize="10" FontWeight="SemiBold" Cursor="Hand"/>
+        </Grid>
        </TabItem>
        <TabItem Header="⚡ Customize Engine">
-        <TextBox Name="LogConsoleCustomize" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#09090B" Foreground="#8B5CF6" FontFamily="Consolas" FontSize="13" Padding="15" AcceptsReturn="True"/>
+        <Grid Background="#09090B">
+         <TextBox Name="LogConsoleCustomize" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#09090B" Foreground="#8B5CF6" FontFamily="Consolas" FontSize="13" Padding="15,44,15,15" AcceptsReturn="True"/>
+         <Button Name="LogCopyCustomizeBtn" Content="▢  Copy" Width="82" Height="28" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8,8,0,0" Padding="8,3" Background="#202B3A" Foreground="#DCE8F5" BorderBrush="#52657B" BorderThickness="1" Opacity="0.90" FontSize="10" FontWeight="SemiBold" Cursor="Hand"/>
+        </Grid>
        </TabItem>
        <TabItem Header="🧪 Tweaks Audit">
-        <TextBox Name="LogConsoleTweaks" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#09090B" Foreground="#34D399" FontFamily="Consolas" FontSize="13" Padding="15" AcceptsReturn="True"/>
+        <Grid Background="#09090B">
+         <TextBox Name="LogConsoleTweaks" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#09090B" Foreground="#34D399" FontFamily="Consolas" FontSize="13" Padding="15,44,15,15" AcceptsReturn="True"/>
+         <Button Name="LogCopyTweaksBtn" Content="▢  Copy" Width="82" Height="28" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8,8,0,0" Padding="8,3" Background="#202B3A" Foreground="#DCE8F5" BorderBrush="#52657B" BorderThickness="1" Opacity="0.90" FontSize="10" FontWeight="SemiBold" Cursor="Hand"/>
+        </Grid>
        </TabItem>
        <TabItem Header="🧹 Cleanup Logs">
-        <TextBox Name="LogConsoleCleanup" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#09090B" Foreground="#22D3EE" FontFamily="Consolas" FontSize="13" Padding="15" AcceptsReturn="True"/>
+        <Grid Background="#09090B">
+         <TextBox Name="LogConsoleCleanup" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#09090B" Foreground="#22D3EE" FontFamily="Consolas" FontSize="13" Padding="15,44,15,15" AcceptsReturn="True"/>
+         <Button Name="LogCopyCleanupBtn" Content="▢  Copy" Width="82" Height="28" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8,8,0,0" Padding="8,3" Background="#202B3A" Foreground="#DCE8F5" BorderBrush="#52657B" BorderThickness="1" Opacity="0.90" FontSize="10" FontWeight="SemiBold" Cursor="Hand"/>
+        </Grid>
        </TabItem>
        <TabItem Header="🧩 Drivers">
         <Grid Background="#09090B" Margin="4">
@@ -5387,6 +5329,32 @@ $script:LogControls['Customize'] = C 'LogConsoleCustomize'
 $script:LogControls['Tweaks']    = C 'LogConsoleTweaks'
 $script:LogControls['Cleanup']   = C 'LogConsoleCleanup'
 $script:DriverLogConsole = C 'DriverLogConsole'
+
+# Copy buttons for the standard log consoles (Driver Center keeps its existing Copy Visible button).
+$logCopyTargets = @{
+    'LogCopyAllBtn'='All'; 'LogCopySystemBtn'='System'; 'LogCopyOverviewBtn'='Overview';
+    'LogCopySoftwareBtn'='Software'; 'LogCopyCustomizeBtn'='Customize';
+    'LogCopyTweaksBtn'='Tweaks'; 'LogCopyCleanupBtn'='Cleanup'
+}
+foreach ($buttonName in $logCopyTargets.Keys) {
+    $copyButton = C $buttonName
+    $targetKey = [string]$logCopyTargets[$buttonName]
+    if ($copyButton) {
+        $copyButton.Add_Click({
+            $target = $script:LogControls[$targetKey]
+            try {
+                if ($target -and -not [string]::IsNullOrEmpty([string]$target.Text)) {
+                    [System.Windows.Clipboard]::SetText([string]$target.Text)
+                    Write-AMRLog ("Copied the visible {0} log console." -f $targetKey) SUCCESS System
+                } else {
+                    Show-AMRMessage 'There is no log text to copy yet.' 'Copy Logs' OK Information | Out-Null
+                }
+            } catch {
+                Show-AMRMessage ('Could not copy log text: ' + $_.Exception.Message) 'Copy Logs' OK Warning | Out-Null
+            }
+        }.GetNewClosure())
+    }
+}
 
 # Hydrate the UI consoles with recent events written before the WPF log pump
 # was initialized. Startup events are already persisted to the daily log file;
@@ -16760,6 +16728,7 @@ foreach($item in $Selected){try{
 Set-AMROrphanQuarantineList
 
 # CLEANUP ENGINE - scan/review/confirm workflow (no deletion during scan)
+# V20: WER scans archived reports only; isolated roots have strict per-root limits and blocked roots are skipped safely.
 # Only known rebuildable cache folders are included. DriverStore, Windows\Installer,
 # AMD extraction roots (for example C:\AMD), user projects and browser profile data are excluded.
 $script:CleanupScanResults = @{}
@@ -16803,9 +16772,14 @@ function Get-AMRExistingCleanupRoots {
     param([string[]]$Roots)
     $existing = New-Object 'System.Collections.Generic.List[string]'
     foreach ($root in @($Roots)) {
-        if (Test-AMRCleanupDirectory -Path ([string]$root)) {
+        if ([string]::IsNullOrWhiteSpace([string]$root)) { continue }
+        try {
+            if (-not (Test-AMRCleanupDirectory -Path ([string]$root))) { continue }
             $full = [System.IO.Path]::GetFullPath([string]$root).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
-            if (-not $existing.Contains($full)) { $existing.Add($full) }
+            if (-not [string]::IsNullOrWhiteSpace($full) -and -not $existing.Contains($full)) { $existing.Add($full) }
+        } catch {
+            try { Write-AMRLog ("Optional cleanup root skipped during discovery | Path={0} | Reason={1}" -f [string]$root,$_.Exception.Message) WARNING Cleanup } catch {}
+            continue
         }
     }
     return $existing.ToArray()
@@ -16962,7 +16936,7 @@ function Add-AMRGPUCacheCandidate {
     Write-AMRLog ("GPU cache candidate | Vendor={0} | Type={1} | Status={2} | Path={3}" -f $Vendor,$CacheType,$state,$Path) $(if ($state -eq 'Present') { 'INFO' } elseif ($state -eq 'Missing') { 'INFO' } else { 'WARNING' }) Cleanup
 }
 
-# Phase 6.10.9 | Vendor-agnostic GPU shader discovery + no-progress watchdog + expanded browser-profile cache discovery.
+# Phase 6.11 | Vendor-agnostic discovery + isolated, killable root scanning + safety-first cleanup.
 # Discovery is deliberately broader than the installed GPU inventory so stale caches
 # left by replaced adapters/drivers can still be found. Only explicit, rebuildable cache
 # directories are registered; no driver packages, installer roots, profile databases,
@@ -17249,14 +17223,29 @@ foreach ($profileRoot in $crossVolumeProfiles) {
             'Microsoft\Teams\Cache','Microsoft\Teams\Code Cache','Microsoft\Teams\GPUCache',
             'CapCut\User Data\Cache','CapCut\User Data\Code Cache','CapCut\User Data\GPUCache',
             'Google\Chrome\User Data\Default\Cache\Cache_Data','Microsoft\Edge\User Data\Default\Cache\Cache_Data',
-            'BraveSoftware\Brave-Browser\User Data\Default\Cache\Cache_Data',
-            'Mozilla\Firefox\Profiles'
+            'BraveSoftware\Brave-Browser\User Data\Default\Cache\Cache_Data'
         )
         foreach ($relativeCache in $knownRelativeCaches) {
             $candidatePath = Join-Path $appDataRoot $relativeCache
             if ([System.IO.Directory]::Exists($candidatePath)) {
                 Add-AMRAppCacheCandidate -Application ('Discovered profile cache: ' + [System.IO.Path]::GetFileName($profileRoot)) -CacheType $relativeCache -Path $candidatePath
                 $crossVolumeCacheHits++
+            }
+        }
+        # Firefox profile folders contain bookmarks, history, cookies and databases.
+        # Register only the explicit rebuildable HTTP cache leaf inside each profile.
+        $firefoxProfilesRoot = Join-Path $appDataRoot 'Mozilla\Firefox\Profiles'
+        if ([System.IO.Directory]::Exists($firefoxProfilesRoot)) {
+            try {
+                foreach ($firefoxProfile in [System.IO.Directory]::GetDirectories($firefoxProfilesRoot)) {
+                    $firefoxCacheEntries = Join-Path $firefoxProfile 'cache2\entries'
+                    if ([System.IO.Directory]::Exists($firefoxCacheEntries)) {
+                        Add-AMRAppCacheCandidate -Application ('Firefox cache: ' + [System.IO.Path]::GetFileName($firefoxProfile)) -CacheType 'HTTP cache entries' -Path $firefoxCacheEntries
+                        $crossVolumeCacheHits++
+                    }
+                }
+            } catch {
+                Write-AMRLog (("Firefox cross-volume cache discovery warning | ProfileRoot={0} | {1}" -f $firefoxProfilesRoot,$_.Exception.Message)) WARNING Cleanup
             }
         }
         # One-level application-folder pass: only folders whose own name is a known
@@ -17363,41 +17352,107 @@ foreach ($browserDef in $browserInventoryDefinitions) {
 $nvidiaOtaPath = Join-Path $env:ProgramData 'NVIDIA Corporation\NVIDIA app\UpdateFramework\ota-artifacts'
 if (Test-AMRCleanupDirectory -Path $nvidiaOtaPath) { $script:AMRDriverArtifactRoots.Add([System.IO.Path]::GetFullPath($nvidiaOtaPath).TrimEnd([System.IO.Path]::DirectorySeparatorChar)) }
 
+# Expand only recognized temporary-directory roots. This deliberately avoids a
+# drive-wide search for filenames containing 'temp', which could include installers,
+# application data, source files, or user documents that are not disposable.
+$script:AMRUserTempDiscoveryRoots = New-Object 'System.Collections.Generic.List[string]'
+foreach ($profileRoot in @($crossVolumeProfiles)) {
+    if ([string]::IsNullOrWhiteSpace([string]$profileRoot)) { continue }
+    # Standard per-profile temporary folders, including roaming and Windows Error
+    # Reporting temp/dump locations. These are explicit disposable locations only.
+    foreach ($relativeTemp in @(
+        'AppData\Local\Temp',
+        'AppData\LocalLow\Temp',
+        'AppData\Roaming\Temp',
+        'AppData\Local\Microsoft\Windows\WER\Temp',
+        'AppData\Local\CrashDumps'
+    )) {
+        $candidateTemp = Join-Path $profileRoot $relativeTemp
+        if ([System.IO.Directory]::Exists($candidateTemp)) { $script:AMRUserTempDiscoveryRoots.Add($candidateTemp) }
+    }
+    $packagesRoot = Join-Path $profileRoot 'AppData\Local\Packages'
+    if ([System.IO.Directory]::Exists($packagesRoot)) {
+        try {
+            foreach ($packageRoot in [System.IO.Directory]::GetDirectories($packagesRoot)) {
+                # UWP package temporary state is distinct from LocalCache and user data.
+                foreach ($packageTempRelative in @('AC\Temp','TempState')) {
+                    $packageTemp = Join-Path $packageRoot $packageTempRelative
+                    if ([System.IO.Directory]::Exists($packageTemp)) { $script:AMRUserTempDiscoveryRoots.Add($packageTemp) }
+                }
+            }
+        } catch { Write-AMRLog ("User package-temp discovery warning | Profile={0} | {1}" -f $profileRoot,$_.Exception.Message) WARNING Cleanup }
+    }
+}
+foreach ($currentTemp in @($env:TEMP,$env:TMP)) {
+    if (-not [string]::IsNullOrWhiteSpace([string]$currentTemp)) { $script:AMRUserTempDiscoveryRoots.Add([string]$currentTemp) }
+}
+
+# Windows service accounts and the system profile keep their own temp locations.
+# Include LocalLow temp and WER's explicit Temp folder, but not CBS/Setup logs,
+# WinSxS servicing data, Prefetch, installer caches, or Windows Update downloads.
+$script:AMRWindowsTempDiscoveryRoots = New-Object 'System.Collections.Generic.List[string]'
+foreach ($systemProfileRoot in @(
+    (Join-Path $env:windir 'ServiceProfiles\LocalService'),
+    (Join-Path $env:windir 'ServiceProfiles\NetworkService'),
+    (Join-Path $env:windir 'System32\config\systemprofile')
+)) {
+    foreach ($relativeSystemTemp in @(
+        'AppData\Local\Temp',
+        'AppData\LocalLow\Temp',
+        'AppData\Local\Microsoft\Windows\WER\Temp'
+    )) {
+        $script:AMRWindowsTempDiscoveryRoots.Add((Join-Path $systemProfileRoot $relativeSystemTemp))
+    }
+}
+foreach ($windowsTempRoot in @(
+    (Join-Path $env:windir 'Temp'),
+    (Join-Path $env:windir 'SystemTemp'),
+    (Join-Path $env:windir 'CbsTemp'),
+    (Join-Path $env:ProgramData 'Microsoft\Windows\WER\Temp')
+)) {
+    $script:AMRWindowsTempDiscoveryRoots.Add($windowsTempRoot)
+}
+
 $script:CleanupCategories = @(
-    [pscustomobject]@{ Key='WER'; Check='CleanupWerCheck'; Info='CleanupWerInfo'; Label='Windows error reports'; Paths=@(Get-AMRExistingCleanupRoots -Roots @((Join-Path $env:ProgramData 'Microsoft\Windows\WER\ReportArchive'),(Join-Path $env:ProgramData 'Microsoft\Windows\WER\ReportQueue'))); MinAgeDays=0; Weight=8 },
+    [pscustomobject]@{ Key='WER'; Check='CleanupWerCheck'; Info='CleanupWerInfo'; Label='Windows error reports'; Paths=@(Get-AMRExistingCleanupRoots -Roots @((Join-Path $env:ProgramData 'Microsoft\Windows\WER\ReportArchive'))); MinAgeDays=7; Weight=8 },
     [pscustomobject]@{ Key='Shader'; Check='CleanupShaderCheck'; Info='CleanupShaderInfo'; Label='GPU shader cache'; Paths=@(Get-AMRExistingCleanupRoots -Roots @($script:AMRAppCacheRoots.ToArray())); MinAgeDays=7; Weight=10 },
-    [pscustomobject]@{ Key='Delivery'; Check='CleanupDeliveryCheck'; Info='CleanupDeliveryInfo'; Label='Delivery Optimization cache'; Paths=@(Get-AMRExistingCleanupRoots -Roots @((Join-Path $env:ProgramData 'Microsoft\Windows\DeliveryOptimization\Cache'))); MinAgeDays=0; Weight=12 },
-    [pscustomobject]@{ Key='WindowsTemp'; Check='CleanupWindowsTempCheck'; Info='CleanupWindowsTempInfo'; Label='Windows temporary files'; Paths=@(Get-AMRExistingCleanupRoots -Roots @((Join-Path $env:windir 'Temp'))); MinAgeDays=0; Weight=14 },
+    [pscustomobject]@{ Key='Delivery'; Check='CleanupDeliveryCheck'; Info='CleanupDeliveryInfo'; Label='Delivery Optimization cache'; Paths=@(Get-AMRExistingCleanupRoots -Roots @((Join-Path $env:ProgramData 'Microsoft\Windows\DeliveryOptimization\Cache'))); MinAgeDays=7; Weight=12 },
+    [pscustomobject]@{ Key='WindowsTemp'; Check='CleanupWindowsTempCheck'; Info='CleanupWindowsTempInfo'; Label='Windows temporary files'; Paths=@(Get-AMRExistingCleanupRoots -Roots $script:AMRWindowsTempDiscoveryRoots.ToArray()); MinAgeDays=0; Weight=14 },
     [pscustomobject]@{ Key='Update'; Check='CleanupUpdateCheck'; Info='CleanupUpdateInfo'; Label='Windows and graphics-driver update leftovers'; Paths=@(Get-AMRExistingCleanupRoots -Roots (@((Join-Path $env:windir 'SoftwareDistribution\Download')) + @($script:AMRDriverArtifactRoots.ToArray()))); MinAgeDays=30; Weight=16 },
     [pscustomobject]@{ Key='AppCache'; Check='CleanupAppCacheCheck'; Info='CleanupAppCacheInfo'; Label='Application caches'; Paths=@(Get-AMRExistingCleanupRoots -Roots @($script:AMRApplicationCacheRoots.ToArray())); MinAgeDays=7; Weight=18 },
-    [pscustomobject]@{ Key='UserTemp'; Check='CleanupUserTempCheck'; Info='CleanupUserTempInfo'; Label='User temporary files'; Paths=@(Get-AMRExistingCleanupRoots -Roots @($env:TEMP)); MinAgeDays=0; Weight=22 }
+    [pscustomobject]@{ Key='UserTemp'; Check='CleanupUserTempCheck'; Info='CleanupUserTempInfo'; Label='User temporary files'; Paths=@(Get-AMRExistingCleanupRoots -Roots $script:AMRUserTempDiscoveryRoots.ToArray()); MinAgeDays=0; Weight=22 }
 )
 
 function Get-AMRCleanupFiles {
-    param([string[]]$Roots)
+    param(
+        [string[]]$Roots,
+        [int]$MinAgeDays = 0
+    )
 
+    # Simple recursive scan over registered roots only. Errors are recorded so
+    # Clean Selected can refuse a category whose inventory was incomplete.
     $found = New-Object 'System.Collections.Generic.List[System.IO.FileInfo]'
     $errors = New-Object 'System.Collections.Generic.List[object]'
     $missingRoots = New-Object 'System.Collections.Generic.List[string]'
-    $scannedRoots = New-Object 'System.Collections.Generic.List[string]'
     $stack = New-Object 'System.Collections.Generic.Stack[string]'
-    $reparsePointsSkipped = 0
+    $reparseSkipped = 0
+    $cutoff = if ($MinAgeDays -gt 0) { (Get-Date).AddDays(-$MinAgeDays) } else { [datetime]::MinValue }
 
-    foreach ($root in $Roots) {
+    foreach ($root in @($Roots)) {
         if ([string]::IsNullOrWhiteSpace([string]$root)) { continue }
         try {
-            if (Test-Path -LiteralPath $root -PathType Container -ErrorAction Stop) {
-                $scannedRoots.Add([string]$root)
-                $stack.Push([string]$root)
-            } else {
+            if (-not (Test-Path -LiteralPath $root -PathType Container -ErrorAction Stop)) {
                 $missingRoots.Add([string]$root)
+                continue
             }
+            $rootAttributes = [System.IO.File]::GetAttributes([string]$root)
+            if (($rootAttributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                $errors.Add([pscustomobject]@{ Path=[string]$root; Stage='RootSafety'; Message='Cleanup root is a reparse point and was not traversed.' })
+                continue
+            }
+            $stack.Push([string]$root)
         } catch {
-            $errors.Add([pscustomobject]@{
-                Path = [string]$root
-                Stage = 'RootCheck'
-                Message = $_.Exception.Message
-            })
+            $errors.Add([pscustomobject]@{ Path=[string]$root; Stage='RootCheck'; Message=$_.Exception.Message })
         }
     }
 
@@ -17408,28 +17463,21 @@ function Get-AMRCleanupFiles {
                 try {
                     $attributes = [System.IO.File]::GetAttributes($item)
                     if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-                        $reparsePointsSkipped++
+                        $reparseSkipped++
                         continue
                     }
                     if (($attributes -band [System.IO.FileAttributes]::Directory) -ne 0) {
                         $stack.Push($item)
                     } else {
-                        $found.Add((New-Object -TypeName System.IO.FileInfo -ArgumentList $item))
+                        $file = New-Object -TypeName System.IO.FileInfo -ArgumentList $item
+                        if ($MinAgeDays -le 0 -or $file.LastWriteTime -le $cutoff) { $found.Add($file) }
                     }
                 } catch {
-                    $errors.Add([pscustomobject]@{
-                        Path = [string]$item
-                        Stage = 'InspectEntry'
-                        Message = $_.Exception.Message
-                    })
+                    $errors.Add([pscustomobject]@{ Path=[string]$item; Stage='InspectEntry'; Message=$_.Exception.Message })
                 }
             }
         } catch {
-            $errors.Add([pscustomobject]@{
-                Path = [string]$current
-                Stage = 'EnumerateDirectory'
-                Message = $_.Exception.Message
-            })
+            $errors.Add([pscustomobject]@{ Path=[string]$current; Stage='EnumerateDirectory'; Message=$_.Exception.Message })
         }
     }
 
@@ -17437,24 +17485,51 @@ function Get-AMRCleanupFiles {
         Files = $found.ToArray()
         Errors = $errors.ToArray()
         MissingRoots = $missingRoots.ToArray()
-        RootsScanned = $scannedRoots.ToArray()
-        ReparsePointsSkipped = $reparsePointsSkipped
+        ReparsePointsSkipped = $reparseSkipped
         Complete = (($errors.Count -eq 0) -and ($missingRoots.Count -eq 0))
     }
 }
 
+function Test-AMRCleanupPathSafe {
+    param([string]$Path,[string[]]$Roots)
+    try {
+        $fullPath = [System.IO.Path]::GetFullPath($Path)
+        $matchedRoot = $null
+        foreach ($root in @($Roots)) {
+            if ([string]::IsNullOrWhiteSpace([string]$root)) { continue }
+            $rootFull = [System.IO.Path]::GetFullPath([string]$root).TrimEnd([System.IO.Path]::DirectorySeparatorChar,[System.IO.Path]::AltDirectorySeparatorChar)
+            $prefix = $rootFull + [System.IO.Path]::DirectorySeparatorChar
+            if ($fullPath.StartsWith($prefix,[System.StringComparison]::OrdinalIgnoreCase)) { $matchedRoot = $rootFull; break }
+        }
+        if (-not $matchedRoot) { return $false }
+
+        $cursor = [System.IO.Path]::GetDirectoryName($fullPath)
+        while (-not [string]::IsNullOrWhiteSpace($cursor)) {
+            $attributes = [System.IO.File]::GetAttributes($cursor)
+            if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+            if ($cursor.TrimEnd([System.IO.Path]::DirectorySeparatorChar,[System.IO.Path]::AltDirectorySeparatorChar).Equals($matchedRoot,[System.StringComparison]::OrdinalIgnoreCase)) { break }
+            $parent = [System.IO.Path]::GetDirectoryName($cursor)
+            if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $cursor) { return $false }
+            $cursor = $parent
+        }
+        return $true
+    } catch { return $false }
+}
+
 function Update-AMRCleanupProgress {
-    param([int]$Value,[string]$Message,[switch]$NoPump)
+    param([int]$Value,[string]$Message)
+    $safeValue = [Math]::Max(0,[Math]::Min(100,$Value))
     $ctl = C 'CleanupProgress'
     $txt = C 'CleanupProgressText'
     $pct = C 'CleanupProgressPercent'
-    $safeValue = [Math]::Max(0,[Math]::Min(100,$Value))
     if ($ctl) { $ctl.Value = $safeValue }
-    if ($pct) { $pct.Text = ('{0}%' -f $safeValue) }
+    if ($pct) {
+        if ($safeValue -gt 0) { $pct.Text = ('{0}%' -f $safeValue); $pct.Visibility = 'Visible' }
+        else { $pct.Text = ''; $pct.Visibility = 'Collapsed' }
+    }
     if ($txt) { $txt.Text = $Message }
-    # DispatcherTimer callbacks already run on the WPF UI thread. Avoid nested
-    # DoEvents pumping during background scan updates to prevent re-entrancy.
-    if (-not $NoPump) { [System.Windows.Forms.Application]::DoEvents() }
+    # Keep the original simple progress-pump behavior used by the legacy engine.
+    try { [System.Windows.Forms.Application]::DoEvents() } catch { }
 }
 
 function Update-AMRCleanupSelectedSummary {
@@ -17470,20 +17545,16 @@ function Update-AMRCleanupSelectedSummary {
         }
     }
     $summary = C 'CleanupSelectedSummary'
-    if ($summary) {
-        $summary.Text = ('Selected: {0:N0} files • {1:N2} MB' -f $selectedFiles,($selectedBytes / 1MB))
-    }
+    if ($summary) { $summary.Text = ('Selected: {0:N0} files • {1:N2} MB' -f $selectedFiles,($selectedBytes / 1MB)) }
 }
 
-# Update the selected total immediately when the user changes any category checkbox.
+# Update selected totals when the user changes a category checkbox.
 foreach ($category in $script:CleanupCategories) {
     $checkBox = C $category.Check
-    if ($checkBox) {
-        $checkBox.Add_Click({ Update-AMRCleanupSelectedSummary })
-    }
+    if ($checkBox) { $checkBox.Add_Click({ Update-AMRCleanupSelectedSummary }) }
 }
 
-# Cleanup category selection helpers. These only change checkboxes; they never start a scan or deletion.
+# Keep the existing Select All / Cancel Selection controls and their appearance.
 $selectAllCleanupButton = C 'CleanupSelectAllBtn'
 if ($selectAllCleanupButton) {
     $selectAllCleanupButton.Add_Click({
@@ -17507,438 +17578,81 @@ if ($cancelCleanupSelectionButton) {
     })
 }
 
-# Cleanup scan runs in an isolated MTA runspace. The WPF dispatcher only drains
-# small progress batches and applies the completed result, so large volumes do not
-# monopolize the UI thread or rely on Application.DoEvents().
-$script:AMRCleanupScanState = [pscustomobject]@{ Current=$null }
-
+# Legacy simple Scan Now: scan each registered category in order and store the file list.
 (C 'CleanupScanBtn').Add_Click({
     $scanButton = C 'CleanupScanBtn'
     $runButton = C 'CleanupRunBtn'
-    $current = $script:AMRCleanupScanState.Current
-    if ($current) {
-        # Scan Now is an explicit request for a fresh inventory. Never silently
-        # attach to an old worker just because the user left and reopened Cleanup.
-        $oldSessionId = [string]$current.ScanId
-        try { if ($current.Timer) { $current.Timer.Stop() } } catch {}
-        try {
-            if ($current.PowerShell) {
-                try { $current.PowerShell.Stop() } catch {}
-                try { $current.PowerShell.Dispose() } catch {}
-            }
-        } catch {}
-        try { if ($current.Runspace) { $current.Runspace.Close() } } catch {}
-        try { if ($current.Runspace) { $current.Runspace.Dispose() } } catch {}
-        try { Write-AMRLog ("Previous Cleanup scan session {0} was cancelled because Scan Now was pressed; a new scan is starting from category 1." -f $oldSessionId) WARNING Cleanup } catch {}
-        try { Write-AMRCleanupTrace ("Previous session cancelled by a fresh Scan Now request. Session=" + $oldSessionId) 'WARNING' } catch {}
-        $script:AMRCleanupScanState.Current = $null
-    }
-
     $scanButton.IsEnabled = $false
     $runButton.IsEnabled = $false
     $script:CleanupScanResults = @{}
-    $script:CleanupScanProgressValue = 0
-    foreach ($category in $script:CleanupCategories) {
-        $info = C $category.Info
-        if ($info) { $info.Text = 'Queued • waiting for its scan stage' }
-    }
-    $summaryControl = C 'CleanupScanSummary'
-    if ($summaryControl) { $summaryControl.Text = 'Starting lightweight checks first. Completed categories will appear here as they finish.' }
-    Update-AMRCleanupProgress 0 'Preparing scan • 0/7 categories complete' -NoPump
-    $scanSessionId = [guid]::NewGuid().ToString('N')
-    Write-AMRLog ("Cleanup scan session {0} started fresh in an isolated background runspace. Categories={1}; UserTempRoots={2}." -f $scanSessionId,$script:CleanupCategories.Count,(@($script:CleanupCategories | Where-Object { $_.Key -eq 'UserTemp' } | ForEach-Object { $_.Paths }).Count)) INFO Cleanup
-    Write-AMRCleanupTrace ('Scan started. Session=' + $scanSessionId + '; Categories=' + $script:CleanupCategories.Count + '; order=' + (($script:CleanupCategories | ForEach-Object { $_.Key }) -join ' > '))
-
-    $workerScript = @'
-param($Categories,$ProgressQueue)
-$results = New-Object 'System.Collections.Generic.List[object]'
-$totalFiles = 0
-$totalBytes = [int64]0
-$totalErrors = 0
-$totalMissing = 0
-$totalRoots = 0
-$totalReparse = 0
-$categoryIndex = 0
-$totalWeight = [double](($Categories | Measure-Object -Property Weight -Sum).Sum)
-if ($totalWeight -le 0) { $totalWeight = [double][Math]::Max(1,$Categories.Count) }
-$completedWeight = [double]0
-foreach ($category in $Categories) {
-    $categoryIndex++
-    $categoryCount = [Math]::Max(1,[int]$Categories.Count)
-    $categoryWeight = if ([double]$category.Weight -gt 0) { [double]$category.Weight } else { 1.0 }
-    $completedPercent = [int][Math]::Floor(100.0 * $completedWeight / $totalWeight)
-    [void]$ProgressQueue.Enqueue([pscustomobject]@{Type='CategoryStart';Key=[string]$category.Key;Category=[string]$category.Label;CategoryIndex=$categoryIndex;CategoryCount=$categoryCount;LocalPercent=0;OverallPercent=$completedPercent;Message=('Scanning {0} ({1}/{2})' -f $category.Label,$categoryIndex,$categoryCount)})
-    $found = New-Object 'System.Collections.Generic.List[System.IO.FileInfo]'
-    $errors = New-Object 'System.Collections.Generic.List[object]'
-    $missingRoots = New-Object 'System.Collections.Generic.List[string]'
-    $scannedRoots = New-Object 'System.Collections.Generic.List[string]'
-    $stack = New-Object 'System.Collections.Generic.Stack[string]'
-    $reparseSkipped = 0
-    $bytes = [int64]0
-    $sizeUnknown = 0
-    $visited = 0
-    $progressClock = [System.Diagnostics.Stopwatch]::StartNew()
-    $nextProgressAt = 0.0
-    foreach ($root in @($category.Paths)) {
-        if ([string]::IsNullOrWhiteSpace([string]$root)) { continue }
-        try {
-            if ([System.IO.Directory]::Exists([string]$root)) {
-                $scannedRoots.Add([string]$root)
-                [void]$ProgressQueue.Enqueue([pscustomobject]@{Type='RootStart';Key=[string]$category.Key;Category=[string]$category.Label;CategoryIndex=$categoryIndex;CategoryCount=$categoryCount;CurrentPath=[string]$root;Visited=$visited;Files=$found.Count;Message=('Opening cache root: ' + [string]$root)})
-                $stack.Push([string]$root)
-            } else { $missingRoots.Add([string]$root); [void]$ProgressQueue.Enqueue([pscustomobject]@{Type='RootMissing';Key=[string]$category.Key;Category=[string]$category.Label;CurrentPath=[string]$root;Message=('Missing cache root: ' + [string]$root)}) }
-        } catch {
-            $errors.Add([pscustomobject]@{Path=[string]$root;Stage='RootCheck';Message=$_.Exception.Message})
-        }
-    }
-    $ageCutoff = if ([int]$category.MinAgeDays -gt 0) { (Get-Date).AddDays(-[int]$category.MinAgeDays) } else { [datetime]::MinValue }
-    while ($stack.Count -gt 0) {
-        $currentPath = $stack.Pop()
-        [void]$ProgressQueue.Enqueue([pscustomobject]@{Type='DirectoryStart';Key=[string]$category.Key;Category=[string]$category.Label;CategoryIndex=$categoryIndex;CategoryCount=$categoryCount;LocalPercent=0;OverallPercent=$completedPercent;Visited=$visited;Files=$found.Count;CurrentPath=[string]$currentPath;Message=('Scanning {0} • {1:N0} entries checked' -f $category.Label,$visited)})
-
-        # Inspect a directory in an isolated worker. The timeout covers the whole
-        # operation, including per-entry attributes and file metadata; any timeout
-        # marks this category partial and allows the next category to run.
-        $entryInfos = $null
-        $inspectionError = $null
-        $inspectionOk = [AMRCleanupDirectoryEnumeratorV10]::TryInspectDirectory([string]$currentPath,5000,$ageCutoff,[ref]$entryInfos,[ref]$inspectionError)
-        if ($inspectionOk) { [void]$ProgressQueue.Enqueue([pscustomobject]@{Type='DirectoryInspectComplete';Key=[string]$category.Key;Category=[string]$category.Label;CategoryIndex=$categoryIndex;CategoryCount=$categoryCount;CurrentPath=[string]$currentPath;Visited=$visited;Files=$found.Count;EntryCount=@($entryInfos).Count;OverallPercent=$completedPercent}) }
-        if (-not $inspectionOk) {
-            $stage = if ([string]$inspectionError -match '(?i)timed out') { 'InspectDirectoryTimeout' } else { 'InspectDirectory' }
-            $errors.Add([pscustomobject]@{Path=[string]$currentPath;Stage=$stage;Message=[string]$inspectionError})
-            [void]$ProgressQueue.Enqueue([pscustomobject]@{Type='DirectorySkipped';Key=[string]$category.Key;Category=[string]$category.Label;CategoryIndex=$categoryIndex;CategoryCount=$categoryCount;CurrentPath=[string]$currentPath;Visited=$visited;Files=$found.Count;ErrorMessage=[string]$inspectionError;OverallPercent=$completedPercent;Message=('Skipped an unresponsive folder in {0}; continuing with the next category' -f $category.Label)})
-            # The failed directory has already been popped from the stack.
-            # Keep queued siblings and other cache roots; one bad cache folder
-            # must never abort the entire Application caches category.
-            continue
-        }
-        foreach ($entryInfo in @($entryInfos)) {
-            $visited++
-            try {
-                if (-not [string]::IsNullOrWhiteSpace([string]$entryInfo.ErrorMessage)) {
-                    $errors.Add([pscustomobject]@{Path=[string]$entryInfo.Path;Stage='InspectEntry';Message=[string]$entryInfo.ErrorMessage})
-                } elseif ($entryInfo.IsReparsePoint) {
-                    $reparseSkipped++
-                } elseif ($entryInfo.IsDirectory) {
-                    $stack.Push([string]$entryInfo.Path)
-                } elseif ($entryInfo.IsEligible) {
-                    $fileInfo = New-Object -TypeName System.IO.FileInfo -ArgumentList ([string]$entryInfo.Path)
-                    $found.Add($fileInfo)
-                    $bytes += [int64]$entryInfo.Length
-                }
-            } catch {
-                $errors.Add([pscustomobject]@{Path=[string]$entryInfo.Path;Stage='ProcessEntry';Message=$_.Exception.Message})
-            }
-            if ((($visited % 250) -eq 0) -or ($progressClock.Elapsed.TotalSeconds -ge $nextProgressAt)) {
-                [void]$ProgressQueue.Enqueue([pscustomobject]@{
-                    Type='Progress'; Key=[string]$category.Key; Category=[string]$category.Label
-                    CategoryIndex=$categoryIndex; CategoryCount=$categoryCount
-                    LocalPercent=0; OverallPercent=$completedPercent
-                    Files=$found.Count; Bytes=$bytes; Visited=$visited; CurrentPath=[string]$currentPath
-                    Message=('Scanning {0} • {1:N0} entries checked • {2:N0} files found' -f $category.Label,$visited,$found.Count)
-                })
-                $nextProgressAt = $progressClock.Elapsed.TotalSeconds + 0.5
-            }
-        }
-    }
-    $progressClock.Stop()
-    $complete = (($errors.Count -eq 0) -and ($missingRoots.Count -eq 0))
-    $result = [pscustomobject]@{
-        Key=[string]$category.Key; Label=[string]$category.Label; Files=$found.ToArray(); Bytes=$bytes; Count=$found.Count
-        Errors=$errors.ToArray(); MissingRoots=$missingRoots.ToArray(); RootsScanned=$scannedRoots.ToArray()
-        ReparsePointsSkipped=$reparseSkipped; SizeUnknown=$sizeUnknown; Complete=$complete
-    }
-    $results.Add($result)
-    $totalFiles += $found.Count; $totalBytes += $bytes; $totalErrors += $errors.Count
-    $totalMissing += $missingRoots.Count; $totalRoots += $scannedRoots.Count; $totalReparse += $reparseSkipped
-    $completedWeight += $categoryWeight
-    $weightedOverall = [int][Math]::Min(100,[Math]::Floor(100.0 * $completedWeight / $totalWeight))
-    [void]$ProgressQueue.Enqueue([pscustomobject]@{Type='CategoryComplete';Key=[string]$category.Key;Category=[string]$category.Label;CategoryIndex=$categoryIndex;CategoryCount=$categoryCount;LocalPercent=100;OverallPercent=$weightedOverall;Files=$found.Count;Bytes=$bytes;Visited=$visited;Result=$result;ElapsedSeconds=[Math]::Round($progressClock.Elapsed.TotalSeconds,1);Message=('Finished {0}: {1:N0} files • {2:N2} MB • {3} errors' -f $category.Label,$found.Count,($bytes/1MB),$errors.Count)})
-}
-[pscustomobject]@{Results=$results.ToArray();TotalFiles=$totalFiles;TotalBytes=$totalBytes;TotalErrors=$totalErrors;TotalMissingRoots=$totalMissing;TotalRoots=$totalRoots;TotalReparseSkipped=$totalReparse}
-'@
-
-    $runspace = $null
-    $powerShell = $null
+    $totalBytes = [int64]0
+    $totalFiles = 0
+    $index = 0
     try {
-        $queue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
-        $runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
-        $runspace.ApartmentState = [System.Threading.ApartmentState]::MTA
-        $runspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
-        $runspace.Open()
-        $powerShell = [PowerShell]::Create()
-        $powerShell.Runspace = $runspace
-        [void]$powerShell.AddScript($workerScript).AddArgument([object[]]$script:CleanupCategories).AddArgument($queue)
-        Write-AMRLog ('Cleanup worker initialized. Session=' + $scanSessionId + '; Categories=' + $script:CleanupCategories.Count + '; order=' + (($script:CleanupCategories | ForEach-Object { $_.Key }) -join ' > ') + '.') INFO Cleanup
-        $async = $powerShell.BeginInvoke()
-        if ($null -eq $async) { throw 'Cleanup scan worker did not return an asynchronous handle.' }
-        $timerInstance = New-Object System.Windows.Threading.DispatcherTimer
-        $timerInstance.Interval = [TimeSpan]::FromMilliseconds(150)
-        $jobState = $script:AMRCleanupScanState
-        $job = [pscustomobject]@{ScanId=$scanSessionId;PowerShell=$powerShell;Runspace=$runspace;Async=$async;Queue=$queue;Timer=$timerInstance;StartedAt=(Get-Date);LastProgressAt=(Get-Date);LastStallNoticeAt=[datetime]::MinValue;LastCategory='Preparing scan';LastPath='';StopRequested=$false;StopRequestedAt=$null}
-        $jobState.Current = $job
-        $timerInstance.Add_Tick({
-            try {
-                if ($null -eq $jobState) { try { $timerInstance.Stop() } catch {}; return }
-                $activeJob = $jobState.Current
-                if ($null -eq $activeJob -or $activeJob -ne $job) { try { $timerInstance.Stop() } catch {}; return }
-            } catch {
-                $timerInitRecord = $_
-                $timerInitError = [string]$timerInitRecord.Exception.Message
-                try { Write-AMRLog ("Cleanup timer preflight failed: {0}" -f $timerInitError) ERROR Cleanup } catch {}
-                try { Write-AMRCleanupTrace (('Timer preflight failed: {0}; Position={1}; Stack={2}' -f $timerInitError,$timerInitRecord.InvocationInfo.PositionMessage,$timerInitRecord.ScriptStackTrace)) 'ERROR' } catch {}
-                try { $timerInstance.Stop() } catch {}
-                try { if ($job.PowerShell) { $job.PowerShell.Stop(); $job.PowerShell.Dispose() } } catch {}
-                try { if ($job.Runspace) { $job.Runspace.Dispose() } } catch {}
-                try { if ($jobState.Current -eq $job) { $jobState.Current = $null } } catch {}
-                try { $scanButton.IsEnabled = $true } catch {}
-                try { $runButton.IsEnabled = $false } catch {}
-                try { $summaryControl = C 'CleanupScanSummary'; if ($summaryControl) { $summaryControl.Text = ('Cleanup scan stopped by a timer error: ' + $timerInitError) } } catch {}
-                return
+        Write-AMRLog 'Legacy simple Cleanup scan started.' INFO Cleanup
+        foreach ($category in $script:CleanupCategories) {
+            $index++
+            $percent = [int](($index - 1) * 100 / [Math]::Max(1,$script:CleanupCategories.Count))
+            Update-AMRCleanupProgress $percent ("Scanning: {0} ({1}/{2})" -f $category.Label,$index,$script:CleanupCategories.Count)
+
+            $minAge = 0
+            if ($category.PSObject.Properties['MinAgeDays']) { $minAge = [int]$category.MinAgeDays }
+            $scanResult = Get-AMRCleanupFiles -Roots @($category.Paths) -MinAgeDays $minAge
+            $files = @($scanResult.Files)
+            $bytes = [int64]0
+            foreach ($file in $files) { try { $bytes += [int64]$file.Length } catch { } }
+
+            $script:CleanupScanResults[$category.Key] = [pscustomobject]@{
+                Files = $files
+                Bytes = $bytes
+                Count = $files.Count
+                Complete = [bool]$scanResult.Complete
+                Errors = @($scanResult.Errors)
             }
-            try {
-                $progressItem = $null
-                $drained = 0
-                while ($drained -lt 100 -and $activeJob.Queue.TryDequeue([ref]$progressItem)) {
-                    if ($progressItem) {
-                        try {
-                            $activeJob.LastProgressAt = Get-Date
-                        if (-not [string]::IsNullOrWhiteSpace([string]$progressItem.Category)) { $activeJob.LastCategory = [string]$progressItem.Category }
-                        if ($progressItem.PSObject.Properties['CurrentPath'] -and -not [string]::IsNullOrWhiteSpace([string]$progressItem.CurrentPath)) { $activeJob.LastPath = [string]$progressItem.CurrentPath }
-                        $categoryInfo = $script:CleanupCategories | Where-Object { $_.Key -eq [string]$progressItem.Key } | Select-Object -First 1
-                        $infoControl = if ($categoryInfo) { C $categoryInfo.Info } else { $null }
-                        $percent = [int]$progressItem.OverallPercent
-                        $script:CleanupScanProgressValue = [Math]::Max([int]$script:CleanupScanProgressValue,$percent)
-                        if ([string]$progressItem.Type -eq 'CategoryStart') {
-                            if ($infoControl) { $infoControl.Text = 'Starting scan…' }
-                            Write-AMRLog ('Cleanup category started: ' + [string]$progressItem.Category + ' (' + [string]$progressItem.CategoryIndex + '/' + [string]$progressItem.CategoryCount + ').') INFO Cleanup
-                            Write-AMRCleanupTrace ('Category started: ' + [string]$progressItem.Category + ' (' + [string]$progressItem.CategoryIndex + '/' + [string]$progressItem.CategoryCount + ').')
-                            Update-AMRCleanupProgress $percent (([string]$progressItem.Category) + ' • starting • ' + $percent + '%') -NoPump
-                        } elseif ([string]$progressItem.Type -eq 'RootStart') {
-                            if ($infoControl) { $infoControl.Text = 'Opening cache root…' }
-                            Write-AMRLog ('Cleanup root opened for scan: ' + [string]$progressItem.CurrentPath) INFO Cleanup
-                            Write-AMRCleanupTrace ('Root started: Category=' + [string]$progressItem.Category + '; Path=' + [string]$progressItem.CurrentPath)
-                            Update-AMRCleanupProgress $percent (('Scanning {0} ({1}/{2}) • opening folder • {3}%' -f [string]$progressItem.Category,[int]$progressItem.CategoryIndex,[int]$progressItem.CategoryCount,$percent)) -NoPump
-                        } elseif ([string]$progressItem.Type -eq 'RootMissing') {
-                            Write-AMRLog ('Cleanup root missing: ' + [string]$progressItem.CurrentPath) WARNING Cleanup
-                            Write-AMRCleanupTrace ('Root missing: Category=' + [string]$progressItem.Category + '; Path=' + [string]$progressItem.CurrentPath) 'WARNING'
-                        } elseif ([string]$progressItem.Type -eq 'DirectoryInspectComplete') {
-                            Write-AMRLog (('Directory inspection completed | Category={0} | Path={1} | Entries={2}' -f $progressItem.Category,$progressItem.CurrentPath,$progressItem.EntryCount)) INFO Cleanup
-                            Write-AMRCleanupTrace (('Directory inspection completed: Category={0}; Path={1}; Entries={2}' -f $progressItem.Category,$progressItem.CurrentPath,$progressItem.EntryCount))
-                        } elseif ([string]$progressItem.Type -eq 'DirectorySkipped') {
-                            $timeoutMessage = ('Cleanup skipped a folder that could not be enumerated: {0} | Reason: {1}' -f [string]$progressItem.CurrentPath,[string]$progressItem.ErrorMessage)
-                            Write-AMRLog $timeoutMessage WARNING Cleanup
-                            Write-AMRCleanupTrace (('Directory enumeration skipped: Category={0}; Path={1}; Reason={2}; Entries={3}; Files={4}' -f $progressItem.Category,$progressItem.CurrentPath,$progressItem.ErrorMessage,$progressItem.Visited,$progressItem.Files)) 'WARNING'
-                            Update-AMRCleanupProgress $percent (('Scanning {0} ({1}/{2}) • folder skipped • {3}%' -f [string]$progressItem.Category,[int]$progressItem.CategoryIndex,[int]$progressItem.CategoryCount,$percent)) -NoPump
-                        } elseif ([string]$progressItem.Type -eq 'DirectoryStart') {
-                            if ($infoControl) { $infoControl.Text = ('Scanning • {0:N0} entries • {1:N0} files' -f [int]$progressItem.Visited,[int]$progressItem.Files) }
-                            Write-AMRLog (('Directory scan started | Category={0} | Path={1} | Entries={2} | Files={3}' -f $progressItem.Category,$progressItem.CurrentPath,$progressItem.Visited,$progressItem.Files)) INFO Cleanup
-                            Write-AMRCleanupTrace (('Directory started: Category={0}; Path={1}; Entries={2}; Files={3}' -f $progressItem.Category,$progressItem.CurrentPath,$progressItem.Visited,$progressItem.Files))
-                            Update-AMRCleanupProgress $percent (('Scanning {0} ({1}/{2}) • {3:N0} entries checked' -f [string]$progressItem.Category,[int]$progressItem.CategoryIndex,[int]$progressItem.CategoryCount,[int]$progressItem.Visited)) -NoPump
-                        } elseif ([string]$progressItem.Type -eq 'Progress') {
-                            $liveFiles = [int]$progressItem.Files
-                            $liveBytes = [int64]$progressItem.Bytes
-                            if ($infoControl) { $infoControl.Text = ('Scanning • {0:N0} files • {1:N2} MB • {2:N0} checked' -f $liveFiles,($liveBytes/1MB),[int]$progressItem.Visited) }
-                            $liveMessage = ('Scanning {0} ({1}/{2}) • {3:N0} entries checked • {4:N0} files found' -f [string]$progressItem.Category,[int]$progressItem.CategoryIndex,[int]$progressItem.CategoryCount,[int]$progressItem.Visited,$liveFiles)
-                            $liveCompletedFiles = [int64]0; $liveCompletedBytes = [int64]0
-                            foreach ($completedResult in $script:CleanupScanResults.Values) { $liveCompletedFiles += [int64]$completedResult.Count; $liveCompletedBytes += [int64]$completedResult.Bytes }
-                            $liveSummary = C 'CleanupScanSummary'
-                            if ($liveSummary) { $liveSummary.Text = ('{0}/{1} categories complete • {2:N0} files • {3:N2} MB completed; currently scanning {4}: {5:N0} files • {6:N2} MB so far.' -f @($script:CleanupScanResults.Keys).Count,[int]$progressItem.CategoryCount,($liveCompletedFiles+$liveFiles),(($liveCompletedBytes+$liveBytes)/1MB),[string]$progressItem.Category,$liveFiles,($liveBytes/1MB)) }
-                            $selectedSummary = C 'CleanupSelectedSummary'
-                            if ($selectedSummary) {
-                                $selectedFilesLive = [int64]0; $selectedBytesLive = [int64]0
-                                foreach ($selectedCategory in $script:CleanupCategories) {
-                                    $selectedBox = C $selectedCategory.Check
-                                    if ($selectedBox -and $selectedBox.IsChecked -eq $true) {
-                                        if ($script:CleanupScanResults.ContainsKey($selectedCategory.Key)) {
-                                            $selectedFilesLive += [int64]$script:CleanupScanResults[$selectedCategory.Key].Count
-                                            $selectedBytesLive += [int64]$script:CleanupScanResults[$selectedCategory.Key].Bytes
-                                        }
-                                        if ($selectedCategory.Key -eq [string]$progressItem.Key) { $selectedFilesLive += $liveFiles; $selectedBytesLive += $liveBytes }
-                                    }
-                                }
-                                $selectedSummary.Text = ('Selected: {0:N0} files • {1:N2} MB' -f $selectedFilesLive,($selectedBytesLive/1MB))
-                            }
-                            Update-AMRCleanupProgress $percent $liveMessage -NoPump
-                            if (([int]$progressItem.Visited -gt 0) -and (([int]$progressItem.Visited % 500) -eq 0)) {
-                                Write-AMRLog (('Cleanup scan heartbeat: {0}; entries={1}; files={2}; current folder={3}' -f $progressItem.Category,$progressItem.Visited,$progressItem.Files,$progressItem.CurrentPath)) INFO Cleanup
-                            }
-                        } elseif ([string]$progressItem.Type -eq 'CategoryComplete') {
-                            $categoryResultLive = $progressItem.Result
-                            if ($categoryResultLive) {
-                                if ($null -eq $script:CleanupScanResults -or $script:CleanupScanResults -isnot [System.Collections.IDictionary]) { $script:CleanupScanResults = @{} }
-                                $script:CleanupScanResults[[string]$categoryResultLive.Key] = $categoryResultLive
-                                Write-AMRLog (('Cleanup category completed: {0}; files={1}; bytes={2}; errors={3}; elapsed={4:N1}s.' -f $categoryResultLive.Label,$categoryResultLive.Count,$categoryResultLive.Bytes,@($categoryResultLive.Errors).Count,[double]$progressItem.ElapsedSeconds)) INFO Cleanup
-                                Write-AMRCleanupTrace (('Category completed: {0}; files={1}; bytes={2}; errors={3}; elapsed={4:N1}s.' -f $categoryResultLive.Label,$categoryResultLive.Count,$categoryResultLive.Bytes,@($categoryResultLive.Errors).Count,[double]$progressItem.ElapsedSeconds))
-                                $liveStatus = if (-not $categoryResultLive.Complete) { 'PARTIAL • review logs' } elseif ($categoryResultLive.Key -eq 'AppCache' -and @($script:AMRApplicationCacheInventory | Where-Object { $_.Status -eq 'Installed' }).Count -eq 0) { 'No supported apps installed • 100%' } elseif ($categoryResultLive.Key -eq 'AppCache' -and @($categoryResultLive.RootsScanned).Count -eq 0) { 'No cache folders found • 100%' } elseif (@($categoryResultLive.RootsScanned).Count -eq 0) { 'Not applicable • 100%' } else { 'Complete • 100%' }
-                                $liveAge = if ($categoryInfo -and [int]$categoryInfo.MinAgeDays -gt 0) { ' • older than {0}d' -f [int]$categoryInfo.MinAgeDays } else { '' }
-                                if ($infoControl) { $infoControl.Text = ('{0} • {1:N0} files • {2:N2} MB{3} • {4} roots • {5} errors' -f $liveStatus,$categoryResultLive.Count,($categoryResultLive.Bytes/1MB),$liveAge,@($categoryResultLive.RootsScanned).Count,@($categoryResultLive.Errors).Count) }
-                                $completedCount = @($script:CleanupScanResults.Keys).Count
-                                $completedFiles = [int64]0; $completedBytes = [int64]0
-                                foreach ($completedResult in $script:CleanupScanResults.Values) { $completedFiles += [int64]$completedResult.Count; $completedBytes += [int64]$completedResult.Bytes }
-                                $summaryControl = C 'CleanupScanSummary'
-                                if ($summaryControl) { $summaryControl.Text = ('{0}/{1} categories complete • {2:N0} files • {3:N2} MB estimated so far. Remaining categories are still scanning.' -f $completedCount,$progressItem.CategoryCount,$completedFiles,($completedBytes/1MB)) }
-                                Update-AMRCleanupSelectedSummary
-                            }
-                            Update-AMRCleanupProgress $percent ([string]$progressItem.Message + ' • Overall ' + $percent + '%') -NoPump
-                        }
-                        } catch {
-                            $progressEventError = $_
-                            try {
-                                Write-AMRCleanupTrace (('Progress event rendering failed: {0}; Stack={1}' -f $progressEventError.Exception.Message,$progressEventError.ScriptStackTrace)) 'WARNING'
-                            } catch {}
-                            try { Write-AMRLog ('Cleanup progress event was skipped after a UI update error: ' + $progressEventError.Exception.Message) WARNING Cleanup } catch {}
-                        }
-                    }
-                    $progressItem = $null
-                    $drained++
-                }
-                if ($activeJob.Async.IsCompleted -and $activeJob.Queue -and -not $activeJob.Queue.IsEmpty) {
-                    # Drain every final worker event before consuming EndInvoke; otherwise
-                    # a fast scan can finish with >100 queued events that never reach Logs/UI.
-                    return
-                }
-                if (-not $activeJob.Async.IsCompleted) {
-                    $quietSeconds = ((Get-Date) - [datetime]$activeJob.LastProgressAt).TotalSeconds
-                    if ($quietSeconds -ge 60 -and -not $activeJob.StopRequested) {
-                        $activeJob.StopRequested = $true
-                        $activeJob.StopRequestedAt = Get-Date
-                        $watchdogMessage = ('Cleanup scan watchdog: no worker progress for {0:N0}s. Requesting a safe stop. Last category={1}; last folder={2}.' -f $quietSeconds,$activeJob.LastCategory,$activeJob.LastPath)
-                        Write-AMRLog $watchdogMessage ERROR Cleanup
-                        Write-AMRCleanupTrace $watchdogMessage 'ERROR'
-                        $summaryControl = C 'CleanupScanSummary'
-                        if ($summaryControl) { $summaryControl.Text = $watchdogMessage + ' Completed categories will be retained as a partial result.' }
-                        try { [void]$activeJob.PowerShell.BeginStop($null,$null) } catch { try { Write-AMRLog ('Cleanup watchdog stop request failed: ' + $_.Exception.Message) ERROR Cleanup } catch {} }
-                    }
-                    if ($quietSeconds -ge 5 -and (((Get-Date) - [datetime]$activeJob.LastStallNoticeAt).TotalSeconds -ge 15)) {
-                        $activeJob.LastStallNoticeAt = Get-Date
-                        $quietMessage = ('Cleanup scan has not received a filesystem progress event for {0:N0}s. Category={1}; folder={2}; the current folder enumeration may be blocked.' -f $quietSeconds,$activeJob.LastCategory,$activeJob.LastPath)
-                        Write-AMRLog $quietMessage WARNING Cleanup
-                        $summaryControl = C 'CleanupScanSummary'
-                        if ($summaryControl) { $summaryControl.Text = $quietMessage + '. The scan is still running; no files have been changed.' }
-                        Update-AMRCleanupProgress ([int]$script:CleanupScanProgressValue) ($quietMessage + ' • no files changed') -NoPump
-                    }
-                    return
-                }
-                $timerInstance.Stop()
-                if ($activeJob.StopRequested) {
-                    try { $null = $activeJob.PowerShell.EndInvoke($activeJob.Async) } catch {}
-                    $partialResults = @($script:CleanupScanResults.Values)
-                    $partialFiles = [int64]0; $partialBytes = [int64]0; $partialErrors = 0
-                    foreach ($partialResult in $partialResults) {
-                        $partialFiles += [int64]$partialResult.Count
-                        $partialBytes += [int64]$partialResult.Bytes
-                        $partialErrors += @($partialResult.Errors).Count
-                    }
-                    $partialMessage = ('Scan stopped by the no-progress watchdog. Partial results retained: {0}/{1} categories, {2:N0} files, {3:N2} MB, {4} errors. Last category={5}; last folder={6}.' -f $partialResults.Count,$script:CleanupCategories.Count,$partialFiles,($partialBytes/1MB),$partialErrors,$activeJob.LastCategory,$activeJob.LastPath)
-                    Write-AMRLog $partialMessage WARNING Cleanup
-                    Write-AMRCleanupTrace $partialMessage 'WARNING'
-                    $summaryControl = C 'CleanupScanSummary'
-                    if ($summaryControl) { $summaryControl.Text = $partialMessage }
-                    Update-AMRCleanupProgress ([int]$script:CleanupScanProgressValue) 'Partial scan • stopped safely after no progress' -NoPump
-                    $runButton.IsEnabled = ($partialResults.Count -gt 0)
-                    return
-                }
-                $output = $activeJob.PowerShell.EndInvoke($activeJob.Async)
-                $outputCount = 0
-                if ($null -ne $output) { try { $outputCount = [int]$output.Count } catch { $outputCount = 1 } }
-                if ($activeJob.PowerShell.Streams.Error.Count -gt 0) {
-                    $workerErrors = @($activeJob.PowerShell.Streams.Error | ForEach-Object { $_.ToString() })
-                    foreach ($workerErrorText in $workerErrors) { Write-AMRCleanupTrace ('Worker stream error: ' + [string]$workerErrorText) 'WARNING' }
-                    if ($outputCount -eq 0) { throw ('Background scan worker failed: ' + ($workerErrors -join ' | ')) }
-                    foreach ($workerError in $workerErrors) { Write-AMRLog ('Background scan worker warning: ' + $workerError) WARNING Cleanup }
-                }
-                $outputItems = @()
-                if ($null -ne $output) { $outputItems = @($output | Where-Object { $null -ne $_ }) }
-                if ($outputItems.Count -eq 0) { throw 'Background scan completed without publishing a result.' }
-                $scanResult = $outputItems[$outputItems.Count - 1]
-                if ($null -eq $scanResult) { throw 'Background scan published a null result object.' }
-                $categoryResults = @()
-                if ($scanResult.PSObject.Properties['Results'] -and $null -ne $scanResult.Results) { $categoryResults = @($scanResult.Results | Where-Object { $null -ne $_ }) }
-                if ($categoryResults.Count -eq 0) { throw 'Background scan result did not contain any category results.' }
-                $script:CleanupScanResults = @{}
-                foreach ($categoryResult in $categoryResults) {
-                    if ($null -eq $categoryResult) { continue }
-                    $script:CleanupScanResults[[string]$categoryResult.Key] = $categoryResult
-                    $matchedCategory = $script:CleanupCategories | Where-Object { $_.Key -eq [string]$categoryResult.Key } | Select-Object -First 1
-                    $infoControl = if ($matchedCategory) { C $matchedCategory.Info } else { $null }
-                    if ($infoControl) {
-                        $statusText = if (-not $categoryResult.Complete) { 'PARTIAL SCAN • review logs' } elseif ($categoryResult.Key -eq 'AppCache' -and @($script:AMRApplicationCacheInventory | Where-Object { $_.Status -eq 'Installed' }).Count -eq 0) { 'No supported apps installed • 100%' } elseif ($categoryResult.Key -eq 'AppCache' -and @($categoryResult.RootsScanned).Count -eq 0) { 'No cache folders found • 100%' } elseif (@($categoryResult.RootsScanned).Count -eq 0) { 'Not applicable on this PC • 100%' } else { 'Complete • 100%' }
-                        $ageNote = ''
-                        if ($matchedCategory -and [int]$matchedCategory.MinAgeDays -gt 0) { $ageNote = ' • older than {0}d' -f $matchedCategory.MinAgeDays }
-                        $infoControl.Text = ('{0} • {1:N0} files • {2:N2} MB{3} • {4} roots • {5} errors' -f $statusText,$categoryResult.Count,($categoryResult.Bytes/1MB),$ageNote,@($categoryResult.RootsScanned).Count,@($categoryResult.Errors).Count)
-                    }
-                    $logLevel = if ($categoryResult.Complete) { 'INFO' } else { 'WARNING' }
-                    Write-AMRLog ("Scanned {0}: {1:N0} files, {2:N2} MB; roots scanned={3}; errors={4}; missing roots={5}; reparse points skipped={6}; size unknown={7}." -f $categoryResult.Label,$categoryResult.Count,($categoryResult.Bytes/1MB),@($categoryResult.RootsScanned).Count,@($categoryResult.Errors).Count,@($categoryResult.MissingRoots).Count,$categoryResult.ReparsePointsSkipped,$categoryResult.SizeUnknown) $logLevel Cleanup
-                    $scanErrors = @()
-                    if ($categoryResult.PSObject.Properties['Errors'] -and $null -ne $categoryResult.Errors) { $scanErrors = @($categoryResult.Errors | Where-Object { $null -ne $_ }) }
-                    $loggedErrorCount = 0
-                    foreach ($scanError in $scanErrors) {
-                        if ($loggedErrorCount -ge 20) { break }
-                        if ($null -eq $scanError) { continue }
-                        Write-AMRLog ("SCAN ERROR | Category={0} | Stage={1} | Path={2} | Error={3}" -f $categoryResult.Label,$scanError.Stage,$scanError.Path,$scanError.Message) WARNING Cleanup
-                        Write-AMRCleanupTrace ("SCAN ERROR | Category={0} | Stage={1} | Path={2} | Error={3}" -f $categoryResult.Label,$scanError.Stage,$scanError.Path,$scanError.Message) 'WARNING'
-                        $loggedErrorCount++
-                    }
-                }
-                $scanStateText = if (($scanResult.TotalErrors -gt 0) -or ($scanResult.TotalMissingRoots -gt 0)) { 'PARTIAL SCAN' } else { 'Scan complete' }
-                $elapsedTotal = if ($activeJob.StartedAt) { [Math]::Round(((Get-Date) - $activeJob.StartedAt).TotalSeconds,1) } else { 0 }
-                $scanNote = "{0}: {1:N0} files • {2:N2} MB potentially recoverable • {3} roots checked • {4} scan errors • {5} roots missing • {6} reparse points skipped • {7:N1}s." -f $scanStateText,$scanResult.TotalFiles,($scanResult.TotalBytes/1MB),$scanResult.TotalRoots,$scanResult.TotalErrors,$scanResult.TotalMissingRoots,$scanResult.TotalReparseSkipped,$elapsedTotal
-                (C 'CleanupScanSummary').Text = $scanNote
-                $runButton.IsEnabled = $true
-                Update-AMRCleanupSelectedSummary
-                Update-AMRCleanupProgress 100 $scanNote
-                Write-AMRLog ("Cleanup scan finished: {0} files, {1:N2} MB, roots checked={2}, scan errors={3}, missing roots={4}, reparse points skipped={5}." -f $scanResult.TotalFiles,($scanResult.TotalBytes/1MB),$scanResult.TotalRoots,$scanResult.TotalErrors,$scanResult.TotalMissingRoots,$scanResult.TotalReparseSkipped) $(if (($scanResult.TotalErrors -gt 0) -or ($scanResult.TotalMissingRoots -gt 0)) { 'WARNING' } else { 'SUCCESS' }) Cleanup
-                Write-AMRCleanupTrace (('Scan completed: files={0}; bytes={1}; roots={2}; errors={3}; missingRoots={4}; reparseSkipped={5}.' -f $scanResult.TotalFiles,$scanResult.TotalBytes,$scanResult.TotalRoots,$scanResult.TotalErrors,$scanResult.TotalMissingRoots,$scanResult.TotalReparseSkipped))
-                $appCacheResult = @($scanResult.Results | Where-Object { $_.Key -eq 'AppCache' } | Select-Object -First 1)
-                $installedApps = @($script:AMRApplicationCacheInventory | Where-Object { $_.Status -eq 'Installed' })
-                $notInstalledApps = @($script:AMRApplicationCacheInventory | Where-Object { $_.Status -eq 'Not installed' })
-                $appCacheFiles = if ($appCacheResult.Count -gt 0) { [int]$appCacheResult[0].Count } else { 0 }
-                $appCacheBytes = if ($appCacheResult.Count -gt 0) { [int64]$appCacheResult[0].Bytes } else { [int64]0 }
-                $notInstalledText = if ($notInstalledApps.Count -gt 0) { 'Not installed on this PC: ' + ((@($notInstalledApps | Select-Object -First 4 | ForEach-Object { $_.Name }) -join ', ')) + $(if ($notInstalledApps.Count -gt 4) { ' +' + ($notInstalledApps.Count - 4) + ' more' } else { '' }) } else { 'All checked app families were detected.' }
-                $scanKind = if (($scanResult.TotalErrors -gt 0) -or ($scanResult.TotalMissingRoots -gt 0)) { 'Warning' } else { 'Success' }
-                $scanStatus = if ($scanKind -eq 'Warning') { 'Scan completed with warnings' } elseif ($scanResult.TotalFiles -eq 0) { 'Scan complete — nothing to clean' } else { 'Scan completed successfully' }
-                $scanDetails = if ($installedApps.Count -eq 0 -and $appCacheFiles -eq 0) { 'No supported browser or desktop cache apps are installed on this device. No application cache was found or changed.' } elseif ($installedApps.Count -eq 0 -and $appCacheFiles -gt 0) { 'No supported cache app is currently installed, but cache folders from previous app use were found. Review them before cleanup.' } else { ('Detected {0} supported app families. Review the estimated cache size before choosing what to clean.' -f $installedApps.Count) }
-                $scanLines = @(("Application caches: {0:N0} files • {1:N2} MB" -f $appCacheFiles,($appCacheBytes/1MB)),$notInstalledText,("Overall scan: {0:N0} files • {1:N2} MB • {2} scan errors" -f $scanResult.TotalFiles,($scanResult.TotalBytes/1MB),$scanResult.TotalErrors))
-                Show-AMRCleanupSummary -Title 'AMR | Cleanup Scan' -Status $scanStatus -Details $scanDetails -Lines $scanLines -Kind $scanKind
-            } catch {
-                $cleanupTimerError = $_
-                $summaryControl = C 'CleanupScanSummary'
-                if ($summaryControl) { try { $summaryControl.Text = ('Background cleanup scan failed: ' + $cleanupTimerError.Exception.Message) } catch {} }
-                try { Update-AMRCleanupProgress 0 'Scan failed. Review Cleanup logs.' -NoPump } catch {}
-                try { Write-AMRLog ("Cleanup DispatcherTimer callback failed: {0}; Script={1}; Line={2}; Position={3}; Stack={4}." -f $cleanupTimerError.Exception.Message,$cleanupTimerError.InvocationInfo.ScriptName,$cleanupTimerError.InvocationInfo.ScriptLineNumber,$cleanupTimerError.InvocationInfo.PositionMessage,$cleanupTimerError.ScriptStackTrace) ERROR Cleanup } catch {}
-                try {
-                    $traceDetails = @(
-                        ('Message: ' + [string]$cleanupTimerError.Exception.Message),
-                        ('Script: ' + [string]$cleanupTimerError.InvocationInfo.ScriptName),
-                        ('Line: ' + [string]$cleanupTimerError.InvocationInfo.ScriptLineNumber),
-                        ('Position: ' + [string]$cleanupTimerError.InvocationInfo.PositionMessage),
-                        ('Stack: ' + [string]$cleanupTimerError.ScriptStackTrace)
-                    ) -join ' | '
-                    Write-AMRCleanupTrace $traceDetails 'ERROR'
-                } catch {}
-                try { Show-AMRMessage ("Cleanup scan failed:`n{0}" -f $cleanupTimerError.Exception.Message) 'Cleanup' OK Error | Out-Null } catch {}
-            } finally {
-                try { $activeJob.PowerShell.Dispose() } catch {}
-                try { $activeJob.Runspace.Dispose() } catch {}
-                if ($jobState.Current -eq $activeJob) { $jobState.Current = $null }
-                $scanButton.IsEnabled = $true
+            # Per-root diagnostics make it clear which locations contributed data,
+            # which did not exist, and which could not be read on this PC.
+            foreach ($rootPath in @($category.Paths)) {
+                $rootFiles = @($files | Where-Object {
+                    try { $_.FullName.StartsWith(([System.IO.Path]::GetFullPath([string]$rootPath).TrimEnd('\') + '\'),[System.StringComparison]::OrdinalIgnoreCase) } catch { $false }
+                })
+                $rootBytes = [int64]0
+                foreach ($rootFile in $rootFiles) { try { $rootBytes += [int64]$rootFile.Length } catch { } }
+                $rootExists = [System.IO.Directory]::Exists([string]$rootPath)
+                Write-AMRLog ("Cleanup root audit | Category={0} | Exists={1} | Files={2} | MB={3:N2} | Path={4}" -f $category.Label,$rootExists,$rootFiles.Count,($rootBytes / 1MB),$rootPath) INFO Cleanup
             }
-        }.GetNewClosure())
-        $timerInstance.Start()
+            foreach ($missingRoot in @($scanResult.MissingRoots)) {
+                Write-AMRLog ("Cleanup root missing | Category={0} | Path={1}" -f $category.Label,$missingRoot) INFO Cleanup
+            }
+            foreach ($scanError in @($scanResult.Errors)) {
+                Write-AMRLog ("Cleanup scan issue | Category={0} | Path={1} | Stage={2} | Error={3}" -f $category.Label,$scanError.Path,$scanError.Stage,$scanError.Message) WARNING Cleanup
+            }
+            $info = C $category.Info
+            if ($info) { $info.Text = ('{0:N0} files • {1:N2} MB' -f $files.Count,($bytes / 1MB)) }
+            $totalBytes += $bytes
+            $totalFiles += $files.Count
+            Write-AMRLog ("Scanned {0}: {1:N0} files, {2:N2} MB." -f $category.Label,$files.Count,($bytes / 1MB)) INFO Cleanup
+        }
+
+        $runButton.IsEnabled = $true
+        Update-AMRCleanupSelectedSummary
+        Update-AMRCleanupProgress 100 ('Scan complete: {0:N0} files • {1:N2} MB' -f $totalFiles,($totalBytes / 1MB))
+        Write-AMRLog ("Legacy simple Cleanup scan completed: {0} files, {1:N2} MB found." -f $totalFiles,($totalBytes / 1MB)) SUCCESS Cleanup
     } catch {
-        if ($powerShell) { try { $powerShell.Dispose() } catch {} }
-        if ($runspace) { try { $runspace.Dispose() } catch {} }
-        $script:AMRCleanupScanState.Current = $null
+        Update-AMRCleanupProgress 0 'Scan failed. Check the application log.'
+        Write-AMRLog ("Cleanup scan failed: {0}" -f $_.Exception.Message) ERROR Cleanup
+        Show-AMRCleanupSummary -Title 'AMR | Cleanup Scan' -Status 'Scan failed' -Details $_.Exception.Message -Kind Error
+    } finally {
         $scanButton.IsEnabled = $true
-        (C 'CleanupScanSummary').Text = ('Unable to start background scan: ' + $_.Exception.Message)
-        Update-AMRCleanupProgress 0 'Unable to start background scan.'
-        Write-AMRLog ("Unable to start background Cleanup scan: {0}" -f $_.Exception.Message) ERROR Cleanup
     }
 })
 
+# Legacy simple Clean Selected: confirm, stop Windows Update only if it was running,
+# remove the scanned files, verify disappearance, then restore the original running state.
 (C 'CleanupRunBtn').Add_Click({
-    $selected = @($script:CleanupCategories | Where-Object { (C $_.Check).IsChecked -eq $true })
+    $selected = @($script:CleanupCategories | Where-Object {
+        $check = C $_.Check
+        $check -and $check.IsChecked -eq $true
+    })
     if ($selected.Count -eq 0) {
         Show-AMRCleanupSummary -Title 'AMR | Cleanup' -Status 'No category selected' -Details 'Choose at least one cleanup category, then run Scan Now before cleaning.' -Kind Info
         return
@@ -17947,343 +17661,147 @@ foreach ($category in $Categories) {
     $notScanned = @($selected | Where-Object { -not $script:CleanupScanResults.ContainsKey($_.Key) })
     if ($notScanned.Count -gt 0) {
         $names = ($notScanned | ForEach-Object { $_.Label }) -join ', '
-        Show-AMRCleanupSummary -Title 'AMR | Cleanup' -Status 'Scan required' -Details 'These categories have not been scanned yet. No files were changed.' -Lines @($names) -Kind Warning
+        Show-AMRCleanupSummary -Title 'AMR | Cleanup' -Status 'Scan required' -Details 'Run Scan Now before cleaning these categories.' -Lines @($names) -Kind Warning
         return
     }
 
     $incompleteScans = @($selected | Where-Object { -not [bool]$script:CleanupScanResults[$_.Key].Complete })
     if ($incompleteScans.Count -gt 0) {
-        $names = ($incompleteScans | ForEach-Object { $_.Label }) -join "`n• "
-        Show-AMRCleanupSummary -Title 'AMR | Cleanup Safety Check' -Status 'Cleanup blocked for safety' -Details 'One or more selected categories were only partially scanned. AMR will not clean from an incomplete inventory.' -Lines @($names,'Review Cleanup Logs, resolve access errors, then scan again. No files were changed.') -Kind Warning
-        Write-AMRLog ("Cleanup blocked because selected categories have incomplete scans: {0}." -f (($incompleteScans | ForEach-Object { $_.Label }) -join ', ')) WARNING Cleanup
+        $names = ($incompleteScans | ForEach-Object { $_.Label }) -join ', '
+        Show-AMRCleanupSummary -Title 'AMR | Cleanup Safety Check' -Status 'Cleanup blocked for safety' -Details 'One or more selected categories could not be fully scanned. No files were changed.' -Lines @($names,'Resolve access errors, then run Scan Now again.') -Kind Warning
+        Write-AMRLog ("Cleanup blocked because selected categories had incomplete scans: {0}." -f $names) WARNING Cleanup
         return
     }
 
     $estimate = [int64]0
     $filesEstimate = 0
-    foreach ($cat in $selected) {
-        $estimate += [int64]$script:CleanupScanResults[$cat.Key].Bytes
-        $filesEstimate += [int]$script:CleanupScanResults[$cat.Key].Count
+    foreach ($category in $selected) {
+        $estimate += [int64]$script:CleanupScanResults[$category.Key].Bytes
+        $filesEstimate += [int]$script:CleanupScanResults[$category.Key].Count
     }
     $names = ($selected | ForEach-Object { $_.Label }) -join "`n• "
-    $answer = Show-AMRMessage ("You are about to permanently remove the selected temporary/cache files:`n`n• $names`n`nEstimated: {0:N0} files ({1:N2} MB).`n`nThis cannot be undone. Continue?" -f $filesEstimate,($estimate / 1MB)) 'Confirm Cleanup' YesNo Warning
+    $answer = Show-AMRMessage ("You are about to remove the selected temporary/cache files:`n`n• $names`n`nEstimated: {0:N0} files ({1:N2} MB).`n`nThis cannot be undone. Continue?" -f $filesEstimate,($estimate / 1MB)) 'Confirm Cleanup' YesNo Warning
     if ($answer -ne [System.Windows.MessageBoxResult]::Yes) {
         Write-AMRLog 'User cancelled the selected cleanup operation at confirmation.' INFO Cleanup
         return
     }
 
-    Write-AMRLog ("Cleanup confirmed. Selected categories: {0}; estimate: {1:N0} files, {2:N2} MB." -f (($selected | ForEach-Object { $_.Label }) -join ', '),$filesEstimate,($estimate/1MB)) INFO Cleanup
-
     $runButton = C 'CleanupRunBtn'
     $scanButton = C 'CleanupScanBtn'
     $runButton.IsEnabled = $false
     $scanButton.IsEnabled = $false
-
     $deleted = 0
     $skipped = 0
     $failed = 0
-    $systemFailures = 0
-    $bytesFreed = [int64]0
     $done = 0
-    $updateSelected = [bool](@($selected | Where-Object { $_.Key -eq 'Update' }).Count -gt 0)
-    $updateServiceOriginalState = 'Not Checked'
-    $updateServiceRestoreState = 'Not Required'
-    $updateServiceCanClean = $true
-    $updateServiceStoppedByUs = $false
-    $updateService = $null
-    $diskSpaceBefore = @{}
-    $diskSpaceAfter = @{}
-
-    # Capture free space on every volume represented in the selected scan, where possible.
-    foreach ($cat in $selected) {
-        foreach ($file in @($script:CleanupScanResults[$cat.Key].Files)) {
-            try {
-                $root = [System.IO.Path]::GetPathRoot([string]$file.FullName)
-                if ($root -and -not $diskSpaceBefore.ContainsKey($root)) {
-                    $driveInfo = New-Object System.IO.DriveInfo($root)
-                    $driveInfo.Refresh()
-                    $diskSpaceBefore[$root] = [int64]$driveInfo.AvailableFreeSpace
-                }
-            } catch {
-                Write-AMRLog ("Could not capture initial free space for path {0}: {1}" -f $file.FullName,$_.Exception.Message) WARNING Cleanup
-            }
-        }
-    }
+    $updateWasRunning = $false
+    $updateServiceTouched = $false
+    $updateServiceMessage = 'Not involved'
 
     try {
-        # Windows Update cache is cleaned only after a verified stop.
-        if ($updateSelected) {
-            try {
-                $updateService = Get-Service -Name 'wuauserv' -ErrorAction Stop
-                $updateServiceOriginalState = [string]$updateService.Status
-                if ($updateService.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Running) {
-                    Stop-Service -Name 'wuauserv' -Force -ErrorAction Stop
-                    $updateServiceStoppedByUs = $true
-                    $updateService = Get-Service -Name 'wuauserv' -ErrorAction Stop
-                    $updateService.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped,[TimeSpan]::FromSeconds(30))
-                    $updateService.Refresh()
-                    if ($updateService.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Stopped) {
-                        throw 'Windows Update service did not reach the Stopped state.'
-                    }
-                    $updateServiceRestoreState = 'Pending restoration to Running'
-                    Write-AMRLog 'Windows Update service was Running and is now verified Stopped for cache cleanup.' INFO Cleanup
-                } elseif ($updateService.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Stopped) {
-                    $updateServiceRestoreState = 'Originally Stopped; must remain Stopped'
-                    Write-AMRLog 'Windows Update service was already Stopped; it will not be started by cleanup.' INFO Cleanup
-                } else {
-                    throw ("Windows Update service is in an unsupported transitional state: {0}" -f $updateService.Status)
-                }
-            } catch {
-                $updateServiceCanClean = $false
-                $updateServiceRestoreState = 'Service preparation failed; original state will be checked/restored'
-                $systemFailures++
-                try {
-                    $svcCheck = Get-Service -Name 'wuauserv' -ErrorAction Stop
-                    if ($updateServiceOriginalState -eq 'Running' -and $svcCheck.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Stopped) {
-                        $updateServiceStoppedByUs = $true
-                    }
-                } catch { }
-                Write-AMRLog ("Windows Update service could not be safely prepared. Update cache files will not be deleted. Error: {0}" -f $_.Exception.Message) ERROR Cleanup
+        if (@($selected | Where-Object { $_.Key -eq 'Update' }).Count -gt 0) {
+            $service = Get-Service -Name 'wuauserv' -ErrorAction SilentlyContinue
+            if ($service -and $service.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Running) {
+                $updateWasRunning = $true
+                Stop-Service -Name 'wuauserv' -Force -ErrorAction Stop
+                $updateServiceTouched = $true
+                $service = Get-Service -Name 'wuauserv' -ErrorAction Stop
+                $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped,[TimeSpan]::FromSeconds(20))
+                $updateServiceMessage = 'Stopped for cleanup; will be restarted'
+            } elseif ($service) {
+                $updateServiceMessage = ('Originally {0}; left unchanged' -f $service.Status)
+            } else {
+                $updateServiceMessage = 'Service unavailable; cache cleanup attempted'
             }
         }
 
-        foreach ($cat in $selected) {
-            $result = $script:CleanupScanResults[$cat.Key]
+        foreach ($category in $selected) {
+            $result = $script:CleanupScanResults[$category.Key]
             $fileList = @($result.Files)
             $fileIndex = 0
-            $categoryDeleted = 0
-            $categorySkipped = 0
-            $categoryFailed = 0
-            $categoryBytesFreed = [int64]0
-            Write-AMRLog ("Cleanup category started: {0}; scanned files: {1}." -f $cat.Label,$fileList.Count) INFO Cleanup
+            Write-AMRLog ("Cleaning category {0}: {1} files." -f $category.Label,$fileList.Count) INFO Cleanup
 
             foreach ($file in $fileList) {
                 $fileIndex++
                 $path = [string]$file.FullName
-                $before = 'Unknown'
-                $requested = 'Absent'
-                $after = 'Unknown'
-                $fileBytes = [int64]0
-                $sizeStatus = 'Not Read'
-                $executionText = 'Not Started'
-                $errorText = ''
-
-                if ($cat.Key -eq 'Update' -and -not $updateServiceCanClean) {
-                    $before = 'Not Checked'
-                    $after = 'Not Checked'
-                    $executionText = 'Blocked: Windows Update service state was not verified'
-                    $errorText = 'Windows Update cache cleanup was blocked because the service could not be safely prepared.'
-                    $categoryFailed++
-                    $failed++
-                    Write-AMRLog ("DELETE FAILED / NOT VERIFIED`r`nPath={0}`r`nBefore={1}`r`nRequested={2}`r`nAfter={3}`r`nExecution={4}`r`nError={5}" -f $path,$before,$requested,$after,$executionText,$errorText) ERROR Cleanup
-                } else {
-                    try {
-                        $existsBefore = Test-Path -LiteralPath $path -PathType Leaf -ErrorAction Stop
-                        if (-not $existsBefore) {
-                            $before = 'Absent'
-                            $after = 'Absent'
-                            $executionText = 'Not Run'
+                try {
+                    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                        $skipped++
+                    } elseif (-not (Test-AMRCleanupPathSafe -Path $path -Roots @($category.Paths))) {
+                        $skipped++
+                        Write-AMRLog ("Skipped path outside registered cleanup roots or with a reparse-point parent: {0}" -f $path) WARNING Cleanup
+                    } else {
+                        # Basic last-moment safety check: do not delete a reparse point or directory.
+                        $attributes = [System.IO.File]::GetAttributes($path)
+                        if ((($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) -or (($attributes -band [System.IO.FileAttributes]::Directory) -ne 0)) {
                             $skipped++
-                            $categorySkipped++
-                            Write-AMRLog ("SKIPPED`r`nPath={0}`r`nBefore=Absent`r`nRequested=Absent`r`nAfter=Absent`r`nReason=File was not present at cleanup time." -f $path) INFO Cleanup
+                            Write-AMRLog ("Skipped unsafe or changed filesystem entry: {0}" -f $path) WARNING Cleanup
                         } else {
-                            if ([int]$cat.MinAgeDays -gt 0) {
-                                $freshInfo = New-Object System.IO.FileInfo($path)
-                                $freshInfo.Refresh()
-                                if ($freshInfo.Exists -and $freshInfo.LastWriteTime -ge (Get-Date).AddDays(-[int]$cat.MinAgeDays)) {
-                                    $after = 'Present'
-                                    $executionText = 'Skipped: file is newer than the configured age threshold'
-                                    $skipped++
-                                    $categorySkipped++
-                                    Write-AMRLog ("SKIPPED`r`nPath={0}`r`nReason=File is newer than {1} days and was not deleted." -f $path,$cat.MinAgeDays) INFO Cleanup
-                                    continue
-                                }
-                            }
-                            $before = 'Present'
-                            try {
-                                $fileInfo = New-Object System.IO.FileInfo($path)
-                                $fileInfo.Refresh()
-                                if ($fileInfo.Exists) {
-                                    $fileBytes = [int64]$fileInfo.Length
-                                    $sizeStatus = 'Read'
-                                } else {
-                                    $sizeStatus = 'Unavailable: file changed during metadata read'
-                                }
-                            } catch {
-                                $fileBytes = [int64]0
-                                $sizeStatus = 'Unavailable: ' + $_.Exception.Message
-                            }
-
-                            $executionText = 'Remove-Item attempted'
-                            try {
-                                Remove-Item -LiteralPath $path -Force -ErrorAction Stop
-                            } catch {
-                                $errorText = $_.Exception.Message
-                            }
-
-                            # Re-check the actual filesystem state, even if Remove-Item raised an error.
-                            $existsAfter = Test-Path -LiteralPath $path -PathType Leaf -ErrorAction Stop
-                            if (-not $existsAfter) {
-                                $after = 'Absent'
+                            $fileBytes = [int64]0
+                            try { $fileBytes = [int64]([System.IO.FileInfo]$path).Length } catch { }
+                            Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+                            if (-not (Test-Path -LiteralPath $path)) {
                                 $deleted++
-                                $categoryDeleted++
-                                $bytesFreed += $fileBytes
-                                $categoryBytesFreed += $fileBytes
-                                $executionText = if ($errorText) { 'Remove-Item reported an error; absence verified' } else { 'Remove-Item completed' }
-                                Write-AMRLog ("VERIFIED DELETE`r`nPath={0}`r`nBefore=Present`r`nRequested=Absent`r`nAfter=Absent`r`nBytes={1}`r`nSizeStatus={2}`r`nExecution={3}`r`nVerification=Passed" -f $path,$fileBytes,$sizeStatus,$executionText) SUCCESS Cleanup
+                                Write-AMRLog ("Verified deleted: {0} ({1:N2} MB)." -f $path,($fileBytes / 1MB)) SUCCESS Cleanup
                             } else {
-                                $after = 'Present'
-                                $categoryFailed++
                                 $failed++
-                                if (-not $errorText) { $errorText = 'File still exists after Remove-Item; deletion was not verified.' }
-                                Write-AMRLog ("DELETE FAILED / NOT VERIFIED`r`nPath={0}`r`nBefore=Present`r`nRequested=Absent`r`nAfter=Present`r`nBytes={1}`r`nSizeStatus={2}`r`nExecution={3}`r`nVerification=Failed`r`nError={4}" -f $path,$fileBytes,$sizeStatus,$executionText,$errorText) ERROR Cleanup
+                                Write-AMRLog ("Delete was not verified; file remains: {0}" -f $path) ERROR Cleanup
                             }
                         }
-                    } catch {
-                        $after = 'Unknown'
-                        $categoryFailed++
-                        $failed++
-                        $errorText = $_.Exception.Message
-                        Write-AMRLog ("DELETE FAILED / NOT VERIFIED`r`nPath={0}`r`nBefore={1}`r`nRequested={2}`r`nAfter={3}`r`nExecution={4}`r`nVerification=Not Verified`r`nError={5}" -f $path,$before,$requested,$after,$executionText,$errorText) ERROR Cleanup
                     }
+                } catch {
+                    $failed++
+                    Write-AMRLog ("Failed to delete file: {0}. Reason: {1}" -f $path,$_.Exception.Message) WARNING Cleanup
                 }
 
                 if (($fileIndex % 40) -eq 0 -or $fileIndex -eq $fileList.Count) {
                     $pct = [int](($done + $fileIndex) * 100 / [Math]::Max(1,$filesEstimate))
-                    Update-AMRCleanupProgress $pct ("Cleaning {0}: {1}/{2} • verified {3}, skipped {4}, failed {5}" -f $cat.Label,$fileIndex,$fileList.Count,$deleted,$skipped,$failed)
+                    Update-AMRCleanupProgress $pct ("Cleaning {0}: {1}/{2} files • removed {3}" -f $category.Label,$fileIndex,$fileList.Count,$deleted)
                 }
             }
-
             $done += $fileList.Count
-            $categoryLevel = if ($categoryFailed -gt 0) { 'WARNING' } else { 'INFO' }
-            Write-AMRLog ("CLEANUP CATEGORY SUMMARY | {0} | Verified Deleted: {1} | Skipped: {2} | Failed / Not Verified: {3} | Verified File Bytes: {4}" -f $cat.Label,$categoryDeleted,$categorySkipped,$categoryFailed,$categoryBytesFreed) $categoryLevel Cleanup
         }
-
-        # Publish the verified file-operation counts before slower service restoration
-        # and free-space measurement. Update-AMRCleanupProgress pumps the existing UI
-        # message loop so the summary becomes visible without changing cleanup order.
-        $preliminarySummary = "Cleanup actions finished: {0} verified deleted, {1} skipped, {2} failed files. Final service and disk-space verification is still running..." -f $deleted,$skipped,$failed
-        (C 'CleanupScanSummary').Text = $preliminarySummary
-        Update-AMRCleanupProgress 96 'Cleanup actions finished. Verifying Windows service state and final free space...'
     } catch {
-        $systemFailures++
-        Write-AMRLog ("Cleanup operation encountered an unexpected error: {0}" -f $_.Exception.Message) ERROR Cleanup
+        $failed++
+        Write-AMRLog ("Cleanup operation error: {0}" -f $_.Exception.Message) ERROR Cleanup
     } finally {
-        # Restore/verify the service against the exact state observed before cleanup.
-        if ($updateSelected) {
-            if ($updateServiceOriginalState -eq 'Running') {
-                try {
-                    $svcFinal = Get-Service -Name 'wuauserv' -ErrorAction Stop
-                    if ($svcFinal.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Running) {
-                        Start-Service -Name 'wuauserv' -ErrorAction Stop
-                        $svcFinal = Get-Service -Name 'wuauserv' -ErrorAction Stop
-                        $svcFinal.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running,[TimeSpan]::FromSeconds(30))
-                        $svcFinal.Refresh()
-                    }
-                    if ($svcFinal.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Running) {
-                        throw 'Windows Update service did not return to its original Running state.'
-                    }
-                    $updateServiceRestoreState = 'Original Running state restored and verified'
-                    Write-AMRLog 'Windows Update service original Running state verified after cleanup.' SUCCESS Cleanup
-                } catch {
-                    $systemFailures++
-                    $updateServiceRestoreState = 'RESTORE FAILED / NOT VERIFIED'
-                    Write-AMRLog ("Windows Update service restoration/verification failed: {0}" -f $_.Exception.Message) ERROR Cleanup
-                }
-            } elseif ($updateServiceOriginalState -eq 'Stopped') {
-                try {
-                    $svcFinal = Get-Service -Name 'wuauserv' -ErrorAction Stop
-                    if ($svcFinal.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Stopped) {
-                        Stop-Service -Name 'wuauserv' -Force -ErrorAction Stop
-                        $svcFinal = Get-Service -Name 'wuauserv' -ErrorAction Stop
-                        $svcFinal.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped,[TimeSpan]::FromSeconds(30))
-                        $svcFinal.Refresh()
-                    }
-                    if ($svcFinal.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Stopped) {
-                        throw 'Windows Update service did not remain in its original Stopped state.'
-                    }
-                    $updateServiceRestoreState = 'Original Stopped state preserved and verified'
-                    Write-AMRLog 'Windows Update service original Stopped state verified after cleanup.' SUCCESS Cleanup
-                } catch {
-                    $systemFailures++
-                    $updateServiceRestoreState = 'ORIGINAL STOPPED STATE NOT VERIFIED'
-                    Write-AMRLog ("Windows Update original Stopped state restoration/verification failed: {0}" -f $_.Exception.Message) ERROR Cleanup
-                }
-            } else {
-                try {
-                    $svcFinal = Get-Service -Name 'wuauserv' -ErrorAction Stop
-                    if ([string]$svcFinal.Status -ne $updateServiceOriginalState) {
-                        $systemFailures++
-                        $updateServiceRestoreState = ("Original {0} state changed to {1}; restoration not verified" -f $updateServiceOriginalState,$svcFinal.Status)
-                        Write-AMRLog ("Windows Update service changed from its original {0} state to {1}; automatic restoration was not attempted for this unsupported state." -f $updateServiceOriginalState,$svcFinal.Status) ERROR Cleanup
-                    } else {
-                        $updateServiceRestoreState = ("Original {0} state preserved and verified" -f $updateServiceOriginalState)
-                        Write-AMRLog ("Windows Update service remained in its original {0} state." -f $updateServiceOriginalState) SUCCESS Cleanup
-                    }
-                } catch {
-                    $systemFailures++
-                    $updateServiceRestoreState = 'Original service state unavailable; restoration could not be verified'
-                    Write-AMRLog ("Windows Update service final state verification failed: {0}" -f $_.Exception.Message) ERROR Cleanup
-                }
-            }
-        }
-
-        # Measure free-space change separately from the sum of deleted file lengths.
-        foreach ($root in @($diskSpaceBefore.Keys)) {
+        if ($updateServiceTouched -and $updateWasRunning) {
             try {
-                $driveInfo = New-Object System.IO.DriveInfo($root)
-                $driveInfo.Refresh()
-                $diskSpaceAfter[$root] = [int64]$driveInfo.AvailableFreeSpace
+                Start-Service -Name 'wuauserv' -ErrorAction Stop
+                $service = Get-Service -Name 'wuauserv' -ErrorAction Stop
+                $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running,[TimeSpan]::FromSeconds(20))
+                $updateServiceMessage = 'Originally Running; restarted and verified'
+                Write-AMRLog 'Windows Update service restored to Running after cleanup.' SUCCESS Cleanup
             } catch {
-                Write-AMRLog ("Could not measure final free space for volume {0}: {1}" -f $root,$_.Exception.Message) WARNING Cleanup
+                $failed++
+                $updateServiceMessage = 'Restart failed; check Windows Update service'
+                Write-AMRLog ("Could not restore Windows Update service: {0}" -f $_.Exception.Message) ERROR Cleanup
             }
         }
-
         $runButton.IsEnabled = $true
         $scanButton.IsEnabled = $true
     }
 
-    $actualFreeSpaceDelta = [int64]0
-    $measuredVolumes = 0
-    foreach ($root in @($diskSpaceBefore.Keys)) {
-        if ($diskSpaceAfter.ContainsKey($root)) {
-            $actualFreeSpaceDelta += ([int64]$diskSpaceAfter[$root] - [int64]$diskSpaceBefore[$root])
-            $measuredVolumes++
-        }
-    }
-
-    $serviceLine = if ($updateSelected) { "Windows Update service: $updateServiceRestoreState" } else { 'Windows Update service: Not involved' }
-    $diskLine = if ($measuredVolumes -gt 0) {
-        "Measured free-space change across $measuredVolumes volume(s): {0:N2} MB" -f ($actualFreeSpaceDelta / 1MB)
-    } else {
-        'Measured free-space change: Not available'
-    }
-    $summary = "Cleanup results:`nVerified Deleted: $deleted files`nSkipped (already absent): $skipped files`nFailed / Not Verified: $failed files`nSystem / Service Failures: $systemFailures`nVerified deleted-file size: {0:N2} MB`n{1}`n{2}`nRun Scan Now again to refresh the estimates." -f ($bytesFreed / 1MB),$diskLine,$serviceLine
-
-    $totalFailures = $failed + $systemFailures
-    $finalLevel = if ($totalFailures -gt 0) { 'ERROR' } else { 'SUCCESS' }
-    Update-AMRCleanupProgress 100 ("Finished • verified deleted {0} • skipped {1} • failed files {2} • system/service failures {3}" -f $deleted,$skipped,$failed,$systemFailures)
-    (C 'CleanupScanSummary').Text = ("Cleanup finished: {0} verified deleted, {1} skipped, {2} failed files, {3} system/service failures. Rescan required." -f $deleted,$skipped,$failed,$systemFailures)
-    foreach ($cat in $selected) {
-        $info = C $cat.Info
+    $summaryControl = C 'CleanupScanSummary'
+    if ($summaryControl) { $summaryControl.Text = 'Cleanup finished. Scan again to refresh the results.' }
+    foreach ($category in $selected) {
+        $info = C $category.Info
         if ($info) { $info.Text = 'Rescan required' }
     }
     $script:CleanupScanResults = @{}
     Update-AMRCleanupSelectedSummary
+    Update-AMRCleanupProgress 100 ("Finished • removed {0} • skipped {1} • failed {2}" -f $deleted,$skipped,$failed)
 
-    Write-AMRLog ("CLEANUP FINAL SUMMARY | Verified Deleted: {0} | Skipped: {1} | Failed Files: {2} | System/Service Failures: {3} | Verified File Bytes: {4} | Measured Free Space Delta: {5} | Windows Update: {6}" -f $deleted,$skipped,$failed,$systemFailures,$bytesFreed,$actualFreeSpaceDelta,$updateServiceRestoreState) $finalLevel Cleanup
-    $summaryKind = if ($totalFailures -gt 0) { 'Warning' } else { 'Success' }
-    $summaryStatus = if ($totalFailures -gt 0) { 'Completed with issues' } elseif ($deleted -eq 0 -and $skipped -eq 0) { 'Completed successfully — nothing to clean' } else { 'Cleanup completed successfully' }
+    $summaryKind = if ($failed -gt 0) { 'Warning' } else { 'Success' }
+    $summaryStatus = if ($failed -gt 0) { 'Cleanup completed with issues' } elseif ($deleted -eq 0) { 'Nothing needed cleaning' } else { 'Cleanup completed successfully' }
     $summaryLines = @(
-        ("Verified removed: {0:N0} files • {1:N2} MB" -f $deleted,($bytesFreed/1MB)),
-        ("Skipped: {0:N0} • Failed / not verified: {1:N0}" -f $skipped,$failed),
-        ("System / service failures: {0:N0}" -f $systemFailures),
-        $diskLine,$serviceLine
+        ("Removed and verified: {0:N0} files" -f $deleted),
+        ("Skipped: {0:N0} • Failed: {1:N0}" -f $skipped,$failed),
+        ("Windows Update service: {0}" -f $updateServiceMessage),
+        'Run Scan Now again to refresh the estimates.'
     )
-    if (@($selected | Where-Object { $_.Key -eq 'AppCache' }).Count -gt 0 -and @($script:AMRApplicationCacheInventory | Where-Object { $_.Status -eq 'Installed' }).Count -eq 0 -and $deleted -eq 0) {
-        $summaryLines += 'No supported cache apps are installed on this device. No application cache was changed.'
-    }
-    Show-AMRCleanupSummary -Title 'AMR | Cleanup Results' -Status $summaryStatus -Details 'The cleanup operation has finished. Results below are based on verified file operations.' -Lines $summaryLines -Kind $summaryKind
+    Write-AMRLog ("Legacy simple Cleanup completed. Removed={0}; Skipped={1}; Failed={2}; WindowsUpdate={3}." -f $deleted,$skipped,$failed,$updateServiceMessage) $(if ($failed -gt 0) { 'WARNING' } else { 'SUCCESS' }) Cleanup
+    Show-AMRCleanupSummary -Title 'AMR | Cleanup Results' -Status $summaryStatus -Details 'The simple cleanup operation has finished.' -Lines $summaryLines -Kind $summaryKind
 })
 
 # BACKUP ENGINE - searchable catalog; all actions export/report unless explicitly creating restore point
