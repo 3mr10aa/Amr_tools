@@ -37,10 +37,11 @@ if ($amrNeedsSta -or $amrNeedsAdmin) {
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
 
-Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml
+# Load only WinForms first so the welcome screen can be displayed before the
+# heavier WPF assemblies are loaded. This reduces the perceived blank startup delay.
 Add-Type -AssemblyName System.Windows.Forms
 
-# Hide a legacy standalone PowerShell console when the script was already elevated.
+# Hide the legacy standalone PowerShell console; this does NOT hide Windows UAC.
 # Do not hide Windows Terminal tabs or the PowerShell ISE host.
 if ($Host.Name -eq 'ConsoleHost' -and [string]::IsNullOrWhiteSpace([string]$env:WT_SESSION)) {
     try {
@@ -59,7 +60,7 @@ public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
 
 # --- 0.1 | Lightweight welcome splash ---
 # WinForms is already loaded; this small, non-blocking splash gives immediate feedback
-# while the WPF interface and cached inventories are prepared. It closes on first render.
+# while the WPF assemblies, interface and cached inventories are prepared. It closes on first render.
 $script:AMRStartupSplash = $null
 try {
     $splash = New-Object System.Windows.Forms.Form
@@ -71,8 +72,8 @@ try {
     $splash.ForeColor = [System.Drawing.Color]::White
     $splash.ShowInTaskbar = $false
     $splash.TopMost = $true
-    $splash.RightToLeft = [System.Windows.Forms.RightToLeft]::Yes
-    $splash.RightToLeftLayout = $true
+    $splash.RightToLeft = [System.Windows.Forms.RightToLeft]::No
+    $splash.RightToLeftLayout = $false
 
     $brand = New-Object System.Windows.Forms.Label
     $brand.Dock = [System.Windows.Forms.DockStyle]::Top
@@ -85,8 +86,8 @@ try {
 
     $welcome = New-Object System.Windows.Forms.Label
     $welcome.Dock = [System.Windows.Forms.DockStyle]::Fill
-    $welcome.Text = "شكراً لثقتك في AMR
-نقدّر وقتك، ونعمل دائماً لتكون تجربتك أسرع وأسهل."
+    $welcome.Text = "Thank you for choosing AMR.
+We appreciate your trust and are working to make your experience smoother and faster."
     $welcome.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
     $welcome.ForeColor = [System.Drawing.Color]::FromArgb(241,245,249)
     $welcome.Font = [System.Drawing.Font]::new('Segoe UI',12,[System.Drawing.FontStyle]::Regular)
@@ -95,7 +96,7 @@ try {
     $loading = New-Object System.Windows.Forms.Label
     $loading.Dock = [System.Windows.Forms.DockStyle]::Bottom
     $loading.Height = 34
-    $loading.Text = 'Preparing your workspace...'
+    $loading.Text = 'Getting things ready...'
     $loading.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
     $loading.ForeColor = [System.Drawing.Color]::FromArgb(148,163,184)
     $loading.Font = [System.Drawing.Font]::new('Segoe UI',9,[System.Drawing.FontStyle]::Regular)
@@ -119,6 +120,9 @@ function Close-AMRStartupSplash {
     } catch { $script:AMRStartupSplash = $null }
 }
 $script:AMRStartupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+# Load WPF only after the splash has been shown and painted.
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml
 
 # Durable log writer: pure .NET ThreadPool timer, no PowerShell callback and no WPF dependency.
 if (-not ('AMRLogDiskWriter' -as [type])) {
