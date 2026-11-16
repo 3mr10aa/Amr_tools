@@ -5,37 +5,120 @@ Developer: عمرو أحمد عبد الفتاح | Phone: 01014716301 | Email: 3
 #>
 
 # --- Phase 6.8 | Direct Vendor Adapters & Full Multi-Source Discovery (built on Phase 6.7) ---
-# --- 0. Verify STA Mode for WPF Stability ---
-# This version can be pasted into the PowerShell ISE script editor and run with F5.
-# When pasted, $PSCommandPath may be empty, so do not attempt to relaunch an unknown/old file.
-if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') {
-    if (-not [string]::IsNullOrWhiteSpace($PSCommandPath) -and (Test-Path -LiteralPath $PSCommandPath)) {
-        Start-Process powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-File',('"{0}"' -f $PSCommandPath))
-        exit
-    }
-    throw 'AMR Utility requires an STA PowerShell host. Open Windows PowerShell ISE, paste the complete script into the script editor, and press F5.'
-}
-
-Set-StrictMode -Version 2
-$ErrorActionPreference = 'Stop'
-
-# --- 1. Admin Privilege Check (Self-Elevation) ---
+# --- 0. Single-pass STA + Administrator bootstrap ---
+# The previous bootstrap could relaunch twice (first for STA, then for elevation),
+# briefly showing multiple blue PowerShell consoles. Relaunch once with both flags.
 function Test-AMRAdmin {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-if (-not (Test-AMRAdmin)) {
-    if (-not [string]::IsNullOrWhiteSpace($PSCommandPath) -and (Test-Path -LiteralPath $PSCommandPath)) {
-        Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -STA -File `"$PSCommandPath`"" -Verb RunAs
+$amrNeedsSta = ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA')
+$amrNeedsAdmin = -not (Test-AMRAdmin)
+if ($amrNeedsSta -or $amrNeedsAdmin) {
+    if (-not [string]::IsNullOrWhiteSpace($PSCommandPath) -and (Test-Path -LiteralPath $PSCommandPath -PathType Leaf)) {
+        $amrStartArgs = @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-File',('"{0}"' -f $PSCommandPath))
+        $amrStartParams = @{ FilePath='powershell.exe'; ArgumentList=$amrStartArgs; WindowStyle='Hidden'; ErrorAction='Stop' }
+        if ($amrNeedsAdmin) { $amrStartParams.Verb = 'RunAs' }
+        try { Start-Process @amrStartParams }
+        catch {
+            if ($amrNeedsAdmin) { throw ('Administrator launch was cancelled or failed: ' + $_.Exception.Message) }
+            throw ('Could not start the required STA PowerShell host: ' + $_.Exception.Message)
+        }
         exit
     }
-    throw 'AMR Utility needs administrator permissions. Close this ISE window, reopen Windows PowerShell ISE using Run as administrator, paste the complete script into the script editor, and press F5.'
+    if ($amrNeedsSta) {
+        throw 'AMR Utility requires an STA PowerShell host. Save the script as a .ps1 file and run it with Windows PowerShell, or open PowerShell ISE as Administrator and press F5.'
+    }
+    throw 'AMR Utility needs administrator permissions. Save the script as a .ps1 file and launch it normally; Windows will request permission once.'
 }
+
+Set-StrictMode -Version 2
+$ErrorActionPreference = 'Stop'
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml
 Add-Type -AssemblyName System.Windows.Forms
+
+# Hide a legacy standalone PowerShell console when the script was already elevated.
+# Do not hide Windows Terminal tabs or the PowerShell ISE host.
+if ($Host.Name -eq 'ConsoleHost' -and [string]::IsNullOrWhiteSpace([string]$env:WT_SESSION)) {
+    try {
+        if (-not ('AMR.ConsoleWindow' -as [type])) {
+            Add-Type -Namespace AMR -Name ConsoleWindow -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll")]
+public static extern System.IntPtr GetConsoleWindow();
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
+'@
+        }
+        $consoleHandle = [AMR.ConsoleWindow]::GetConsoleWindow()
+        if ($consoleHandle -ne [IntPtr]::Zero) { [void][AMR.ConsoleWindow]::ShowWindow($consoleHandle,0) }
+    } catch { }
+}
+
+# --- 0.1 | Lightweight welcome splash ---
+# WinForms is already loaded; this small, non-blocking splash gives immediate feedback
+# while the WPF interface and cached inventories are prepared. It closes on first render.
+$script:AMRStartupSplash = $null
+try {
+    $splash = New-Object System.Windows.Forms.Form
+    $splash.Text = 'AMR Windows Utility'
+    $splash.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
+    $splash.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+    $splash.ClientSize = [System.Drawing.Size]::new(520,210)
+    $splash.BackColor = [System.Drawing.Color]::FromArgb(15,27,43)
+    $splash.ForeColor = [System.Drawing.Color]::White
+    $splash.ShowInTaskbar = $false
+    $splash.TopMost = $true
+    $splash.RightToLeft = [System.Windows.Forms.RightToLeft]::Yes
+    $splash.RightToLeftLayout = $true
+
+    $brand = New-Object System.Windows.Forms.Label
+    $brand.Dock = [System.Windows.Forms.DockStyle]::Top
+    $brand.Height = 54
+    $brand.Text = 'AMR WINDOWS UTILITY'
+    $brand.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+    $brand.ForeColor = [System.Drawing.Color]::FromArgb(96,165,250)
+    $brand.Font = [System.Drawing.Font]::new('Segoe UI',17,[System.Drawing.FontStyle]::Bold)
+    $splash.Controls.Add($brand)
+
+    $welcome = New-Object System.Windows.Forms.Label
+    $welcome.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $welcome.Text = "شكراً لثقتك في AMR
+نقدّر وقتك، ونعمل دائماً لتكون تجربتك أسرع وأسهل."
+    $welcome.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+    $welcome.ForeColor = [System.Drawing.Color]::FromArgb(241,245,249)
+    $welcome.Font = [System.Drawing.Font]::new('Segoe UI',12,[System.Drawing.FontStyle]::Regular)
+    $splash.Controls.Add($welcome)
+
+    $loading = New-Object System.Windows.Forms.Label
+    $loading.Dock = [System.Windows.Forms.DockStyle]::Bottom
+    $loading.Height = 34
+    $loading.Text = 'Preparing your workspace...'
+    $loading.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+    $loading.ForeColor = [System.Drawing.Color]::FromArgb(148,163,184)
+    $loading.Font = [System.Drawing.Font]::new('Segoe UI',9,[System.Drawing.FontStyle]::Regular)
+    $splash.Controls.Add($loading)
+
+    $script:AMRStartupSplash = $splash
+    $splash.Show()
+    $splash.Refresh()
+    [System.Windows.Forms.Application]::DoEvents()
+} catch {
+    $script:AMRStartupSplash = $null
+}
+
+function Close-AMRStartupSplash {
+    try {
+        if ($script:AMRStartupSplash) {
+            $script:AMRStartupSplash.Close()
+            $script:AMRStartupSplash.Dispose()
+            $script:AMRStartupSplash = $null
+        }
+    } catch { $script:AMRStartupSplash = $null }
+}
+$script:AMRStartupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 # Durable log writer: pure .NET ThreadPool timer, no PowerShell callback and no WPF dependency.
 if (-not ('AMRLogDiskWriter' -as [type])) {
@@ -4558,6 +4641,39 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
             <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupShaderCheck" Content="GPU shader cache" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Rebuildable DirectX, NVIDIA, AMD and Intel shader caches (7+ days)." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupShaderInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
             <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupAppCacheCheck" Content="Application caches" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Recognized rebuildable caches for common browsers, chat, media, gaming and developer apps (7+ days)." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupAppCacheInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
             <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupDeliveryCheck" Content="Delivery Optimization cache" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Cached update delivery files that Windows can download again." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupDeliveryInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+
+            <Border Background="#202027" BorderBrush="#52647A" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,2,0,8">
+             <StackPanel>
+              <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+               <StackPanel><TextBlock Text="Recycle Bin (system drive only)" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Name="CleanupRecycleBinInfo" Text="Not scanned" Foreground="#CBD5E1" FontSize="11" Margin="0,3,0,0"/></StackPanel>
+               <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                <Button Name="CleanupRecycleBinRefreshBtn" Content="Refresh" Height="28" Padding="9,3" Margin="0,0,6,0" Background="#293746" Foreground="#C7DDF5" BorderBrush="#40566D" FontSize="10"/>
+                <Button Name="CleanupRecycleBinEmptyBtn" Content="Empty Bin" Height="28" Padding="9,3" Background="#49313A" Foreground="#FFE4E6" BorderBrush="#8B5363" FontSize="10"/>
+               </StackPanel>
+              </Grid>
+              <TextBlock Text="Only the Windows system drive is included. Emptying requires a separate confirmation." Foreground="#A1A1AA" FontSize="10" Margin="0,5,0,0"/>
+             </StackPanel>
+            </Border>
+            <Border Background="#202027" BorderBrush="#52647A" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,8">
+             <StackPanel>
+              <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+               <StackPanel><TextBlock Text="Crash Dumps &amp; Windows Upgrade Leftovers" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Read-only discovery: crash dumps, Windows.old, upgrade staging and update remnants." Foreground="#CBD5E1" FontSize="11" Margin="0,3,0,0"/></StackPanel>
+               <Button Name="CleanupDiscoveryScanBtn" Grid.Column="1" Content="Inspect" Height="28" Padding="12,3" Background="#293746" Foreground="#C7DDF5" BorderBrush="#40566D" FontSize="10" VerticalAlignment="Center"/>
+              </Grid>
+              <TextBlock Name="CleanupDiscoverySummary" Text="Not inspected" Foreground="#D1D5DB" FontSize="10" Margin="0,6,0,4"/>
+              <TextBox Name="CleanupDiscoveryReport" Text="Inspection results will appear here. These findings are never included in Clean Selected." IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" MaxHeight="150" Background="#0B1220" Foreground="#DCE7F3" BorderBrush="#40566D" FontFamily="Consolas" FontSize="10" Padding="7"/>
+             </StackPanel>
+            </Border>
+            <Border Background="#202027" BorderBrush="#52647A" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,4">
+             <StackPanel>
+              <TextBlock Text="Large Files Review (read-only)" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/>
+              <TextBlock Text="Finds files of 512 MB or larger in common folders on the system drive. Review manually; no delete action is provided." Foreground="#CBD5E1" FontSize="11" Margin="0,3,0,5"/>
+              <Button Name="CleanupLargeFilesScanBtn" Content="Find Large Files" Height="28" HorizontalAlignment="Left" Padding="12,3" Background="#293746" Foreground="#C7DDF5" BorderBrush="#40566D" FontSize="10"/>
+              <TextBlock Name="CleanupLargeFilesSummary" Text="Not inspected" Foreground="#D1D5DB" FontSize="10" Margin="0,6,0,4"/>
+              <TextBox Name="CleanupLargeFilesReport" Text="Large-file findings will appear here. No files are selected for cleanup." IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" MaxHeight="150" Background="#0B1220" Foreground="#DCE7F3" BorderBrush="#40566D" FontFamily="Consolas" FontSize="10" Padding="7"/>
+             </StackPanel>
+            </Border>
+
            </StackPanel>
           </ScrollViewer>
           <StackPanel Grid.Row="3" Margin="0,10,0,8">
@@ -17182,32 +17298,19 @@ foreach ($app in $appCacheDefinitions) {
 # Search every fixed local volume for Windows user profiles, then register only
 # recognized rebuildable cache folder names under each profile's AppData trees.
 # We never recurse through the entire disk or enter reparse points / user documents.
+# Startup discovery is intentionally limited to the Windows system volume and the
+# signed-in user's profile. The old all-fixed-volumes / all-profiles pass caused slow
+# launches, touched unrelated disks, and added little value to the normal cleanup view.
+# Other volumes and other user profiles are never traversed by this startup discovery.
 $script:AMRCacheDiscoveryVolumes = New-Object 'System.Collections.Generic.List[string]'
-try {
-    foreach ($volume in @(Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction Stop)) {
-        if (-not [string]::IsNullOrWhiteSpace([string]$volume.DeviceID)) { $script:AMRCacheDiscoveryVolumes.Add(([string]$volume.DeviceID).TrimEnd('\')) }
-    }
-} catch {
-    foreach ($volume in [System.IO.DriveInfo]::GetDrives()) {
-        try { if ($volume.DriveType -eq [System.IO.DriveType]::Fixed -and $volume.IsReady) { $script:AMRCacheDiscoveryVolumes.Add($volume.RootDirectory.FullName.TrimEnd('\')) } } catch { }
-    }
-}
+$systemVolumeRoot = ([string]$env:SystemDrive).TrimEnd('\')
+if ([string]::IsNullOrWhiteSpace($systemVolumeRoot)) { $systemVolumeRoot = 'C:' }
+$script:AMRCacheDiscoveryVolumes.Add($systemVolumeRoot)
 $knownCacheDirectoryNames = @('Cache','Cache_Data','Code Cache','GPUCache','DawnCache','DawnGraphiteCache','DawnWebGPUCache','GraphiteDawnCache','GrShaderCache','ShaderCache','NV_Cache','DxCache','DxcCache','VkCache','httpcache','htmlcache','webcache','WebCache','WebviewCache','cache2')
 $crossVolumeProfiles = New-Object 'System.Collections.Generic.List[string]'
-foreach ($volumeRoot in $script:AMRCacheDiscoveryVolumes) {
-    $usersRoot = Join-Path $volumeRoot 'Users'
-    try {
-        if ([System.IO.Directory]::Exists($usersRoot)) {
-            foreach ($profileDir in [System.IO.Directory]::GetDirectories($usersRoot)) {
-                $profileName = [System.IO.Path]::GetFileName($profileDir)
-                if ($profileName -in @('Public','Default','Default User','All Users')) { continue }
-                $crossVolumeProfiles.Add($profileDir)
-            }
-        }
-    } catch { Write-AMRLog ("Cross-volume profile discovery warning | Root={0} | {1}" -f $usersRoot,$_.Exception.Message) WARNING Cleanup }
+if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE) -and [System.IO.Directory]::Exists($env:USERPROFILE)) {
+    $crossVolumeProfiles.Add([System.IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\'))
 }
-# Include the active profile even if Windows has redirected it outside <drive>\Users.
-if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE) -and -not $crossVolumeProfiles.Contains($env:USERPROFILE)) { $crossVolumeProfiles.Add($env:USERPROFILE) }
 $crossVolumeCacheHits = 0
 foreach ($profileRoot in $crossVolumeProfiles) {
     foreach ($appDataName in @('AppData\Local','AppData\Roaming','AppData\LocalLow')) {
@@ -17267,7 +17370,7 @@ foreach ($profileRoot in $crossVolumeProfiles) {
         } catch { Write-AMRLog ("Cross-volume cache discovery warning | Profile={0} | Root={1} | {2}" -f $profileRoot,$appDataRoot,$_.Exception.Message) WARNING Cleanup }
     }
 }
-Write-AMRLog ("Cross-volume cache discovery completed | FixedVolumes={0} | Profiles={1} | CandidateHits={2}" -f $script:AMRCacheDiscoveryVolumes.Count,$crossVolumeProfiles.Count,$crossVolumeCacheHits) INFO Cleanup
+Write-AMRLog ("Scoped cache discovery completed | SystemVolume={0} | ActiveProfiles={1} | CandidateHits={2}" -f $script:AMRCacheDiscoveryVolumes.Count,$crossVolumeProfiles.Count,$crossVolumeCacheHits) INFO Cleanup
 
 # Phase 6.10.9 | Vendor-agnostic GPU shader cache discovery.
 # Do not infer cache locations only from the currently installed adapter: old GPU
@@ -17329,7 +17432,7 @@ foreach ($volumeRoot in $script:AMRCacheDiscoveryVolumes) {
         Add-AMRGPUCacheCandidate -Vendor $machineCache.Vendor -CacheType $machineCache.Type -Path $machinePath
     }
 }
-Write-AMRLog ("Vendor-agnostic GPU shader discovery completed | Profiles={0} | CandidateHits={1} | CacheTypes={2}" -f $crossVolumeProfiles.Count,$gpuShaderCandidateHits,($gpuShaderCacheNames -join ',')) INFO Cleanup
+Write-AMRLog ("Scoped GPU shader discovery completed | ActiveProfiles={0} | CandidateHits={1} | CacheTypes={2}" -f $crossVolumeProfiles.Count,$gpuShaderCandidateHits,($gpuShaderCacheNames -join ',')) INFO Cleanup
 
 # Browser profiles also contribute only their explicit disposable cache directories.
 # Mark a browser installed from its executable/registry metadata for the final summary.
@@ -17413,10 +17516,53 @@ foreach ($windowsTempRoot in @(
     $script:AMRWindowsTempDiscoveryRoots.Add($windowsTempRoot)
 }
 
+# Build explicit, version-tolerant roots for the three Windows cache/report categories.
+# Windows versions and servicing states place these data in more than one supported location.
+# Only exact known folders are registered; no broad Windows/profile traversal is introduced.
+$script:AMRWerReportRoots = New-Object 'System.Collections.Generic.List[string]'
+foreach ($werBase in @(
+    (Join-Path $env:ProgramData 'Microsoft\Windows\WER'),
+    (Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\WER'),
+    (Join-Path $env:windir 'ServiceProfiles\LocalService\AppData\Local\Microsoft\Windows\WER'),
+    (Join-Path $env:windir 'ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\WER'),
+    (Join-Path $env:windir 'System32\config\systemprofile\AppData\Local\Microsoft\Windows\WER')
+)) {
+    foreach ($werLeaf in @('ReportArchive','ReportQueue')) {
+        $werCandidate = Join-Path $werBase $werLeaf
+        if (-not $script:AMRWerReportRoots.Contains($werCandidate)) { $script:AMRWerReportRoots.Add($werCandidate) }
+    }
+}
+foreach ($profileRoot in @($crossVolumeProfiles)) {
+    if ([string]::IsNullOrWhiteSpace([string]$profileRoot)) { continue }
+    foreach ($werLeaf in @('ReportArchive','ReportQueue')) {
+        $werCandidate = Join-Path $profileRoot ('AppData\Local\Microsoft\Windows\WER\' + $werLeaf)
+        if (-not $script:AMRWerReportRoots.Contains($werCandidate)) { $script:AMRWerReportRoots.Add($werCandidate) }
+    }
+}
+
+$script:AMRDeliveryOptimizationRoots = @(
+    (Join-Path $env:ProgramData 'Microsoft\Windows\DeliveryOptimization\Cache'),
+    (Join-Path $env:windir 'ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization\Cache'),
+    (Join-Path $env:windir 'ServiceProfiles\LocalService\AppData\Local\Microsoft\Windows\DeliveryOptimization\Cache')
+)
+
+# NVIDIA has used both the short NVIDIA and NVIDIA Corporation cache directory names.
+# Add only known shader-cache locations, including the machine-level NV_Cache folder.
+foreach ($nvidiaCachePath in @(
+    (Join-Path $env:LOCALAPPDATA 'NVIDIA\DXCache'),
+    (Join-Path $env:LOCALAPPDATA 'NVIDIA\GLCache'),
+    (Join-Path $env:LOCALAPPDATA 'NVIDIA\NV_Cache'),
+    (Join-Path $env:LOCALAPPDATA 'NVIDIA\ComputeCache'),
+    (Join-Path $env:LOCALAPPDATA 'NVIDIA Corporation\NV_Cache'),
+    (Join-Path $env:ProgramData 'NVIDIA Corporation\NV_Cache')
+)) {
+    Add-AMRGPUCacheCandidate -Vendor 'NVIDIA' -CacheType 'NVIDIA shader cache (additional known location)' -Path $nvidiaCachePath
+}
+
 $script:CleanupCategories = @(
-    [pscustomobject]@{ Key='WER'; Check='CleanupWerCheck'; Info='CleanupWerInfo'; Label='Windows error reports'; Paths=@(Get-AMRExistingCleanupRoots -Roots @((Join-Path $env:ProgramData 'Microsoft\Windows\WER\ReportArchive'))); MinAgeDays=7; Weight=8 },
+    [pscustomobject]@{ Key='WER'; Check='CleanupWerCheck'; Info='CleanupWerInfo'; Label='Windows error reports'; Paths=@(Get-AMRExistingCleanupRoots -Roots $script:AMRWerReportRoots.ToArray()); MinAgeDays=7; Weight=8 },
     [pscustomobject]@{ Key='Shader'; Check='CleanupShaderCheck'; Info='CleanupShaderInfo'; Label='GPU shader cache'; Paths=@(Get-AMRExistingCleanupRoots -Roots @($script:AMRAppCacheRoots.ToArray())); MinAgeDays=7; Weight=10 },
-    [pscustomobject]@{ Key='Delivery'; Check='CleanupDeliveryCheck'; Info='CleanupDeliveryInfo'; Label='Delivery Optimization cache'; Paths=@(Get-AMRExistingCleanupRoots -Roots @((Join-Path $env:ProgramData 'Microsoft\Windows\DeliveryOptimization\Cache'))); MinAgeDays=7; Weight=12 },
+    [pscustomobject]@{ Key='Delivery'; Check='CleanupDeliveryCheck'; Info='CleanupDeliveryInfo'; Label='Delivery Optimization cache'; Paths=@(Get-AMRExistingCleanupRoots -Roots $script:AMRDeliveryOptimizationRoots); MinAgeDays=7; Weight=12 },
     [pscustomobject]@{ Key='WindowsTemp'; Check='CleanupWindowsTempCheck'; Info='CleanupWindowsTempInfo'; Label='Windows temporary files'; Paths=@(Get-AMRExistingCleanupRoots -Roots $script:AMRWindowsTempDiscoveryRoots.ToArray()); MinAgeDays=0; Weight=14 },
     [pscustomobject]@{ Key='Update'; Check='CleanupUpdateCheck'; Info='CleanupUpdateInfo'; Label='Windows and graphics-driver update leftovers'; Paths=@(Get-AMRExistingCleanupRoots -Roots (@((Join-Path $env:windir 'SoftwareDistribution\Download')) + @($script:AMRDriverArtifactRoots.ToArray()))); MinAgeDays=30; Weight=16 },
     [pscustomobject]@{ Key='AppCache'; Check='CleanupAppCacheCheck'; Info='CleanupAppCacheInfo'; Label='Application caches'; Paths=@(Get-AMRExistingCleanupRoots -Roots @($script:AMRApplicationCacheRoots.ToArray())); MinAgeDays=7; Weight=18 },
@@ -17426,16 +17572,24 @@ $script:CleanupCategories = @(
 function Get-AMRCleanupFiles {
     param(
         [string[]]$Roots,
-        [int]$MinAgeDays = 0
+        [int]$MinAgeDays = 0,
+        [int]$MaxEntries = 100000,
+        [int]$MaxSeconds = 120
     )
 
-    # Simple recursive scan over registered roots only. Errors are recorded so
-    # Clean Selected can refuse a category whose inventory was incomplete.
+    # Bounded, cooperative scan: never follow reparse points, cap work per
+    # category, and periodically pump the WPF message queue so the window can
+    # repaint/respond while local filesystem enumeration is in progress.
+    # A capped/timed-out inventory is marked incomplete and Clean Selected
+    # refuses to act on it.
     $found = New-Object 'System.Collections.Generic.List[System.IO.FileInfo]'
     $errors = New-Object 'System.Collections.Generic.List[object]'
     $missingRoots = New-Object 'System.Collections.Generic.List[string]'
     $stack = New-Object 'System.Collections.Generic.Stack[string]'
     $reparseSkipped = 0
+    $visited = 0
+    $truncated = $false
+    $clock = [System.Diagnostics.Stopwatch]::StartNew()
     $cutoff = if ($MinAgeDays -gt 0) { (Get-Date).AddDays(-$MinAgeDays) } else { [datetime]::MinValue }
 
     foreach ($root in @($Roots)) {
@@ -17457,9 +17611,16 @@ function Get-AMRCleanupFiles {
     }
 
     while ($stack.Count -gt 0) {
+        if ($visited -ge $MaxEntries -or $clock.Elapsed.TotalSeconds -ge $MaxSeconds) { $truncated = $true; break }
         $current = $stack.Pop()
         try {
             foreach ($item in [System.IO.Directory]::EnumerateFileSystemEntries($current)) {
+                $visited++
+                if (($visited % 128) -eq 0) {
+                    try { [System.Windows.Forms.Application]::DoEvents() } catch { }
+                    if ($clock.Elapsed.TotalSeconds -ge $MaxSeconds) { $truncated = $true; break }
+                }
+                if ($visited -gt $MaxEntries) { $truncated = $true; break }
                 try {
                     $attributes = [System.IO.File]::GetAttributes($item)
                     if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -17473,20 +17634,112 @@ function Get-AMRCleanupFiles {
                         if ($MinAgeDays -le 0 -or $file.LastWriteTime -le $cutoff) { $found.Add($file) }
                     }
                 } catch {
-                    $errors.Add([pscustomobject]@{ Path=[string]$item; Stage='InspectEntry'; Message=$_.Exception.Message })
+                    if ($errors.Count -lt 5000) { $errors.Add([pscustomobject]@{ Path=[string]$item; Stage='InspectEntry'; Message=$_.Exception.Message }) }
                 }
             }
+            if ($truncated) { break }
         } catch {
-            $errors.Add([pscustomobject]@{ Path=[string]$current; Stage='EnumerateDirectory'; Message=$_.Exception.Message })
+            if ($errors.Count -lt 5000) { $errors.Add([pscustomobject]@{ Path=[string]$current; Stage='EnumerateDirectory'; Message=$_.Exception.Message }) }
         }
     }
+    $clock.Stop()
 
     return [pscustomobject]@{
         Files = $found.ToArray()
         Errors = $errors.ToArray()
         MissingRoots = $missingRoots.ToArray()
         ReparsePointsSkipped = $reparseSkipped
-        Complete = (($errors.Count -eq 0) -and ($missingRoots.Count -eq 0))
+        Visited = $visited
+        Truncated = $truncated
+        ElapsedSeconds = [math]::Round($clock.Elapsed.TotalSeconds,1)
+        Complete = ((-not $truncated) -and ($errors.Count -eq 0) -and ($missingRoots.Count -eq 0))
+    }
+}
+
+function Get-AMRSmartCleanupFiles {
+    param(
+        [string[]]$Roots,
+        [int]$MinAgeDays = 0,
+        [int]$MaxEntries = 100000,
+        [int]$MaxSeconds = 120
+    )
+
+    # Bounded, cooperative scan: never follow reparse points, cap work per
+    # category, and periodically pump the WPF message queue so the window can
+    # repaint/respond while local filesystem enumeration is in progress.
+    # A capped/timed-out inventory is marked incomplete and Clean Selected
+    # refuses to act on it.
+    $found = New-Object 'System.Collections.Generic.List[System.IO.FileInfo]'
+    $errors = New-Object 'System.Collections.Generic.List[object]'
+    $missingRoots = New-Object 'System.Collections.Generic.List[string]'
+    $stack = New-Object 'System.Collections.Generic.Stack[string]'
+    $reparseSkipped = 0
+    $visited = 0
+    $truncated = $false
+    $clock = [System.Diagnostics.Stopwatch]::StartNew()
+    $cutoff = if ($MinAgeDays -gt 0) { (Get-Date).AddDays(-$MinAgeDays) } else { [datetime]::MinValue }
+
+    foreach ($root in @($Roots)) {
+        if ([string]::IsNullOrWhiteSpace([string]$root)) { continue }
+        try {
+            if (-not (Test-Path -LiteralPath $root -PathType Container -ErrorAction Stop)) {
+                $missingRoots.Add([string]$root)
+                continue
+            }
+            $rootAttributes = [System.IO.File]::GetAttributes([string]$root)
+            if (($rootAttributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                $errors.Add([pscustomobject]@{ Path=[string]$root; Stage='RootSafety'; Message='Cleanup root is a reparse point and was not traversed.' })
+                continue
+            }
+            $stack.Push([string]$root)
+        } catch {
+            $errors.Add([pscustomobject]@{ Path=[string]$root; Stage='RootCheck'; Message=$_.Exception.Message })
+        }
+    }
+
+    while ($stack.Count -gt 0) {
+        if ($visited -ge $MaxEntries -or $clock.Elapsed.TotalSeconds -ge $MaxSeconds) { $truncated = $true; break }
+        $current = $stack.Pop()
+        try {
+            foreach ($item in [System.IO.Directory]::EnumerateFileSystemEntries($current)) {
+                $visited++
+                if (($visited % 128) -eq 0) {
+                    try { [System.Windows.Forms.Application]::DoEvents() } catch { }
+                    if ($clock.Elapsed.TotalSeconds -ge $MaxSeconds) { $truncated = $true; break }
+                }
+                if ($visited -gt $MaxEntries) { $truncated = $true; break }
+                try {
+                    $attributes = [System.IO.File]::GetAttributes($item)
+                    if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                        $reparseSkipped++
+                        continue
+                    }
+                    if (($attributes -band [System.IO.FileAttributes]::Directory) -ne 0) {
+                        $stack.Push($item)
+                    } else {
+                        $file = New-Object -TypeName System.IO.FileInfo -ArgumentList $item
+                        if ($MinAgeDays -le 0 -or $file.LastWriteTime -le $cutoff) { $found.Add($file) }
+                    }
+                } catch {
+                    if ($errors.Count -lt 5000) { $errors.Add([pscustomobject]@{ Path=[string]$item; Stage='InspectEntry'; Message=$_.Exception.Message }) }
+                }
+            }
+            if ($truncated) { break }
+        } catch {
+            if ($errors.Count -lt 5000) { $errors.Add([pscustomobject]@{ Path=[string]$current; Stage='EnumerateDirectory'; Message=$_.Exception.Message }) }
+        }
+    }
+    $clock.Stop()
+
+    return [pscustomobject]@{
+        Files = $found.ToArray()
+        Errors = $errors.ToArray()
+        MissingRoots = $missingRoots.ToArray()
+        ReparsePointsSkipped = $reparseSkipped
+        Visited = $visited
+        Truncated = $truncated
+        ElapsedSeconds = [math]::Round($clock.Elapsed.TotalSeconds,1)
+        Complete = ((-not $truncated) -and ($errors.Count -eq 0) -and ($missingRoots.Count -eq 0))
     }
 }
 
@@ -17579,7 +17832,21 @@ if ($cancelCleanupSelectionButton) {
 }
 
 # Legacy simple Scan Now: scan each registered category in order and store the file list.
+# Smart Cleanup operation gate: DoEvents is used for responsive repainting,
+# so block other Smart Cleanup actions from being re-entered mid-operation.
+$script:AMRCleanupBusy = $false
+function Set-AMRCleanupUiBusy {
+    param([bool]$Busy)
+    foreach ($controlName in @('CleanupScanBtn','CleanupRunBtn','CleanupDiscoveryScanBtn','CleanupLargeFilesScanBtn','CleanupRecycleBinRefreshBtn','CleanupRecycleBinEmptyBtn')) {
+        $control = C $controlName
+        if ($control) { $control.IsEnabled = (-not $Busy) }
+    }
+}
+
 (C 'CleanupScanBtn').Add_Click({
+    if ($script:AMRCleanupBusy) { return }
+    $script:AMRCleanupBusy = $true
+    Set-AMRCleanupUiBusy $true
     $scanButton = C 'CleanupScanBtn'
     $runButton = C 'CleanupRunBtn'
     $scanButton.IsEnabled = $false
@@ -17597,7 +17864,7 @@ if ($cancelCleanupSelectionButton) {
 
             $minAge = 0
             if ($category.PSObject.Properties['MinAgeDays']) { $minAge = [int]$category.MinAgeDays }
-            $scanResult = Get-AMRCleanupFiles -Roots @($category.Paths) -MinAgeDays $minAge
+            $scanResult = Get-AMRSmartCleanupFiles -Roots @($category.Paths) -MinAgeDays $minAge
             $files = @($scanResult.Files)
             $bytes = [int64]0
             foreach ($file in $files) { try { $bytes += [int64]$file.Length } catch { } }
@@ -17607,6 +17874,8 @@ if ($cancelCleanupSelectionButton) {
                 Bytes = $bytes
                 Count = $files.Count
                 Complete = [bool]$scanResult.Complete
+                Truncated = [bool]$scanResult.Truncated
+                Visited = [int]$scanResult.Visited
                 Errors = @($scanResult.Errors)
             }
             # Per-root diagnostics make it clear which locations contributed data,
@@ -17627,10 +17896,11 @@ if ($cancelCleanupSelectionButton) {
                 Write-AMRLog ("Cleanup scan issue | Category={0} | Path={1} | Stage={2} | Error={3}" -f $category.Label,$scanError.Path,$scanError.Stage,$scanError.Message) WARNING Cleanup
             }
             $info = C $category.Info
-            if ($info) { $info.Text = ('{0:N0} files • {1:N2} MB' -f $files.Count,($bytes / 1MB)) }
+            $scanSuffix = if ($scanResult.Truncated) { ' • PARTIAL / safety limit' } elseif (-not $scanResult.Complete) { ' • incomplete / review log' } else { '' }
+            if ($info) { $info.Text = ('{0:N0} files • {1:N2} MB{2}' -f $files.Count,($bytes / 1MB),$scanSuffix) }
             $totalBytes += $bytes
             $totalFiles += $files.Count
-            Write-AMRLog ("Scanned {0}: {1:N0} files, {2:N2} MB." -f $category.Label,$files.Count,($bytes / 1MB)) INFO Cleanup
+            Write-AMRLog ("Scanned {0}: {1:N0} files, {2:N2} MB; visited={3}; truncated={4}; elapsed={5}s." -f $category.Label,$files.Count,($bytes / 1MB),$scanResult.Visited,$scanResult.Truncated,$scanResult.ElapsedSeconds) INFO Cleanup
         }
 
         $runButton.IsEnabled = $true
@@ -17642,6 +17912,8 @@ if ($cancelCleanupSelectionButton) {
         Write-AMRLog ("Cleanup scan failed: {0}" -f $_.Exception.Message) ERROR Cleanup
         Show-AMRCleanupSummary -Title 'AMR | Cleanup Scan' -Status 'Scan failed' -Details $_.Exception.Message -Kind Error
     } finally {
+        Set-AMRCleanupUiBusy $false
+        $script:AMRCleanupBusy = $false
         $scanButton.IsEnabled = $true
     }
 })
@@ -17686,6 +17958,9 @@ if ($cancelCleanupSelectionButton) {
         return
     }
 
+    if ($script:AMRCleanupBusy) { return }
+    $script:AMRCleanupBusy = $true
+    Set-AMRCleanupUiBusy $true
     $runButton = C 'CleanupRunBtn'
     $scanButton = C 'CleanupScanBtn'
     $runButton.IsEnabled = $false
@@ -17754,7 +18029,7 @@ if ($cancelCleanupSelectionButton) {
                     Write-AMRLog ("Failed to delete file: {0}. Reason: {1}" -f $path,$_.Exception.Message) WARNING Cleanup
                 }
 
-                if (($fileIndex % 40) -eq 0 -or $fileIndex -eq $fileList.Count) {
+                if (($fileIndex % 20) -eq 0 -or $fileIndex -eq $fileList.Count) {
                     $pct = [int](($done + $fileIndex) * 100 / [Math]::Max(1,$filesEstimate))
                     Update-AMRCleanupProgress $pct ("Cleaning {0}: {1}/{2} files • removed {3}" -f $category.Label,$fileIndex,$fileList.Count,$deleted)
                 }
@@ -17778,6 +18053,8 @@ if ($cancelCleanupSelectionButton) {
                 Write-AMRLog ("Could not restore Windows Update service: {0}" -f $_.Exception.Message) ERROR Cleanup
             }
         }
+        Set-AMRCleanupUiBusy $false
+        $script:AMRCleanupBusy = $false
         $runButton.IsEnabled = $true
         $scanButton.IsEnabled = $true
     }
@@ -17802,6 +18079,232 @@ if ($cancelCleanupSelectionButton) {
     )
     Write-AMRLog ("Legacy simple Cleanup completed. Removed={0}; Skipped={1}; Failed={2}; WindowsUpdate={3}." -f $deleted,$skipped,$failed,$updateServiceMessage) $(if ($failed -gt 0) { 'WARNING' } else { 'SUCCESS' }) Cleanup
     Show-AMRCleanupSummary -Title 'AMR | Cleanup Results' -Status $summaryStatus -Details 'The simple cleanup operation has finished.' -Lines $summaryLines -Kind $summaryKind
+})
+
+
+# Smart Cleanup extensions: Recycle Bin is system-drive scoped; discovery panels are read-only.
+function Get-AMRSmartCleanupRecycleBinSnapshot {
+    $systemLetter = ([string]$env:SystemDrive).Substring(0,1)
+    try {
+        $shell = New-Object -ComObject Shell.Application
+        $bin = $shell.Namespace(0xA)
+        if ($null -eq $bin) { throw 'Recycle Bin namespace is unavailable.' }
+        $count = 0
+        [int64]$bytes = 0
+        foreach ($item in @($bin.Items())) {
+            try {
+                $originalPath = [string]$item.Path
+                if ($originalPath -match ('(?i)^' + [regex]::Escape($systemLetter) + ':\\\$Recycle\.Bin\\')) {
+                    $count++
+                    try { $bytes += [int64]$item.Size } catch {}
+                }
+            } catch {}
+        }
+        return [pscustomobject]@{ Readable=$true; Count=$count; Bytes=$bytes; Drive=($systemLetter + ':'); Error=$null }
+    } catch {
+        return [pscustomobject]@{ Readable=$false; Count=0; Bytes=[int64]0; Drive=($systemLetter + ':'); Error=$_.Exception.Message }
+    }
+}
+function Update-AMRSmartCleanupRecycleBin {
+    $info = C 'CleanupRecycleBinInfo'
+    if (-not $info) { return }
+    $snap = Get-AMRSmartCleanupRecycleBinSnapshot
+    if ($snap.Readable) {
+        $info.Text = ('{0:N0} items • {1:N2} MB • {2} only' -f $snap.Count,($snap.Bytes / 1MB),$snap.Drive)
+    } else {
+        $info.Text = ('Unable to read Recycle Bin: {0}' -f $snap.Error)
+    }
+}
+(C 'CleanupRecycleBinRefreshBtn').Add_Click({ Update-AMRSmartCleanupRecycleBin })
+(C 'CleanupRecycleBinEmptyBtn').Add_Click({
+    $snap = Get-AMRSmartCleanupRecycleBinSnapshot
+    if (-not $snap.Readable) {
+        Show-AMRCleanupSummary -Title 'AMR | Recycle Bin' -Status 'Unable to inspect' -Details $snap.Error -Kind Warning
+        return
+    }
+    if ($snap.Count -eq 0) {
+        Show-AMRCleanupSummary -Title 'AMR | Recycle Bin' -Status 'Already empty' -Details ('No Recycle Bin items were found on {0}.' -f $snap.Drive) -Kind Info
+        return
+    }
+    $answer = Show-AMRMessage ("Permanently empty {0:N0} Recycle Bin item(s) ({1:N2} MB) on {2} only? Other drives will not be touched." -f $snap.Count,($snap.Bytes / 1MB),$snap.Drive) 'Confirm Recycle Bin' YesNo Warning
+    if ($answer -ne [System.Windows.MessageBoxResult]::Yes -and $answer -ne 'Yes') {
+        Write-AMRLog 'Smart Cleanup Recycle Bin empty operation cancelled.' INFO Cleanup
+        return
+    }
+    try {
+        $driveLetter = $snap.Drive.TrimEnd(':')
+        Clear-RecycleBin -DriveLetter $driveLetter -Force -ErrorAction Stop
+        Update-AMRSmartCleanupRecycleBin
+        Write-AMRLog ("Smart Cleanup emptied Recycle Bin on {0} only; before {1} items / {2:N2} MB." -f $snap.Drive,$snap.Count,($snap.Bytes / 1MB)) SUCCESS Cleanup
+        Show-AMRCleanupSummary -Title 'AMR | Recycle Bin' -Status 'Operation completed' -Details ('Recycle Bin cleanup was requested for {0} only. Review the refreshed count.' -f $snap.Drive) -Kind Success
+    } catch {
+        Write-AMRLog ("Smart Cleanup Recycle Bin operation failed on {0}: {1}" -f $snap.Drive,$_.Exception.Message) ERROR Cleanup
+        Show-AMRCleanupSummary -Title 'AMR | Recycle Bin' -Status 'Could not empty Recycle Bin' -Details $_.Exception.Message -Kind Error
+    }
+})
+Update-AMRSmartCleanupRecycleBin
+
+function Get-AMRReadOnlyFileInventory {
+    param([string[]]$Roots,[int64]$MinimumBytes=0,[int]$MaxEntries=30000,[int]$MaxSeconds=90)
+    $found = New-Object 'System.Collections.Generic.List[object]'
+    $errors = New-Object 'System.Collections.Generic.List[string]'
+    $stack = New-Object 'System.Collections.Generic.Stack[string]'
+    $visited = 0
+    $clock = [System.Diagnostics.Stopwatch]::StartNew()
+    foreach ($root in @($Roots)) {
+        if ([string]::IsNullOrWhiteSpace([string]$root)) { continue }
+        if (Test-Path -LiteralPath $root -PathType Container -ErrorAction SilentlyContinue) {
+            try {
+                $attr = [IO.File]::GetAttributes($root)
+                if (($attr -band [IO.FileAttributes]::ReparsePoint) -eq 0) { $stack.Push($root) }
+            } catch { $errors.Add(('{0}: {1}' -f $root,$_.Exception.Message)) }
+        }
+    }
+    $timedOut = $false
+    while ($stack.Count -gt 0 -and $visited -lt $MaxEntries -and $clock.Elapsed.TotalSeconds -lt $MaxSeconds) {
+        $dir = $stack.Pop()
+        try {
+            foreach ($entry in [IO.Directory]::EnumerateFileSystemEntries($dir)) {
+                $visited++
+                if (($visited % 128) -eq 0) {
+                    try { [System.Windows.Forms.Application]::DoEvents() } catch { }
+                    if ($clock.Elapsed.TotalSeconds -ge $MaxSeconds) { $timedOut = $true; break }
+                }
+                if ($visited -ge $MaxEntries) { break }
+                try {
+                    $attr = [IO.File]::GetAttributes($entry)
+                    if (($attr -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+                    if (($attr -band [IO.FileAttributes]::Directory) -ne 0) { $stack.Push($entry); continue }
+                    $fi = New-Object -TypeName IO.FileInfo -ArgumentList $entry
+                    if ($fi.Length -ge $MinimumBytes) { $found.Add($fi) }
+                } catch { if ($errors.Count -lt 3000) { $errors.Add(('{0}: {1}' -f $entry,$_.Exception.Message)) } }
+            }
+        } catch { if ($errors.Count -lt 3000) { $errors.Add(('{0}: {1}' -f $dir,$_.Exception.Message)) } }
+    }
+    $clock.Stop()
+    return [pscustomobject]@{ Files=$found.ToArray(); Errors=$errors.ToArray(); Visited=$visited; ElapsedSeconds=[math]::Round($clock.Elapsed.TotalSeconds,1); Truncated=($timedOut -or $stack.Count -gt 0 -or $visited -ge $MaxEntries) }
+}
+
+(C 'CleanupDiscoveryScanBtn').Add_Click({
+    if ($script:AMRCleanupBusy) { return }
+    $script:AMRCleanupBusy = $true
+    Set-AMRCleanupUiBusy $true
+    $button = C 'CleanupDiscoveryScanBtn'
+    $button.IsEnabled = $false
+    $report = New-Object 'System.Collections.Generic.List[string]'
+    try {
+        $systemRoot = [string]$env:windir
+        $systemDriveRoot = [string]$env:SystemDrive + '\'
+        $dumpRoots = @(
+            (Join-Path $systemRoot 'Minidump'),
+            (Join-Path $systemRoot 'LiveKernelReports'),
+            (Join-Path $systemRoot 'MEMORY.DMP'),
+            (Join-Path $env:LOCALAPPDATA 'CrashDumps'),
+            (Join-Path $env:ProgramData 'Microsoft\Windows\WER\ReportArchive'),
+            (Join-Path $env:ProgramData 'Microsoft\Windows\WER\ReportQueue')
+        )
+        $upgradeRoots = @(
+            (Join-Path $systemDriveRoot 'Windows.old'),
+            (Join-Path $systemDriveRoot '$WINDOWS.~BT'),
+            (Join-Path $systemDriveRoot '$Windows.~WS'),
+            (Join-Path $systemRoot 'Panther'),
+            (Join-Path $systemRoot 'SoftwareDistribution\Download')
+        )
+        $dumpInventory = Get-AMRReadOnlyFileInventory -Roots $dumpRoots -MinimumBytes 0 -MaxEntries 30000
+        $dumpFiles = @($dumpInventory.Files | Where-Object {
+            ($_.Extension -match '^\.(dmp|mdmp|hdmp)$' -and $_.Length -ge 64MB) -or $_.FullName -match '(?i)\\WER\\'
+        })
+        $memoryDumpPath = Join-Path $systemRoot 'MEMORY.DMP'
+        if (Test-Path -LiteralPath $memoryDumpPath -PathType Leaf -ErrorAction SilentlyContinue) {
+            try {
+                $memoryDump = Get-Item -LiteralPath $memoryDumpPath -Force -ErrorAction Stop
+                if ($memoryDump.Length -ge 64MB) { $dumpFiles = @($dumpFiles) + @($memoryDump) }
+            } catch {}
+        }
+        $dumpFiles = @($dumpFiles | Sort-Object Length -Descending | Select-Object -Unique)
+        [int64]$dumpBytes = 0
+        foreach ($f in $dumpFiles) { $dumpBytes += [int64]$f.Length }
+        $report.Add('CRASH DUMPS / ERROR REPORTS — READ ONLY')
+        if ($dumpFiles.Count -eq 0) { $report.Add('No matching dump/report files found in the inspected system locations.') }
+        foreach ($f in ($dumpFiles | Select-Object -First 40)) {
+            $report.Add(('{0,9:N1} MB | {1}' -f ($f.Length / 1MB),$f.FullName))
+        }
+        $report.Add(('Crash/report inventory: {0:N0} files • {1:N2} MB' -f $dumpFiles.Count,($dumpBytes / 1MB)))
+        if ($dumpInventory.Truncated) { $report.Add('NOTE: Inventory reached its safety scan limit; results may be partial.') }
+        if ($dumpInventory.Errors.Count -gt 0) { $report.Add(('Unreadable entries: {0:N0} (see application log)' -f $dumpInventory.Errors.Count)) }
+
+        $report.Add('')
+        $report.Add('WINDOWS UPDATE / UPGRADE LEFTOVERS — READ ONLY')
+        foreach ($root in $upgradeRoots) {
+            if (Test-Path -LiteralPath $root -PathType Container -ErrorAction SilentlyContinue) {
+                $folderInventory = Get-AMRReadOnlyFileInventory -Roots @($root) -MinimumBytes 0 -MaxEntries 5000
+                [int64]$folderBytes = 0
+                foreach ($folderFile in @($folderInventory.Files)) { $folderBytes += [int64]$folderFile.Length }
+                $sizeNote = if ($folderInventory.Truncated) { ' (partial estimate; scan limit reached)' } else { ' (read-only estimate)' }
+                $report.Add(('{0:N0} files • {1:N2} MB{2} | {3}' -f $folderInventory.Files.Count,($folderBytes / 1MB),$sizeNote,$root))
+                if ($folderInventory.Errors.Count -gt 0) { $report.Add(('  Unreadable entries: {0:N0}' -f $folderInventory.Errors.Count)) }
+            } elseif (Test-Path -LiteralPath $root -PathType Leaf -ErrorAction SilentlyContinue) {
+                try {
+                    $fi = Get-Item -LiteralPath $root -Force -ErrorAction Stop
+                    $report.Add(('{0:N1} MB | {1}' -f ($fi.Length / 1MB),$root))
+                } catch { $report.Add(('PRESENT (size unavailable) | {0}' -f $root)) }
+            }
+        }
+        $report.Add('All upgrade-folder findings are review-only. No Windows.old, setup, recovery, or update folders are changed.')
+        foreach ($err in @($dumpInventory.Errors)) {
+            Write-AMRLog ("Smart Cleanup read-only discovery issue: {0}" -f $err) WARNING Cleanup
+        }
+        (C 'CleanupDiscoveryReport').Text = ($report -join [Environment]::NewLine)
+        (C 'CleanupDiscoverySummary').Text = ('Found {0:N0} crash/report files • {1:N2} MB. Upgrade folders are presence-checked only.' -f $dumpFiles.Count,($dumpBytes / 1MB))
+        Write-AMRLog ("Smart Cleanup read-only discovery finished. Crash/report files={0}; bytes={1}; truncated={2}." -f $dumpFiles.Count,$dumpBytes,$dumpInventory.Truncated) INFO Cleanup
+    } catch {
+        (C 'CleanupDiscoverySummary').Text = 'Inspection failed; see application log.'
+        (C 'CleanupDiscoveryReport').Text = $_.Exception.Message
+        Write-AMRLog ("Smart Cleanup discovery failed: {0}" -f $_.Exception.Message) ERROR Cleanup
+    } finally {
+        Set-AMRCleanupUiBusy $false
+        $script:AMRCleanupBusy = $false
+        $button.IsEnabled = $true
+    }
+})
+
+(C 'CleanupLargeFilesScanBtn').Add_Click({
+    if ($script:AMRCleanupBusy) { return }
+    $script:AMRCleanupBusy = $true
+    Set-AMRCleanupUiBusy $true
+    $button = C 'CleanupLargeFilesScanBtn'
+    $button.IsEnabled = $false
+    try {
+        $profile = [string]$env:USERPROFILE
+        $roots = @(
+            (Join-Path $profile 'Downloads'),
+            (Join-Path $profile 'Desktop'),
+            (Join-Path $profile 'Documents'),
+            (Join-Path $profile 'Videos')
+        )
+        $inventory = Get-AMRReadOnlyFileInventory -Roots $roots -MinimumBytes (512MB) -MaxEntries 30000
+        $files = @($inventory.Files | Sort-Object Length -Descending)
+        $lines = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($file in ($files | Select-Object -First 100)) {
+            $lines.Add(('{0,9:N1} MB | {1:yyyy-MM-dd} | {2}' -f ($file.Length / 1MB),$file.LastWriteTime,$file.FullName))
+        }
+        if ($files.Count -eq 0) { $lines.Add('No files >= 512 MB found in the inspected user folders.') }
+        if ($inventory.Truncated) { $lines.Add('NOTE: Scan reached its safety limit; results may be partial.') }
+        $lines.Add('')
+        $lines.Add('READ ONLY — these files are not part of Clean Selected and cannot be deleted here.')
+        (C 'CleanupLargeFilesReport').Text = ($lines -join [Environment]::NewLine)
+        (C 'CleanupLargeFilesSummary').Text = ('Found {0:N0} file(s) >= 512 MB • inspected {1:N0} entries in {2}s • {3} • system drive user folders only.' -f $files.Count,$inventory.Visited,$inventory.ElapsedSeconds,($(if ($inventory.Truncated) { 'PARTIAL' } else { 'Complete' })))
+        foreach ($err in @($inventory.Errors)) { Write-AMRLog ("Smart Cleanup large-file scan issue: {0}" -f $err) WARNING Cleanup }
+        Write-AMRLog ("Smart Cleanup large-file review completed. Found={0}; visited={1}; truncated={2}." -f $files.Count,$inventory.Visited,$inventory.Truncated) INFO Cleanup
+    } catch {
+        (C 'CleanupLargeFilesSummary').Text = 'Large-file inspection failed; see application log.'
+        (C 'CleanupLargeFilesReport').Text = $_.Exception.Message
+        Write-AMRLog ("Smart Cleanup large-file review failed: {0}" -f $_.Exception.Message) ERROR Cleanup
+    } finally {
+        Set-AMRCleanupUiBusy $false
+        $script:AMRCleanupBusy = $false
+        $button.IsEnabled = $true
+    }
 })
 
 # BACKUP ENGINE - searchable catalog; all actions export/report unless explicitly creating restore point
@@ -18768,6 +19271,7 @@ function Start-AMRBackgroundIconRefresh {
     }
 }
 
+$script:Window.Add_Closed({ Close-AMRStartupSplash })
 $script:Window.Add_Loaded({
     # Hydrate the last completed snapshot first so installed dots and Show Installed
     # are immediately available; then refresh the snapshot without blocking WPF.
@@ -18785,7 +19289,16 @@ $script:Window.Add_Loaded({
     Start-AMRBackgroundIconRefresh
     Start-AMRInstalledCatalogScan -Refresh
 })
-$script:Window.Add_ContentRendered({ Start-AMRBackgroundIconRefresh })
+$script:Window.Add_ContentRendered({
+    Close-AMRStartupSplash
+    try {
+        if ($script:AMRStartupStopwatch) {
+            $script:AMRStartupStopwatch.Stop()
+            Write-AMRLog ("Startup first-render completed in {0:N2} seconds." -f $script:AMRStartupStopwatch.Elapsed.TotalSeconds) INFO System
+        }
+    } catch { }
+    Start-AMRBackgroundIconRefresh
+})
 
 # Inventory is warmed in a dedicated background runspace at startup. The UI only
 # consumes the last cached snapshot and the completed refresh payload.
