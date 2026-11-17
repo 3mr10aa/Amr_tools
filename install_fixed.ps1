@@ -53,7 +53,7 @@ try {
     $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
     $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
     $form.ClientSize = New-Object System.Drawing.Size(590,310)
-    $form.BackColor = [System.Drawing.Color]::FromArgb(32,49,69)
+    $form.BackColor = [System.Drawing.Color]::FromArgb(22,29,41)
     $form.ForeColor = [System.Drawing.Color]::White
     $form.MaximizeBox = $false
     $form.MinimizeBox = $false
@@ -64,7 +64,7 @@ try {
     $caption = New-Object System.Windows.Forms.Panel
     $caption.Location = New-Object System.Drawing.Point(0,0)
     $caption.Size = New-Object System.Drawing.Size(590,36)
-    $caption.BackColor = [System.Drawing.Color]::Transparent
+    $caption.BackColor = [System.Drawing.Color]::FromArgb(38,52,70)
     $form.Controls.Add($caption)
 
     $captionIcon = New-Object System.Windows.Forms.PictureBox
@@ -104,8 +104,8 @@ public static extern System.IntPtr SendMessage(System.IntPtr hWnd, int msg, int 
 '@
     }
 
-    # Windows 10/11 acrylic blur (frosted-glass) for the entire launcher surface.
-    # Falls back cleanly to the solid navy palette on unsupported Windows builds.
+    # Windows 10/11 acrylic blur (frosted-glass) for the launcher body.
+    # The separate darker caption strip creates a refined glass-on-glass hierarchy.
     if (-not ('AMR.LauncherAcrylicNative' -as [type])) {
         Add-Type -TypeDefinition @'
 using System;
@@ -142,7 +142,9 @@ namespace AMR {
             $policy = New-Object AMR.AccentPolicy
             $policy.AccentState = 4       # ACCENT_ENABLE_ACRYLICBLURBEHIND
             $policy.AccentFlags = 2
-            $policy.GradientColor = [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]0xCC563A20),0) # translucent slate-blue glass (AABBGGRR)
+            # Lower alpha keeps the backdrop visibly translucent instead of painting
+            # the whole launcher as a solid blue panel (AABBGGRR).
+            $policy.GradientColor = [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]0x44563A20),0)
             $size = [Runtime.InteropServices.Marshal]::SizeOf([type][AMR.AccentPolicy])
             $memory = [Runtime.InteropServices.Marshal]::AllocHGlobal($size)
             try {
@@ -151,7 +153,15 @@ namespace AMR {
                 $data.Attribute = 19 # WCA_ACCENT_POLICY
                 $data.Data = $memory
                 $data.SizeOfData = $size
-                [void][AMR.LauncherAcrylicNative]::SetWindowCompositionAttribute($form.Handle,[ref]$data)
+                $glassApplied = [AMR.LauncherAcrylicNative]::SetWindowCompositionAttribute($form.Handle,[ref]$data)
+                if (-not $glassApplied) {
+                    # Compatibility fallback: classic blur-behind still gives a
+                    # translucent glass surface on builds without acrylic support.
+                    $policy.AccentState = 3 # ACCENT_ENABLE_BLURBEHIND
+                    [Runtime.InteropServices.Marshal]::StructureToPtr($policy,$memory,$true)
+                    $glassApplied = [AMR.LauncherAcrylicNative]::SetWindowCompositionAttribute($form.Handle,[ref]$data)
+                }
+                if (-not $glassApplied) { Write-LauncherLog 'Windows did not accept acrylic or blur composition; launcher is using its dark glass fallback.' }
             } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($memory) }
         } catch { Write-LauncherLog ('Acrylic glass effect unavailable; using fallback background: {0}' -f $_.Exception.Message) }
     }.GetNewClosure()
@@ -301,16 +311,49 @@ namespace AMR {
     $strictUtf8 = New-Object System.Text.UTF8Encoding($false,$true)
     $reader = New-Object System.IO.StreamReader($downloadPath,$strictUtf8,$true)
     try { $scriptText = $reader.ReadToEnd() } finally { $reader.Dispose() }
-    # Reuse the exact embedded AMR application icon for the launcher and its taskbar entry.
+    # Reuse a single high-resolution PNG frame from the embedded AMR multi-size
+    # ICO. System.Drawing.Icon.ToBitmap() may select a tiny low-quality frame from
+    # a multi-image ICO, which caused the colored pixel mosaic in the caption.
     try {
         $iconMatch = [regex]::Match($scriptText, '\$amrIconBytes\s*=\s*\[Convert\]::FromBase64String\(''([^'']+)''\)')
         if ($iconMatch.Success) {
             $iconBytes = [Convert]::FromBase64String($iconMatch.Groups[1].Value)
-            $iconStream = New-Object System.IO.MemoryStream(,$iconBytes)
-            try {
-                $form.Icon = New-Object System.Drawing.Icon($iconStream)
-                if ($captionIcon) { $captionIcon.Image = $form.Icon.ToBitmap() }
-            } finally { $iconStream.Dispose() }
+            if ($iconBytes.Length -ge 22 -and $iconBytes[0] -eq 0 -and $iconBytes[1] -eq 0 -and $iconBytes[2] -eq 1) {
+                $frameCount = [BitConverter]::ToUInt16($iconBytes,4)
+                $chosen = $null
+                for ($i=0; $i -lt $frameCount; $i++) {
+                    $entry = 6 + (16 * $i)
+                    $w = [int]$iconBytes[$entry]; if ($w -eq 0) { $w = 256 }
+                    $h = [int]$iconBytes[$entry+1]; if ($h -eq 0) { $h = 256 }
+                    $length = [BitConverter]::ToUInt32($iconBytes,$entry+8)
+                    $offset = [BitConverter]::ToUInt32($iconBytes,$entry+12)
+                    if ($w -ge 48 -and $h -ge 48 -and $offset -ge 0 -and ($offset + $length) -le $iconBytes.Length) {
+                        $chosen = @{ Width=$w; Height=$h; Length=[int]$length; Offset=[int]$offset; Area=($w*$h) }
+                        break
+                    }
+                }
+                if ($null -ne $chosen) {
+                    $pngBytes = New-Object byte[] $chosen.Length
+                    [Buffer]::BlockCopy($iconBytes,$chosen.Offset,$pngBytes,0,$chosen.Length)
+                    $pngStream = New-Object System.IO.MemoryStream(,$pngBytes)
+                    try {
+                        $sourceImage = [System.Drawing.Image]::FromStream($pngStream)
+                        try { $captionIcon.Image = New-Object System.Drawing.Bitmap($sourceImage) } finally { $sourceImage.Dispose() }
+                    } finally { $pngStream.Dispose() }
+                    # Build a one-frame ICO at the selected resolution for a crisp taskbar icon.
+                    $singleIco = New-Object byte[] (22 + $chosen.Length)
+                    $singleIco[2] = 1; $singleIco[4] = 1
+                    $singleIco[6] = [byte]($chosen.Width -band 255)
+                    $singleIco[7] = [byte]($chosen.Height -band 255)
+                    $singleIco[10] = 1; $singleIco[12] = 32
+                    [Buffer]::BlockCopy([BitConverter]::GetBytes([uint32]$chosen.Length),0,$singleIco,14,4)
+                    [Buffer]::BlockCopy([BitConverter]::GetBytes([uint32]22),0,$singleIco,18,4)
+                    [Buffer]::BlockCopy($pngBytes,0,$singleIco,22,$chosen.Length)
+                    $iconStream = New-Object System.IO.MemoryStream(,$singleIco)
+                    try { $form.Icon = New-Object System.Drawing.Icon($iconStream) } finally { $iconStream.Dispose() }
+                    Write-LauncherLog ('Loaded clean {0}x{1} AMR caption/taskbar icon frame.' -f $chosen.Width,$chosen.Height)
+                } else { throw 'No suitable high-resolution PNG frame was found in the embedded AMR icon.' }
+            } else { throw 'Embedded AMR icon data is not a valid ICO file.' }
         }
     } catch { Write-LauncherLog ('Could not apply embedded AMR icon to launcher: {0}' -f $_.Exception.Message) }
     if ($scriptText -match '(?i)^\s*<!doctype\s+html|^\s*<html') { throw 'GitHub returned an HTML page instead of the PowerShell application.' }
@@ -342,20 +385,51 @@ namespace AMR {
     $handoffStarted = [DateTime]::UtcNow
     $lastProgressUpdate = $handoffStarted
     $handoffDeadline = $handoffStarted.AddSeconds(180)
+    $visibleWindowSince = $null
+    $visibleWindowHandle = [IntPtr]::Zero
     while ([DateTime]::UtcNow -lt $handoffDeadline) {
         [System.Windows.Forms.Application]::DoEvents()
-        if (Test-Path -LiteralPath $readyPath -PathType Leaf) { $windowReady = $true; break }
+        if (Test-Path -LiteralPath $readyPath -PathType Leaf) {
+            $windowReady = $true
+            Write-LauncherLog 'Main application ready marker received.'
+            break
+        }
+        $appProcess.Refresh()
+        if ($appProcess.HasExited) { throw 'The AMR application process exited before its main window was ready.' }
+
+        # Fail-safe handoff: some WPF/PowerShell 5.1 runs render the window but
+        # the ContentRendered marker write can fail silently. Detect the actual
+        # visible top-level window and require it to remain visible for 2.5 sec.
+        $candidateHandle = [IntPtr]::Zero
+        try {
+            $candidateHandle = $appProcess.MainWindowHandle
+            if ($candidateHandle -eq [IntPtr]::Zero) {
+                $candidateHandle = [AMR.LauncherAcrylicNative]::FindVisibleWindow($appProcess.Id)
+            }
+        } catch {}
+        if ($candidateHandle -ne [IntPtr]::Zero) {
+            if ($candidateHandle -ne $visibleWindowHandle) {
+                $visibleWindowHandle = $candidateHandle
+                $visibleWindowSince = [DateTime]::UtcNow
+            } elseif ($null -ne $visibleWindowSince -and ([DateTime]::UtcNow - $visibleWindowSince).TotalSeconds -ge 2.5) {
+                $windowReady = $true
+                Write-LauncherLog ('Ready marker was absent, but AMR main window {0} remained visible for 2.5 seconds; using verified-window fallback.' -f $candidateHandle)
+                break
+            }
+        } else {
+            $visibleWindowHandle = [IntPtr]::Zero
+            $visibleWindowSince = $null
+        }
+
         if (([DateTime]::UtcNow - $lastProgressUpdate).TotalSeconds -ge 5) {
             $elapsed = ([DateTime]::UtcNow - $handoffStarted).TotalSeconds
             $slowPercent = if ($elapsed -ge 15) { 99 } elseif ($elapsed -ge 7) { 98 } else { 97 }
             if ($slowPercent -gt $progressValue) { Set-AMRLauncherProgress -Percent $slowPercent -Status 'Almost there...' -Detail 'Finishing interface preparation...' }
             $lastProgressUpdate = [DateTime]::UtcNow
         }
-        $appProcess.Refresh()
-        if ($appProcess.HasExited) { throw 'The AMR application process exited before its main window was ready.' }
-        Start-Sleep -Milliseconds 80
+        Start-Sleep -Milliseconds 100
     }
-    if (-not $windowReady) { throw 'AMR did not report that its main window was ready within 180 seconds. Check the launcher log.' }
+    if (-not $windowReady) { throw 'AMR did not report readiness and no stable visible application window was detected within 180 seconds. Check the launcher log.' }
     # 100% is shown exactly once, at the actual handoff.
     Set-AMRLauncherProgress -Percent 100 -Status 'Your AMR experience is ready!' -Detail 'Thank you for being part of our journey.'
     [System.Windows.Forms.Application]::DoEvents()
