@@ -61,13 +61,19 @@ if ($amrIsIseHost -and [string]::IsNullOrWhiteSpace($amrScriptPath)) {
 if ($amrNeedsSta -or $amrNeedsAdmin -or $amrIsIseHost) {
     if (-not [string]::IsNullOrWhiteSpace($amrScriptPath) -and (Test-Path -LiteralPath $amrScriptPath -PathType Leaf)) {
         $amrQuotedScriptPath = '"' + $amrScriptPath.Replace('"','""') + '"'
-        $amrStartArgumentLine = '-NoProfile -ExecutionPolicy Bypass -STA -File ' + $amrQuotedScriptPath
-        $amrStartParams = @{ FilePath='powershell.exe'; ArgumentList=$amrStartArgumentLine; WindowStyle='Hidden'; ErrorAction='Stop' }
-        if ($amrNeedsAdmin) { $amrStartParams.Verb = 'RunAs' }
-        try { Start-Process @amrStartParams }
+        $amrStartArgumentLine = '-NoLogo -NoProfile -ExecutionPolicy Bypass -STA -File ' + $amrQuotedScriptPath
+        # ShellExecute with nShow=0 keeps the elevated PowerShell console hidden from
+        # its first frame. Start-Process -WindowStyle Hidden can still flash a console
+        # when combined with the RunAs verb on some Windows builds.
+        try {
+            $amrShell = New-Object -ComObject Shell.Application
+            $amrVerb = if ($amrNeedsAdmin) { 'runas' } else { 'open' }
+            $amrShell.ShellExecute('powershell.exe', $amrStartArgumentLine, '', $amrVerb, 0)
+            if ($null -ne $amrShell) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($amrShell) }
+        }
         catch {
             if ($amrNeedsAdmin) { throw ('Administrator launch was cancelled or failed: ' + $_.Exception.Message) }
-            throw ('Could not start the required STA PowerShell host: ' + $_.Exception.Message)
+            throw ('Could not start the required hidden STA PowerShell host: ' + $_.Exception.Message)
         }
         exit
     }
@@ -87,9 +93,10 @@ $ErrorActionPreference = 'Stop'
 # heavier WPF assemblies are loaded. This reduces the perceived blank startup delay.
 Add-Type -AssemblyName System.Windows.Forms
 
-# Hide the legacy standalone PowerShell console; this does NOT hide Windows UAC.
-# Do not hide Windows Terminal tabs or the PowerShell ISE host.
-if ($Host.Name -eq 'ConsoleHost' -and [string]::IsNullOrWhiteSpace([string]$env:WT_SESSION)) {
+# Hide any legacy PowerShell console as early as possible. The elevated child is
+# also launched with ShellExecute nShow=0, so its console should never flash onscreen.
+# The original launcher process exits immediately after starting the hidden child.
+if ($Host.Name -eq 'ConsoleHost') {
     try {
         if (-not ('AMR.ConsoleWindow' -as [type])) {
             Add-Type -Namespace AMR -Name ConsoleWindow -MemberDefinition @'
@@ -129,15 +136,6 @@ try {
     $brand.ForeColor = [System.Drawing.Color]::FromArgb(96,165,250)
     $brand.Font = [System.Drawing.Font]::new('Segoe UI',17,[System.Drawing.FontStyle]::Bold)
     $splash.Controls.Add($brand)
-
-    $welcome = New-Object System.Windows.Forms.Label
-    $welcome.Dock = [System.Windows.Forms.DockStyle]::Fill
-    $welcome.Text = "Thank you for choosing AMR.
-We appreciate your trust and are working to make your experience smoother and faster."
-    $welcome.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
-    $welcome.ForeColor = [System.Drawing.Color]::FromArgb(241,245,249)
-    $welcome.Font = [System.Drawing.Font]::new('Segoe UI',12,[System.Drawing.FontStyle]::Regular)
-    $splash.Controls.Add($welcome)
 
     $loading = New-Object System.Windows.Forms.Label
     $loading.Dock = [System.Windows.Forms.DockStyle]::Bottom
