@@ -195,15 +195,39 @@ try {
     }
     Write-LauncherLog ('Download and syntax check complete ({0:N0} bytes).' -f $downloadedFile.Length)
 
-    Set-AMRLauncherProgress -Percent 100 -Status 'Launching AMR Windows Utility...' -Detail 'Starting the isolated, elevated application process...'
+    Set-AMRLauncherProgress -Percent 100 -Status 'Launching AMR Windows Utility...' -Detail 'Preparing the application window...'
     [System.Windows.Forms.Application]::DoEvents()
     $powershellExe = Join-Path $PSHOME 'powershell.exe'
     if (-not (Test-Path -LiteralPath $powershellExe)) { $powershellExe = (Get-Command powershell.exe -ErrorAction Stop).Source }
     $arguments = '-NoLogo -NoProfile -ExecutionPolicy Bypass -STA -File "{0}"' -f $installPath
-    $shell = New-Object -ComObject Shell.Application
-    try { $shell.ShellExecute($powershellExe,$arguments,'','runas',0) }
-    finally { if ($null -ne $shell) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell) } }
-    Write-LauncherLog 'AMR Utility handoff completed.'
+
+    # Start hidden and keep the branded launcher visible until the real WPF app
+    # window exists. This removes the dead-air gap between splash and application.
+    $appProcess = Start-Process -FilePath $powershellExe -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -PassThru -ErrorAction Stop
+    Write-LauncherLog ('Elevated application process started (PID {0}). Waiting for the AMR window.' -f $appProcess.Id)
+    $windowReady = $false
+    $handoffDeadline = [DateTime]::UtcNow.AddSeconds(60)
+    while ([DateTime]::UtcNow -lt $handoffDeadline) {
+        [System.Windows.Forms.Application]::DoEvents()
+        try {
+            $appProcess.Refresh()
+            if ($appProcess.HasExited) { throw 'The AMR application process exited before its main window appeared.' }
+            if ($appProcess.MainWindowHandle -ne [IntPtr]::Zero) {
+                $windowReady = $true
+                break
+            }
+        } catch {
+            if ($_.Exception.Message -like '*exited before its main window appeared*') { throw }
+        }
+        Start-Sleep -Milliseconds 120
+    }
+    if ($windowReady) {
+        Write-LauncherLog 'AMR main window detected; handing off and closing launcher.'
+        Set-AMRLauncherProgress -Percent 100 -Status 'AMR Windows Utility is ready' -Detail 'Enjoy your AMR experience.'
+        [System.Windows.Forms.Application]::DoEvents()
+    } else {
+        Write-LauncherLog 'AMR main window was not detected within 60 seconds; closing launcher while the app continues.'
+    }
 }
 catch {
     Write-LauncherLog ('LAUNCHER ERROR: {0}' -f $_.Exception.Message)
