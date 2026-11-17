@@ -9,7 +9,6 @@ $installPath = Join-Path $env:TEMP 'Amr_utility.ps1'
 $logPath = Join-Path $env:TEMP 'Amr_Utility_Launcher.log'
 $handoffId = [guid]::NewGuid().ToString('N')
 $readyPath = Join-Path $env:TEMP ('AMR_{0}.ready' -f $handoffId)
-$releasePath = Join-Path $env:TEMP ('AMR_{0}.release' -f $handoffId)
 
 function Write-LauncherLog {
     param([string]$Message)
@@ -49,97 +48,206 @@ try {
     # Premium AMR splash: shown by the launcher only, never by the main application.
     $form = New-Object System.Windows.Forms.Form
     $form.Text = 'AMR Windows Utility'
-    $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedSingle
+    # Borderless custom caption: removes the bright Windows title strip while
+    # retaining the AMR icon and title in a matching, clean dark header.
+    $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
     $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
     $form.ClientSize = New-Object System.Drawing.Size(590,310)
-    $form.BackColor = [System.Drawing.Color]::FromArgb(18,30,48)
+    $form.BackColor = [System.Drawing.Color]::FromArgb(32,49,69)
     $form.ForeColor = [System.Drawing.Color]::White
     $form.MaximizeBox = $false
     $form.MinimizeBox = $false
     $form.ShowInTaskbar = $true
     $form.TopMost = $true
 
-    $brand = New-Object System.Windows.Forms.Label
-    $brand.Location = New-Object System.Drawing.Point(28,25)
-    $brand.Size = New-Object System.Drawing.Size(534,34)
-    $brand.Text = 'AMR  |  WINDOWS UTILITY'
-    $brand.Font = New-Object System.Drawing.Font('Segoe UI',19,[System.Drawing.FontStyle]::Bold)
-    $brand.ForeColor = [System.Drawing.Color]::FromArgb(96,165,250)
-    $brand.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
-    $form.Controls.Add($brand)
+    # Custom caption strip uses the same dark palette (no white Windows bar).
+    $caption = New-Object System.Windows.Forms.Panel
+    $caption.Location = New-Object System.Drawing.Point(0,0)
+    $caption.Size = New-Object System.Drawing.Size(590,36)
+    $caption.BackColor = [System.Drawing.Color]::Transparent
+    $form.Controls.Add($caption)
+
+    $captionIcon = New-Object System.Windows.Forms.PictureBox
+    $captionIcon.Location = New-Object System.Drawing.Point(12,7)
+    $captionIcon.Size = New-Object System.Drawing.Size(22,22)
+    $captionIcon.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::StretchImage
+    $caption.Controls.Add($captionIcon)
+
+    $captionTitle = New-Object System.Windows.Forms.Label
+    $captionTitle.Location = New-Object System.Drawing.Point(42,4)
+    $captionTitle.Size = New-Object System.Drawing.Size(430,28)
+    $captionTitle.Text = 'AMR  |  WINDOWS UTILITY'
+    $captionTitle.Font = New-Object System.Drawing.Font('Segoe UI',10,[System.Drawing.FontStyle]::Bold)
+    $captionTitle.ForeColor = [System.Drawing.Color]::White
+    $captionTitle.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+    $caption.Controls.Add($captionTitle)
+
+    $closeButton = New-Object System.Windows.Forms.Button
+    $closeButton.Location = New-Object System.Drawing.Point(552,3)
+    $closeButton.Size = New-Object System.Drawing.Size(32,28)
+    $closeButton.Text = '×'
+    $closeButton.Font = New-Object System.Drawing.Font('Segoe UI',15,[System.Drawing.FontStyle]::Regular)
+    $closeButton.ForeColor = [System.Drawing.Color]::FromArgb(210,220,233)
+    $closeButton.BackColor = [System.Drawing.Color]::FromArgb(45,65,88)
+    $closeButton.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $closeButton.FlatAppearance.BorderSize = 0
+    $closeButton.Add_Click({ $form.Close() })
+    $caption.Controls.Add($closeButton)
+
+    # Allow dragging the custom caption just like a normal Windows title bar.
+    if (-not ('AMR.LauncherCaptionNative' -as [type])) {
+        Add-Type -Namespace AMR -Name LauncherCaptionNative -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool ReleaseCapture();
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern System.IntPtr SendMessage(System.IntPtr hWnd, int msg, int wParam, int lParam);
+'@
+    }
+
+    # Windows 10/11 acrylic blur (frosted-glass) for the entire launcher surface.
+    # Falls back cleanly to the solid navy palette on unsupported Windows builds.
+    if (-not ('AMR.LauncherAcrylicNative' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace AMR {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct AccentPolicy { public int AccentState; public int AccentFlags; public int GradientColor; public int AnimationId; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct WindowCompositionAttributeData { public int Attribute; public IntPtr Data; public int SizeOfData; }
+    public static class LauncherAcrylicNative {
+        [DllImport("user32.dll", SetLastError=true)] public static extern bool SetWindowCompositionAttribute(IntPtr hwnd, ref WindowCompositionAttributeData data);
+        [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hwnd, int command);
+        [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
+        [DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(int processId);
+        [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr extraData);
+        [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out int processId);
+        [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hwnd);
+        private delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr extraData);
+        public static IntPtr FindVisibleWindow(int targetPid) {
+            IntPtr found = IntPtr.Zero;
+            EnumWindows(delegate(IntPtr hwnd, IntPtr extra) {
+                int pid; GetWindowThreadProcessId(hwnd, out pid);
+                if (pid == targetPid && IsWindowVisible(hwnd)) { found = hwnd; return false; }
+                return true;
+            }, IntPtr.Zero);
+            return found;
+        }
+    }
+}
+'@
+    }
+    $applyAMRAcrylic = {
+        try {
+            $policy = New-Object AMR.AccentPolicy
+            $policy.AccentState = 4       # ACCENT_ENABLE_ACRYLICBLURBEHIND
+            $policy.AccentFlags = 2
+            $policy.GradientColor = [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]0xCC563A20),0) # translucent slate-blue glass (AABBGGRR)
+            $size = [Runtime.InteropServices.Marshal]::SizeOf([type][AMR.AccentPolicy])
+            $memory = [Runtime.InteropServices.Marshal]::AllocHGlobal($size)
+            try {
+                [Runtime.InteropServices.Marshal]::StructureToPtr($policy,$memory,$false)
+                $data = New-Object AMR.WindowCompositionAttributeData
+                $data.Attribute = 19 # WCA_ACCENT_POLICY
+                $data.Data = $memory
+                $data.SizeOfData = $size
+                [void][AMR.LauncherAcrylicNative]::SetWindowCompositionAttribute($form.Handle,[ref]$data)
+            } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($memory) }
+        } catch { Write-LauncherLog ('Acrylic glass effect unavailable; using fallback background: {0}' -f $_.Exception.Message) }
+    }.GetNewClosure()
+    $form.Add_Shown($applyAMRAcrylic)
+    $caption.Add_MouseDown({
+        if ($_.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+            [void][AMR.LauncherCaptionNative]::ReleaseCapture()
+            [void][AMR.LauncherCaptionNative]::SendMessage($form.Handle,0xA1,0x2,0)
+        }
+    })
+    $captionTitle.Add_MouseDown({
+        if ($_.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+            [void][AMR.LauncherCaptionNative]::ReleaseCapture()
+            [void][AMR.LauncherCaptionNative]::SendMessage($form.Handle,0xA1,0x2,0)
+        }
+    })
 
     $thanks = New-Object System.Windows.Forms.Label
-    $thanks.Location = New-Object System.Drawing.Point(30,67)
+    $thanks.Location = New-Object System.Drawing.Point(30,49)
     $thanks.Size = New-Object System.Drawing.Size(530,25)
     $thanks.Text = 'Thank you for your trust and support. We truly appreciate you.'
     $thanks.Font = New-Object System.Drawing.Font('Segoe UI',12,[System.Drawing.FontStyle]::Bold)
-    $thanks.ForeColor = [System.Drawing.Color]::FromArgb(229,195,90)
+    $thanks.BackColor = [System.Drawing.Color]::Transparent
+    $thanks.ForeColor = [System.Drawing.Color]::White
     $thanks.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
     $form.Controls.Add($thanks)
 
     $edition = New-Object System.Windows.Forms.Label
-    $edition.Location = New-Object System.Drawing.Point(30,99)
+    $edition.Location = New-Object System.Drawing.Point(30,81)
     $edition.Size = New-Object System.Drawing.Size(530,27)
     $edition.Text = 'PREMIUM EDITION'
     $edition.Font = New-Object System.Drawing.Font('Segoe UI',11,[System.Drawing.FontStyle]::Bold)
+    $edition.BackColor = [System.Drawing.Color]::Transparent
     $edition.ForeColor = [System.Drawing.Color]::FromArgb(229,190,75)
     $edition.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
     $form.Controls.Add($edition)
 
     $tagline = New-Object System.Windows.Forms.Label
-    $tagline.Location = New-Object System.Drawing.Point(30,130)
+    $tagline.Location = New-Object System.Drawing.Point(30,112)
     $tagline.Size = New-Object System.Drawing.Size(530,22)
     $tagline.Text = 'We work hard every day for your happiness.'
     $tagline.Font = New-Object System.Drawing.Font('Segoe UI',9,[System.Drawing.FontStyle]::Regular)
-    $tagline.ForeColor = [System.Drawing.Color]::FromArgb(190,205,224)
+    $tagline.BackColor = [System.Drawing.Color]::Transparent
+    $tagline.ForeColor = [System.Drawing.Color]::FromArgb(198,211,228)
     $tagline.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
     $form.Controls.Add($tagline)
 
     $statusLabel = New-Object System.Windows.Forms.Label
-    $statusLabel.Location = New-Object System.Drawing.Point(42,169)
+    $statusLabel.Location = New-Object System.Drawing.Point(42,151)
     $statusLabel.Size = New-Object System.Drawing.Size(506,24)
     $statusLabel.Text = 'Getting everything ready for you...'
     $statusLabel.Font = New-Object System.Drawing.Font('Segoe UI',10,[System.Drawing.FontStyle]::Bold)
+    $statusLabel.BackColor = [System.Drawing.Color]::Transparent
     $statusLabel.ForeColor = [System.Drawing.Color]::FromArgb(241,245,249)
     $form.Controls.Add($statusLabel)
 
     $progressTrack = New-Object System.Windows.Forms.Panel
-    $progressTrack.Location = New-Object System.Drawing.Point(42,205)
+    $progressTrack.Location = New-Object System.Drawing.Point(42,187)
     $progressTrack.Size = New-Object System.Drawing.Size(440,12)
-    $progressTrack.BackColor = [System.Drawing.Color]::FromArgb(43,59,80)
+    $progressTrack.BackColor = [System.Drawing.Color]::FromArgb(48,67,91)
     $progressTrack.BorderStyle = [System.Windows.Forms.BorderStyle]::None
     $form.Controls.Add($progressTrack)
 
     $progressFill = New-Object System.Windows.Forms.Panel
     $progressFill.Location = New-Object System.Drawing.Point(0,0)
     $progressFill.Size = New-Object System.Drawing.Size(0,12)
-    $progressFill.BackColor = [System.Drawing.Color]::FromArgb(59,151,255)
+    $progressFill.BackColor = [System.Drawing.Color]::FromArgb(72,166,255)
     $progressTrack.Controls.Add($progressFill)
     $progressBar = $progressFill
 
     $percentLabel = New-Object System.Windows.Forms.Label
-    $percentLabel.Location = New-Object System.Drawing.Point(490,198)
+    $percentLabel.Location = New-Object System.Drawing.Point(490,180)
     $percentLabel.Size = New-Object System.Drawing.Size(58,25)
     $percentLabel.Text = '0%'
     $percentLabel.Font = New-Object System.Drawing.Font('Segoe UI',11,[System.Drawing.FontStyle]::Bold)
-    $percentLabel.ForeColor = [System.Drawing.Color]::FromArgb(96,177,255)
+    $percentLabel.BackColor = [System.Drawing.Color]::Transparent
+    $percentLabel.ForeColor = [System.Drawing.Color]::FromArgb(112,190,255)
     $percentLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
     $form.Controls.Add($percentLabel)
 
     $detailLabel = New-Object System.Windows.Forms.Label
-    $detailLabel.Location = New-Object System.Drawing.Point(42,232)
+    $detailLabel.Location = New-Object System.Drawing.Point(42,214)
     $detailLabel.Size = New-Object System.Drawing.Size(506,22)
     $detailLabel.Text = 'Preparing secure connection to AMR servers...'
     $detailLabel.Font = New-Object System.Drawing.Font('Segoe UI',8)
-    $detailLabel.ForeColor = [System.Drawing.Color]::FromArgb(148,163,184)
+    $detailLabel.BackColor = [System.Drawing.Color]::Transparent
+    $detailLabel.ForeColor = [System.Drawing.Color]::FromArgb(157,174,196)
     $detailLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
     $form.Controls.Add($detailLabel)
 
     $footer = New-Object System.Windows.Forms.Label
-    $footer.Location = New-Object System.Drawing.Point(30,276)
+    $footer.Location = New-Object System.Drawing.Point(30,258)
     $footer.Size = New-Object System.Drawing.Size(530,20)
     $footer.Text = 'SECURE DOWNLOAD  •  VERIFIED SCRIPT  •  AMR'
     $footer.Font = New-Object System.Drawing.Font('Segoe UI',7,[System.Drawing.FontStyle]::Bold)
+    $footer.BackColor = [System.Drawing.Color]::Transparent
     $footer.ForeColor = [System.Drawing.Color]::FromArgb(126,151,181)
     $footer.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
     $form.Controls.Add($footer)
@@ -199,7 +307,10 @@ try {
         if ($iconMatch.Success) {
             $iconBytes = [Convert]::FromBase64String($iconMatch.Groups[1].Value)
             $iconStream = New-Object System.IO.MemoryStream(,$iconBytes)
-            try { $form.Icon = New-Object System.Drawing.Icon($iconStream) } finally { $iconStream.Dispose() }
+            try {
+                $form.Icon = New-Object System.Drawing.Icon($iconStream)
+                if ($captionIcon) { $captionIcon.Image = $form.Icon.ToBitmap() }
+            } finally { $iconStream.Dispose() }
         }
     } catch { Write-LauncherLog ('Could not apply embedded AMR icon to launcher: {0}' -f $_.Exception.Message) }
     if ($scriptText -match '(?i)^\s*<!doctype\s+html|^\s*<html') { throw 'GitHub returned an HTML page instead of the PowerShell application.' }
@@ -221,7 +332,7 @@ try {
     [System.Windows.Forms.Application]::DoEvents()
     $powershellExe = Join-Path $PSHOME 'powershell.exe'
     if (-not (Test-Path -LiteralPath $powershellExe)) { $powershellExe = (Get-Command powershell.exe -ErrorAction Stop).Source }
-    $arguments = '-NoLogo -NoProfile -ExecutionPolicy Bypass -STA -File "{0}" -AMRLauncherReadyPath "{1}" -AMRLauncherReleasePath "{2}"' -f $installPath,$readyPath,$releasePath
+    $arguments = '-NoLogo -NoProfile -ExecutionPolicy Bypass -STA -File "{0}" -AMRLauncherReadyPath "{1}"' -f $installPath,$readyPath
 
     # Pass handshake paths as script arguments: these survive the UAC elevation boundary.
     $appProcess = Start-Process -FilePath $powershellExe -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -PassThru -ErrorAction Stop
@@ -249,15 +360,34 @@ try {
     Set-AMRLauncherProgress -Percent 100 -Status 'Your AMR experience is ready!' -Detail 'Thank you for being part of our journey.'
     [System.Windows.Forms.Application]::DoEvents()
     Start-Sleep -Milliseconds 350
-    Write-LauncherLog 'WPF ready signal received; closing launcher and releasing the application window.'
-    if ($form -and -not $form.IsDisposed) { $form.Close(); $form.Dispose(); $form = $null }
-    [System.IO.File]::WriteAllText($releasePath,'show')
+    Write-LauncherLog 'WPF first render confirmed; closing launcher and activating the application window.'
+    # Capture the real WPF top-level handle before closing the topmost splash.
+    $appWindowHandle = [IntPtr]::Zero
+    try {
+        $appProcess.Refresh()
+        $appWindowHandle = $appProcess.MainWindowHandle
+        if ($appWindowHandle -eq [IntPtr]::Zero) { $appWindowHandle = [AMR.LauncherAcrylicNative]::FindVisibleWindow($appProcess.Id) }
+    } catch {}
+    if ($form -and -not $form.IsDisposed) { $form.TopMost = $false; $form.Close(); $form.Dispose(); $form = $null }
+    # Explicit foreground handoff prevents the hidden PowerShell host from leaving
+    # the desktop on a dark/black surface after the splash disappears.
+    if ($appWindowHandle -ne [IntPtr]::Zero) {
+        try {
+            [void][AMR.LauncherAcrylicNative]::AllowSetForegroundWindow($appProcess.Id)
+            [void][AMR.LauncherAcrylicNative]::ShowWindow($appWindowHandle,9) # SW_RESTORE
+            [void][AMR.LauncherAcrylicNative]::SetForegroundWindow($appWindowHandle)
+            Write-LauncherLog ('Activated AMR WPF window handle {0}.' -f $appWindowHandle)
+        } catch { Write-LauncherLog ('Could not explicitly activate AMR window: {0}' -f $_.Exception.Message) }
+    } else {
+        Write-LauncherLog 'WPF ready signal arrived but MainWindowHandle was zero; application remains running.'
+    }
+    Remove-Item -LiteralPath $readyPath -Force -ErrorAction SilentlyContinue
 
 }
 catch {
     Write-LauncherLog ('LAUNCHER ERROR: {0}' -f $_.Exception.Message)
-    # If the child is still starting, release its hidden window rather than leave it invisible.
-    try { if ($appProcess -and -not $appProcess.HasExited) { [System.IO.File]::WriteAllText($releasePath,'show') } } catch {}
+    # The application window is never hidden; do not leave a stale handoff signal.
+    try { Remove-Item -LiteralPath $readyPath -Force -ErrorAction SilentlyContinue } catch {}
     try {
         if ($form -and -not $form.IsDisposed) { $form.Close(); $form.Dispose(); $form = $null }
         Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
@@ -267,6 +397,6 @@ catch {
 finally {
     try { if ($form -and -not $form.IsDisposed) { $form.Close(); $form.Dispose() } } catch {}
     if (Test-Path -LiteralPath $downloadPath) { Remove-Item -LiteralPath $downloadPath -Force -ErrorAction SilentlyContinue }
-    # The application removes its own ready/release handshake files after reveal.
+    try { Remove-Item -LiteralPath $readyPath -Force -ErrorAction SilentlyContinue } catch {}
 }
 exit
