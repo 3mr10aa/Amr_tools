@@ -21,17 +21,18 @@ $progressBar = $null
 $statusLabel = $null
 $percentLabel = $null
 $detailLabel = $null
+$progressTrack = $null
+$progressFill = $null
+$progressValue = 0
 
 function Set-AMRLauncherProgress {
     param([int]$Percent,[string]$Status,[string]$Detail)
     if ($null -eq $form -or $form.IsDisposed) { return }
     if ($Percent -ge 0) {
-        $progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
-        $progressBar.Value = [Math]::Max(0,[Math]::Min(100,$Percent))
-        $percentLabel.Text = ('{0}%' -f $Percent)
+        $script:progressValue = [Math]::Max(0,[Math]::Min(100,$Percent))
+        $progressFill.Width = [int](($progressTrack.ClientSize.Width * $script:progressValue) / 100)
+        $percentLabel.Text = ('{0}%' -f $script:progressValue)
     } else {
-        $progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
-        $progressBar.MarqueeAnimationSpeed = 24
         $percentLabel.Text = '...'
     }
     $statusLabel.Text = $Status
@@ -50,19 +51,13 @@ try {
     $form.Text = 'AMR Windows Utility'
     $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedSingle
     $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
-    $form.ClientSize = New-Object System.Drawing.Size(590,300)
-    $form.BackColor = [System.Drawing.Color]::FromArgb(10,20,35)
+    $form.ClientSize = New-Object System.Drawing.Size(590,310)
+    $form.BackColor = [System.Drawing.Color]::FromArgb(18,30,48)
     $form.ForeColor = [System.Drawing.Color]::White
     $form.MaximizeBox = $false
     $form.MinimizeBox = $false
     $form.ShowInTaskbar = $true
     $form.TopMost = $true
-
-    $topLine = New-Object System.Windows.Forms.Panel
-    $topLine.Dock = [System.Windows.Forms.DockStyle]::Top
-    $topLine.Height = 5
-    $topLine.BackColor = [System.Drawing.Color]::FromArgb(212,175,55)
-    $form.Controls.Add($topLine)
 
     $brand = New-Object System.Windows.Forms.Label
     $brand.Location = New-Object System.Drawing.Point(28,25)
@@ -74,50 +69,65 @@ try {
     $form.Controls.Add($brand)
 
     $thanks = New-Object System.Windows.Forms.Label
-    $thanks.Location = New-Object System.Drawing.Point(30,68)
+    $thanks.Location = New-Object System.Drawing.Point(30,67)
     $thanks.Size = New-Object System.Drawing.Size(530,25)
-    $thanks.Text = 'THANK YOU FOR CHOOSING AMR'
-    $thanks.Font = New-Object System.Drawing.Font('Segoe UI',10,[System.Drawing.FontStyle]::Bold)
+    $thanks.Text = 'Thank you for your trust and support. We truly appreciate you.'
+    $thanks.Font = New-Object System.Drawing.Font('Segoe UI',12,[System.Drawing.FontStyle]::Bold)
     $thanks.ForeColor = [System.Drawing.Color]::FromArgb(229,195,90)
     $thanks.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
     $form.Controls.Add($thanks)
 
     $edition = New-Object System.Windows.Forms.Label
-    $edition.Location = New-Object System.Drawing.Point(30,100)
+    $edition.Location = New-Object System.Drawing.Point(30,99)
     $edition.Size = New-Object System.Drawing.Size(530,27)
     $edition.Text = 'PREMIUM EDITION'
     $edition.Font = New-Object System.Drawing.Font('Segoe UI',11,[System.Drawing.FontStyle]::Bold)
-    $edition.ForeColor = [System.Drawing.Color]::FromArgb(203,213,225)
+    $edition.ForeColor = [System.Drawing.Color]::FromArgb(229,190,75)
     $edition.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
     $form.Controls.Add($edition)
 
+    $tagline = New-Object System.Windows.Forms.Label
+    $tagline.Location = New-Object System.Drawing.Point(30,130)
+    $tagline.Size = New-Object System.Drawing.Size(530,22)
+    $tagline.Text = 'We work hard every day for your happiness.'
+    $tagline.Font = New-Object System.Drawing.Font('Segoe UI',9,[System.Drawing.FontStyle]::Regular)
+    $tagline.ForeColor = [System.Drawing.Color]::FromArgb(190,205,224)
+    $tagline.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+    $form.Controls.Add($tagline)
+
     $statusLabel = New-Object System.Windows.Forms.Label
-    $statusLabel.Location = New-Object System.Drawing.Point(42,155)
+    $statusLabel.Location = New-Object System.Drawing.Point(42,169)
     $statusLabel.Size = New-Object System.Drawing.Size(506,24)
-    $statusLabel.Text = 'Loading AMR Windows Utility...'
+    $statusLabel.Text = 'Getting everything ready for you...'
     $statusLabel.Font = New-Object System.Drawing.Font('Segoe UI',10,[System.Drawing.FontStyle]::Bold)
     $statusLabel.ForeColor = [System.Drawing.Color]::FromArgb(241,245,249)
     $form.Controls.Add($statusLabel)
 
-    $progressBar = New-Object System.Windows.Forms.ProgressBar
-    $progressBar.Location = New-Object System.Drawing.Point(42,190)
-    $progressBar.Size = New-Object System.Drawing.Size(440,15)
-    $progressBar.Minimum = 0
-    $progressBar.Maximum = 100
-    $progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
-    $form.Controls.Add($progressBar)
+    $progressTrack = New-Object System.Windows.Forms.Panel
+    $progressTrack.Location = New-Object System.Drawing.Point(42,205)
+    $progressTrack.Size = New-Object System.Drawing.Size(440,12)
+    $progressTrack.BackColor = [System.Drawing.Color]::FromArgb(43,59,80)
+    $progressTrack.BorderStyle = [System.Windows.Forms.BorderStyle]::None
+    $form.Controls.Add($progressTrack)
+
+    $progressFill = New-Object System.Windows.Forms.Panel
+    $progressFill.Location = New-Object System.Drawing.Point(0,0)
+    $progressFill.Size = New-Object System.Drawing.Size(0,12)
+    $progressFill.BackColor = [System.Drawing.Color]::FromArgb(59,151,255)
+    $progressTrack.Controls.Add($progressFill)
+    $progressBar = $progressFill
 
     $percentLabel = New-Object System.Windows.Forms.Label
-    $percentLabel.Location = New-Object System.Drawing.Point(490,185)
+    $percentLabel.Location = New-Object System.Drawing.Point(490,198)
     $percentLabel.Size = New-Object System.Drawing.Size(58,25)
     $percentLabel.Text = '0%'
     $percentLabel.Font = New-Object System.Drawing.Font('Segoe UI',11,[System.Drawing.FontStyle]::Bold)
-    $percentLabel.ForeColor = [System.Drawing.Color]::FromArgb(229,195,90)
+    $percentLabel.ForeColor = [System.Drawing.Color]::FromArgb(96,177,255)
     $percentLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
     $form.Controls.Add($percentLabel)
 
     $detailLabel = New-Object System.Windows.Forms.Label
-    $detailLabel.Location = New-Object System.Drawing.Point(42,220)
+    $detailLabel.Location = New-Object System.Drawing.Point(42,232)
     $detailLabel.Size = New-Object System.Drawing.Size(506,22)
     $detailLabel.Text = 'Preparing secure connection to AMR servers...'
     $detailLabel.Font = New-Object System.Drawing.Font('Segoe UI',8)
@@ -126,11 +136,11 @@ try {
     $form.Controls.Add($detailLabel)
 
     $footer = New-Object System.Windows.Forms.Label
-    $footer.Location = New-Object System.Drawing.Point(30,264)
+    $footer.Location = New-Object System.Drawing.Point(30,276)
     $footer.Size = New-Object System.Drawing.Size(530,20)
     $footer.Text = 'SECURE DOWNLOAD  •  VERIFIED SCRIPT  •  AMR'
     $footer.Font = New-Object System.Drawing.Font('Segoe UI',7,[System.Drawing.FontStyle]::Bold)
-    $footer.ForeColor = [System.Drawing.Color]::FromArgb(100,116,139)
+    $footer.ForeColor = [System.Drawing.Color]::FromArgb(126,151,181)
     $footer.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
     $form.Controls.Add($footer)
 
@@ -139,7 +149,7 @@ try {
     [System.Windows.Forms.Application]::DoEvents()
 
     Write-LauncherLog 'Starting AMR launcher download.'
-    Set-AMRLauncherProgress -Percent 0 -Status 'Loading AMR Windows Utility...' -Detail 'Connecting securely to GitHub...'
+    Set-AMRLauncherProgress -Percent 0 -Status 'Getting everything ready for you...' -Detail 'Connecting securely to GitHub...'
 
     # Stream the response ourselves so the percentage reflects bytes actually received.
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -164,9 +174,9 @@ try {
                     $pct = [int][Math]::Floor(($received / [double]$totalBytes) * 85)
                     $pct = [Math]::Min(85,$pct)
                     $detail = '{0:N1} MB of {1:N1} MB downloaded' -f ($received/1MB),($totalBytes/1MB)
-                    Set-AMRLauncherProgress -Percent $pct -Status 'Downloading AMR Windows Utility...' -Detail $detail
+                    Set-AMRLauncherProgress -Percent $pct -Status 'Downloading your AMR experience...' -Detail $detail
                 } else {
-                    Set-AMRLauncherProgress -Percent -1 -Status 'Downloading AMR Windows Utility...' -Detail ('{0:N1} MB received — measuring download...' -f ($received/1MB))
+                    Set-AMRLauncherProgress -Percent -1 -Status 'Downloading your AMR experience...' -Detail ('{0:N1} MB received — measuring download...' -f ($received/1MB))
                 }
             }
         } finally {
@@ -183,6 +193,15 @@ try {
     $strictUtf8 = New-Object System.Text.UTF8Encoding($false,$true)
     $reader = New-Object System.IO.StreamReader($downloadPath,$strictUtf8,$true)
     try { $scriptText = $reader.ReadToEnd() } finally { $reader.Dispose() }
+    # Reuse the exact embedded AMR application icon for the launcher and its taskbar entry.
+    try {
+        $iconMatch = [regex]::Match($scriptText, '\$amrIconBytes\s*=\s*\[Convert\]::FromBase64String\(''([^'']+)''\)')
+        if ($iconMatch.Success) {
+            $iconBytes = [Convert]::FromBase64String($iconMatch.Groups[1].Value)
+            $iconStream = New-Object System.IO.MemoryStream(,$iconBytes)
+            try { $form.Icon = New-Object System.Drawing.Icon($iconStream) } finally { $iconStream.Dispose() }
+        }
+    } catch { Write-LauncherLog ('Could not apply embedded AMR icon to launcher: {0}' -f $_.Exception.Message) }
     if ($scriptText -match '(?i)^\s*<!doctype\s+html|^\s*<html') { throw 'GitHub returned an HTML page instead of the PowerShell application.' }
     if ($scriptText -match 'Thank you for choosing AMR') { throw 'The GitHub main script still contains the old welcome message. Update Amr_utility.ps1 on the main branch first.' }
     if ($scriptText -match 'Getting things ready\.\.\.') { throw 'The GitHub main script still contains the old startup splash. Replace it with the silent main script first.' }
@@ -198,18 +217,16 @@ try {
     }
     Write-LauncherLog ('Download and syntax check complete ({0:N0} bytes).' -f $downloadedFile.Length)
 
-    Set-AMRLauncherProgress -Percent 96 -Status 'Starting AMR Windows Utility...' -Detail 'Loading the application interface...'
+    Set-AMRLauncherProgress -Percent 96 -Status 'Starting your AMR experience...' -Detail 'Preparing the application interface...'
     [System.Windows.Forms.Application]::DoEvents()
     $powershellExe = Join-Path $PSHOME 'powershell.exe'
     if (-not (Test-Path -LiteralPath $powershellExe)) { $powershellExe = (Get-Command powershell.exe -ErrorAction Stop).Source }
-    $arguments = '-NoLogo -NoProfile -ExecutionPolicy Bypass -STA -File "{0}"' -f $installPath
+    $arguments = '-NoLogo -NoProfile -ExecutionPolicy Bypass -STA -File "{0}" -AMRLauncherReadyPath "{1}" -AMRLauncherReleasePath "{2}"' -f $installPath,$readyPath,$releasePath
 
-    # The app window stays transparent until the launcher closes its splash.
-    $env:AMR_LAUNCHER_READY = $readyPath
-    $env:AMR_LAUNCHER_RELEASE = $releasePath
+    # Pass handshake paths as script arguments: these survive the UAC elevation boundary.
     $appProcess = Start-Process -FilePath $powershellExe -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -PassThru -ErrorAction Stop
     Write-LauncherLog ('Elevated application process started (PID {0}). Waiting for WPF ready signal.' -f $appProcess.Id)
-    Set-AMRLauncherProgress -Percent 97 -Status 'Opening AMR Windows Utility...' -Detail 'Preparing the application window. Please wait...'
+    Set-AMRLauncherProgress -Percent 97 -Status 'Almost there...' -Detail 'Preparing your application window. Please wait...'
     $windowReady = $false
     $handoffStarted = [DateTime]::UtcNow
     $lastProgressUpdate = $handoffStarted
@@ -220,7 +237,7 @@ try {
         if (([DateTime]::UtcNow - $lastProgressUpdate).TotalSeconds -ge 5) {
             $elapsed = ([DateTime]::UtcNow - $handoffStarted).TotalSeconds
             $slowPercent = if ($elapsed -ge 15) { 99 } elseif ($elapsed -ge 7) { 98 } else { 97 }
-            if ($slowPercent -gt $progressBar.Value) { Set-AMRLauncherProgress -Percent $slowPercent -Status 'Opening AMR Windows Utility...' -Detail 'Finishing interface preparation...' }
+            if ($slowPercent -gt $progressValue) { Set-AMRLauncherProgress -Percent $slowPercent -Status 'Almost there...' -Detail 'Finishing interface preparation...' }
             $lastProgressUpdate = [DateTime]::UtcNow
         }
         $appProcess.Refresh()
@@ -229,8 +246,9 @@ try {
     }
     if (-not $windowReady) { throw 'AMR did not report that its main window was ready within 180 seconds. Check the launcher log.' }
     # 100% is shown exactly once, at the actual handoff.
-    Set-AMRLauncherProgress -Percent 100 -Status 'AMR Windows Utility is ready' -Detail 'Enjoy your AMR experience.'
+    Set-AMRLauncherProgress -Percent 100 -Status 'Your AMR experience is ready!' -Detail 'Thank you for being part of our journey.'
     [System.Windows.Forms.Application]::DoEvents()
+    Start-Sleep -Milliseconds 350
     Write-LauncherLog 'WPF ready signal received; closing launcher and releasing the application window.'
     if ($form -and -not $form.IsDisposed) { $form.Close(); $form.Dispose(); $form = $null }
     [System.IO.File]::WriteAllText($releasePath,'show')
