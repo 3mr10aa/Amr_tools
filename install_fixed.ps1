@@ -7,6 +7,9 @@ $sourceUrl = 'https://raw.githubusercontent.com/3mr10aa/Amr_tools/main/Amr_utili
 $downloadPath = Join-Path $env:TEMP 'Amr_utility.download'
 $installPath = Join-Path $env:TEMP 'Amr_utility.ps1'
 $logPath = Join-Path $env:TEMP 'Amr_Utility_Launcher.log'
+$handoffId = [guid]::NewGuid().ToString('N')
+$readyPath = Join-Path $env:TEMP ('AMR_{0}.ready' -f $handoffId)
+$releasePath = Join-Path $env:TEMP ('AMR_{0}.release' -f $handoffId)
 
 function Write-LauncherLog {
     param([string]$Message)
@@ -158,8 +161,8 @@ try {
                 $outputStream.Write($buffer,0,$read)
                 $received += $read
                 if ($totalBytes -gt 0) {
-                    $pct = [int][Math]::Floor(($received / [double]$totalBytes) * 100)
-                    if ($received -lt $totalBytes) { $pct = [Math]::Min(99,$pct) }
+                    $pct = [int][Math]::Floor(($received / [double]$totalBytes) * 85)
+                    $pct = [Math]::Min(85,$pct)
                     $detail = '{0:N1} MB of {1:N1} MB downloaded' -f ($received/1MB),($totalBytes/1MB)
                     Set-AMRLauncherProgress -Percent $pct -Status 'Downloading AMR Windows Utility...' -Detail $detail
                 } else {
@@ -176,7 +179,7 @@ try {
     $downloadedFile = Get-Item -LiteralPath $downloadPath
     if ($downloadedFile.Length -lt 100000) { throw ('The downloaded application file is unexpectedly small ({0} bytes).' -f $downloadedFile.Length) }
 
-    Set-AMRLauncherProgress -Percent 100 -Status 'Download complete — verifying AMR...' -Detail ('{0:N2} MB received. Checking file integrity and PowerShell syntax.' -f ($downloadedFile.Length/1MB))
+    Set-AMRLauncherProgress -Percent 90 -Status 'Download complete — verifying AMR...' -Detail ('{0:N2} MB received. Checking file integrity and PowerShell syntax.' -f ($downloadedFile.Length/1MB))
     $strictUtf8 = New-Object System.Text.UTF8Encoding($false,$true)
     $reader = New-Object System.IO.StreamReader($downloadPath,$strictUtf8,$true)
     try { $scriptText = $reader.ReadToEnd() } finally { $reader.Dispose() }
@@ -195,42 +198,48 @@ try {
     }
     Write-LauncherLog ('Download and syntax check complete ({0:N0} bytes).' -f $downloadedFile.Length)
 
-    Set-AMRLauncherProgress -Percent 100 -Status 'Launching AMR Windows Utility...' -Detail 'Preparing the application window...'
+    Set-AMRLauncherProgress -Percent 96 -Status 'Starting AMR Windows Utility...' -Detail 'Loading the application interface...'
     [System.Windows.Forms.Application]::DoEvents()
     $powershellExe = Join-Path $PSHOME 'powershell.exe'
     if (-not (Test-Path -LiteralPath $powershellExe)) { $powershellExe = (Get-Command powershell.exe -ErrorAction Stop).Source }
     $arguments = '-NoLogo -NoProfile -ExecutionPolicy Bypass -STA -File "{0}"' -f $installPath
 
-    # Start hidden and keep the branded launcher visible until the real WPF app
-    # window exists. This removes the dead-air gap between splash and application.
+    # The app window stays transparent until the launcher closes its splash.
+    $env:AMR_LAUNCHER_READY = $readyPath
+    $env:AMR_LAUNCHER_RELEASE = $releasePath
     $appProcess = Start-Process -FilePath $powershellExe -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -PassThru -ErrorAction Stop
-    Write-LauncherLog ('Elevated application process started (PID {0}). Waiting for the AMR window.' -f $appProcess.Id)
+    Write-LauncherLog ('Elevated application process started (PID {0}). Waiting for WPF ready signal.' -f $appProcess.Id)
+    Set-AMRLauncherProgress -Percent 97 -Status 'Opening AMR Windows Utility...' -Detail 'Preparing the application window. Please wait...'
     $windowReady = $false
-    $handoffDeadline = [DateTime]::UtcNow.AddSeconds(60)
+    $handoffStarted = [DateTime]::UtcNow
+    $lastProgressUpdate = $handoffStarted
+    $handoffDeadline = $handoffStarted.AddSeconds(180)
     while ([DateTime]::UtcNow -lt $handoffDeadline) {
         [System.Windows.Forms.Application]::DoEvents()
-        try {
-            $appProcess.Refresh()
-            if ($appProcess.HasExited) { throw 'The AMR application process exited before its main window appeared.' }
-            if ($appProcess.MainWindowHandle -ne [IntPtr]::Zero) {
-                $windowReady = $true
-                break
-            }
-        } catch {
-            if ($_.Exception.Message -like '*exited before its main window appeared*') { throw }
+        if (Test-Path -LiteralPath $readyPath -PathType Leaf) { $windowReady = $true; break }
+        if (([DateTime]::UtcNow - $lastProgressUpdate).TotalSeconds -ge 5) {
+            $elapsed = ([DateTime]::UtcNow - $handoffStarted).TotalSeconds
+            $slowPercent = if ($elapsed -ge 15) { 99 } elseif ($elapsed -ge 7) { 98 } else { 97 }
+            if ($slowPercent -gt $progressBar.Value) { Set-AMRLauncherProgress -Percent $slowPercent -Status 'Opening AMR Windows Utility...' -Detail 'Finishing interface preparation...' }
+            $lastProgressUpdate = [DateTime]::UtcNow
         }
-        Start-Sleep -Milliseconds 120
+        $appProcess.Refresh()
+        if ($appProcess.HasExited) { throw 'The AMR application process exited before its main window was ready.' }
+        Start-Sleep -Milliseconds 80
     }
-    if ($windowReady) {
-        Write-LauncherLog 'AMR main window detected; handing off and closing launcher.'
-        Set-AMRLauncherProgress -Percent 100 -Status 'AMR Windows Utility is ready' -Detail 'Enjoy your AMR experience.'
-        [System.Windows.Forms.Application]::DoEvents()
-    } else {
-        Write-LauncherLog 'AMR main window was not detected within 60 seconds; closing launcher while the app continues.'
-    }
+    if (-not $windowReady) { throw 'AMR did not report that its main window was ready within 180 seconds. Check the launcher log.' }
+    # 100% is shown exactly once, at the actual handoff.
+    Set-AMRLauncherProgress -Percent 100 -Status 'AMR Windows Utility is ready' -Detail 'Enjoy your AMR experience.'
+    [System.Windows.Forms.Application]::DoEvents()
+    Write-LauncherLog 'WPF ready signal received; closing launcher and releasing the application window.'
+    if ($form -and -not $form.IsDisposed) { $form.Close(); $form.Dispose(); $form = $null }
+    [System.IO.File]::WriteAllText($releasePath,'show')
+
 }
 catch {
     Write-LauncherLog ('LAUNCHER ERROR: {0}' -f $_.Exception.Message)
+    # If the child is still starting, release its hidden window rather than leave it invisible.
+    try { if ($appProcess -and -not $appProcess.HasExited) { [System.IO.File]::WriteAllText($releasePath,'show') } } catch {}
     try {
         if ($form -and -not $form.IsDisposed) { $form.Close(); $form.Dispose(); $form = $null }
         Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
@@ -240,5 +249,6 @@ catch {
 finally {
     try { if ($form -and -not $form.IsDisposed) { $form.Close(); $form.Dispose() } } catch {}
     if (Test-Path -LiteralPath $downloadPath) { Remove-Item -LiteralPath $downloadPath -Force -ErrorAction SilentlyContinue }
+    # The application removes its own ready/release handshake files after reveal.
 }
 exit
